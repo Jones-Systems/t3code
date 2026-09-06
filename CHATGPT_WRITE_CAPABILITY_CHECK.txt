@@ -1,0 +1,5 @@
+Disposable write-capability marker for the ChatGPT GitHub integration.
+
+Repository: Jones-Systems/t3code
+Purpose: verify branch and content write permissions before implementation work.
+This file exists only on chore/chatgpt-write-capability-check and is not intended for merge.
