@@ -116,7 +116,7 @@ export function normalizeConversationExport(input: readonly ExportConversation[]
     if (!conversation.current_node && nodes.length) warnings.push("The export does not identify its selected branch. Select a retained branch explicitly.");
     const unsupported = nodes.reduce((sum, node) => sum + node.unsupportedParts, 0);
     if (unsupported) warnings.push(`${unsupported} non-text parts are represented as unavailable, not downloaded or executed.`);
-    return { conversationId: id, title, sourceUpdatedAt: exportTime(conversation.update_time ?? conversation.create_time), currentNodeId, nodes, warnings };
+    return { conversationId: id, title, sourceUpdatedAt: exportTime(conversation.update_time), currentNodeId, nodes, warnings };
   });
 }
 

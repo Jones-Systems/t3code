@@ -105,9 +105,13 @@ export interface LibraryDetail {
   readonly conversation: LibrarySummary;
   readonly account: LibraryAccount;
   readonly snapshotId: string;
+  readonly snapshotSourceUpdatedAt: number | null;
+  readonly snapshotImportedAt: number;
+  readonly showHidden: boolean;
   readonly nodeId: string | null;
   readonly messages: readonly LibraryNode[];
   readonly totalMessages: number;
+  readonly readThrough: number;
   readonly offset: number;
   readonly previousOffset: number | null;
   readonly nextOffset: number | null;
@@ -131,4 +135,4 @@ export type LibraryReply =
   | { readonly kind: "updated"; readonly revision: number }
   | { readonly kind: "removed"; readonly revision: number };
 
-export type LibraryErrorCode = "invalid" | "too-large" | "not-found" | "conflict" | "unsupported" | "storage";
+export type LibraryErrorCode = "invalid" | "too-large" | "not-found" | "conflict" | "unsupported" | "storage" | "forbidden";
