@@ -1,0 +1,37 @@
+[
+  {
+    "path": "packages/client-runtime/package.json",
+    "mode": "100644",
+    "blob": "4c09ef96a2e12c7d6ad19aa1e5645dce36a958c7",
+    "bytes": 7113,
+    "sha256": "5c26f43a224d8f8b6d32608bf362aa4b958bfb7a51d6cd357be6ec297b998a25"
+  },
+  {
+    "path": "packages/client-runtime/src/conversations/index.ts",
+    "mode": "100644",
+    "blob": "41c7dbbcf3e1372b1b863f57830ab6acd103d276",
+    "bytes": 28,
+    "sha256": "e58c3337317b68e3daff04f37b0a1232a018af4344a28d5625cd54bddf48f37c"
+  },
+  {
+    "path": "packages/client-runtime/src/conversations/model.ts",
+    "mode": "100644",
+    "blob": "9c99af5ed1d9564fa2b25a5c16c5774ba5512b12",
+    "bytes": 15908,
+    "sha256": "325bb635303aaee049f2efd034293d52f041a6dbb0cde552d27adeb91a5148ff"
+  },
+  {
+    "path": "packages/client-runtime/src/conversations/model.cases.ts",
+    "mode": "100644",
+    "blob": "2fad074068e605d4fc38fb984a330b9d54c6ee62",
+    "bytes": 22153,
+    "sha256": "9ce08f20eff697973feb4fe3786bca656cae0d83fdafb201a69db3eb6e7cd19c"
+  },
+  {
+    "path": "packages/client-runtime/src/conversations/model.test.ts",
+    "mode": "100644",
+    "blob": "feb24bcb8c5b9d70cf5436f8971838a27ebb6a41",
+    "bytes": 245,
+    "sha256": "4e56fe0288a5bc40c4254e9fdbddcd3ff3739d4c33ce87cc7f55c2a6ed39a67e"
+  }
+]

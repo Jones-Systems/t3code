@@ -1,0 +1,46 @@
+{
+  "format": "chatgpt-level2-scratch/v1",
+  "repository": "Jones-Systems/t3code",
+  "repository_id": 1322539044,
+  "task_branch": "work/conversations-core",
+  "task_pr": 1,
+  "source_commit": "8904051fd3d28ba5c1be1858a6c5450d8c665269",
+  "source_tree": "e5723653e327d97545f2f0fbe3a77ffa60f13955",
+  "recovery_branch": "scratch/level-2/work/conversations-core",
+  "created_at": "2026-09-07T03:05:54.445176+00:00",
+  "owner": "GPT-6 Astra Pro / ChatGPT / one agent with sequential self-review",
+  "status": "Reader-model checkpoint published; core HTTP/React integration incomplete; CI queued without runners; three UI alternatives unpublished.",
+  "next_action": "Complete schema/authenticated HTTP/prepared-connection adapter/shared React core using the existing store and T3 runtime, qualify on pinned toolchain, then branch the three separate UI alternatives from the same verified core.",
+  "unknown_effects": [],
+  "unpublished_application_drafts": [],
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 857,
+      "sha256": "67f87322761129e62de9eb1dd8b1d88eb73eb8bb238ebc7d538d57f949c1adb7",
+      "purpose": "Recovery-only entry point and guardrails",
+      "verification": "authored locally; exact remote Git blob must match before locator publication"
+    },
+    {
+      "path": "continuation.md",
+      "bytes": 9773,
+      "sha256": "f232cfd53d2f77ba7ef5400642d00c59e6e50b5a8b1bdd0697414f2cc2504988",
+      "purpose": "Published state, closed self-review findings, integration map and next steps",
+      "verification": "authored locally; exact remote Git blob must match before locator publication"
+    },
+    {
+      "path": "checks.json",
+      "bytes": 3867,
+      "sha256": "a7b953755845a2561972be2327827af39f9dd8fdc20f8dcad4a5205062dfe29e",
+      "purpose": "Scoped verification, current queued CI and explicit unrun checks",
+      "verification": "authored locally; exact remote Git blob must match before locator publication"
+    },
+    {
+      "path": "publication-manifest.json",
+      "bytes": 1264,
+      "sha256": "ff1011902a255006bdf463a911c980edcdf058353e2a6eae3d39209136422085",
+      "purpose": "Verified published source blob IDs, byte counts and SHA-256 digests",
+      "verification": "authored locally; exact remote Git blob must match before locator publication"
+    }
+  ]
+}

@@ -1,0 +1,129 @@
+{
+  "source_commit": "8904051fd3d28ba5c1be1858a6c5450d8c665269",
+  "local_verification": {
+    "last_rechecked_at": "2026-09-07T03:04:32Z",
+    "reader_cases": {
+      "passed": 44,
+      "failed": 0,
+      "command": "node --experimental-strip-types out/run-reader.mjs",
+      "scope": "actual published model.cases.ts importing model.ts; scratch runner, not Vite+"
+    },
+    "typecheck": {
+      "result": "passed",
+      "command": "tsc -p out/tsconfig.reader.json",
+      "scope": [
+        "published conversationLibrary.ts",
+        "model.ts",
+        "model.cases.ts",
+        "index.ts"
+      ],
+      "strict": true,
+      "exactOptionalPropertyTypes": true,
+      "noUncheckedIndexedAccess": true,
+      "noUnusedLocals": true,
+      "noUnusedParameters": true,
+      "skipLibCheck": false
+    },
+    "package_export": {
+      "result": "passed",
+      "scope": "actual modified package manifest, partial workspace with real symlink; @t3tools/client-runtime/conversations resolves to exported class",
+      "note": "A repeat probe from the scratch parent lacked package resolution; rerunning in the partial workspace succeeded. Not a product failure."
+    },
+    "runtime": "Node 22.16.0",
+    "typescript": "5.8.3",
+    "node_declarations": "25.1.0",
+    "dependency_stubs": false,
+    "not_run": [
+      "pinned Node ^24.13.1 / pnpm 11.10.0 / Vite+ execution",
+      "Vite+ formatter/linter",
+      "full repository typecheck/build/test",
+      "HTTP and actual client integration tests (implementation missing)",
+      "shared React and responsive browser proving (implementation missing)",
+      "screenshots",
+      "native-client qualification",
+      "prior author store cases in this continuation"
+    ]
+  },
+  "ci": {
+    "quiet_window_seconds": 180,
+    "initial_observed_at": "2026-09-07T02:56:55Z",
+    "quiet_until": "2026-09-07T02:59:55Z",
+    "post_quiet_observation_after": "2026-09-07T03:01:31Z",
+    "run_id": 34077924921,
+    "head": "8904051fd3d28ba5c1be1858a6c5450d8c665269",
+    "status": "queued",
+    "conclusion": null,
+    "jobs_count": 8,
+    "all_runner_ids": 0,
+    "all_steps_empty": true,
+    "jobs": [
+      {
+        "name": "Rust",
+        "id": 101607561732
+      },
+      {
+        "name": "Test Server 3",
+        "id": 101607561788
+      },
+      {
+        "name": "Release Smoke",
+        "id": 101607561800
+      },
+      {
+        "name": "Test",
+        "id": 101607561812
+      },
+      {
+        "name": "Test Server 2",
+        "id": 101607561860
+      },
+      {
+        "name": "Check",
+        "id": 101607561873
+      },
+      {
+        "name": "Mobile Native Changes",
+        "id": 101607561892
+      },
+      {
+        "name": "Test Server 1",
+        "id": 101607561912
+      }
+    ],
+    "fingerprint": {
+      "run_id": 34077924908,
+      "job_id": 101607560791,
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "conclusion": null
+    },
+    "preview_runs": {
+      "34077924922": "skipped",
+      "34077924924": "skipped",
+      "34077924912": "skipped"
+    },
+    "runner_policy_changed": false,
+    "diagnosis": "No runner assigned or job steps executed; upstream access/availability cause unverified."
+  },
+  "review": {
+    "mode": "one agent sequential self-review",
+    "independent_approval": false,
+    "fresh_pr_discussion": "only prior storage checkpoint; no review submissions or inline findings"
+  },
+  "boundaries": {
+    "merge": false,
+    "deployment": false,
+    "vps_access": false,
+    "live_chatgpt_capture": false,
+    "source_chat_deletion": false,
+    "provider_authority_added": false
+  },
+  "workflow_trigger_audit": {
+    "tree": "dbeb09fa4acad57ff50b650216e1780ae2927230",
+    "files": 16,
+    "scratch_push_matches": false,
+    "create_event_found": false,
+    "scope": "trigger sections at source commit; no workflow changes or dispatches"
+  }
+}
