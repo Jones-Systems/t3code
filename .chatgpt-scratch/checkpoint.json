@@ -1,0 +1,30 @@
+{
+  "format": "chatgpt-level2-scratch/v1",
+  "repository": "Jones-Systems/t3code",
+  "repository_id": 1322539044,
+  "task_branch": "fix/goal-pause-on-stop",
+  "task_pr": 10447,
+  "source_commit": "54b359252440a17c59bee6dc77bbf9eaaeac407c",
+  "recovery_branch": "scratch/level-2/fix/goal-pause-on-stop",
+  "created_at": "2026-09-07T01:45:34.322923+00:00",
+  "owner": "ChatGPT / GPT-6 Astra Pro; single Level 2 agent",
+  "status": "Original published; rebased commit prepared, branch update pending; upstream CI action_required",
+  "next_action": "Verify original-preserving companion and candidate; publish requested rebase only after fresh head checks; obtain upstream workflow approval and qualify latest CI. Post-merge host work is described in post-merge-vps.md.",
+  "unknown_effects": [],
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 4243,
+      "sha256": "7c5cf2e3006748662a60ad9f337244db5c3a7900c9f842023f6a2c11bfb32eb2",
+      "purpose": "Task binding, original preservation, verification limits and PR continuation",
+      "verification_status": "authored and sequentially reviewed; operational actions not executed"
+    },
+    {
+      "path": "post-merge-vps.md",
+      "bytes": 4607,
+      "sha256": "aad02539c4c3b3ff58e8eec3139647fbacb1e944cbaab14e6c81bbe2881e10e6",
+      "purpose": "Full post-merge VPS-local installation and native Stop verification instructions",
+      "verification_status": "authored and sequentially reviewed; operational actions not executed"
+    }
+  ]
+}
