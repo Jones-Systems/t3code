@@ -14,7 +14,7 @@ import { ChevronDownIcon, ChevronUpIcon, GripVerticalIcon, MoreHorizontalIcon } 
 import { useEffect, useMemo, useState } from "react";
 
 import { runtime } from "../../lib/runtime";
-import { useWorkstreams } from "../../state/workstreams";
+import type { WorkstreamListView } from "../../state/workstreams";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -27,8 +27,8 @@ const commandId = () =>
     ),
   );
 
-export function WorkstreamSidebarSection() {
-  const { data, submit, loadDetail, loadReference } = useWorkstreams();
+export function WorkstreamSidebarSection(props: { readonly controller: WorkstreamListView }) {
+  const { data, submit, loadDetail, loadReference, refresh } = props.controller;
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [dragging, setDragging] = useState<string | null>(null);
@@ -128,6 +128,7 @@ export function WorkstreamSidebarSection() {
       }
     })().catch((cause: unknown) => {
       setCommandError(cause instanceof Error ? cause.message : "Workstream reorder failed.");
+      refresh();
     });
   };
 

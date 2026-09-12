@@ -39,10 +39,11 @@ vi.mock("../../state/workstreams", () => ({
 }));
 
 import { WorkstreamSidebarSection } from "./WorkstreamSidebarSection";
+import { useWorkstreams } from "../../state/workstreams";
 
 describe("mounted Workstream sidebar", () => {
   it("renders owner groups ahead of native content with menu and drag alternatives", () => {
-    const html = renderToStaticMarkup(<WorkstreamSidebarSection />);
+    const html = renderToStaticMarkup(<WorkstreamSidebarSection controller={useWorkstreams()} />);
     expect(html).toContain('aria-label="Owner Workstreams"');
     expect(html).toContain("Alpha");
     expect(html).toContain("Actions for Alpha");

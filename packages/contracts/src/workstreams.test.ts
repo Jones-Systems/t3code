@@ -74,21 +74,21 @@ describe("Workstream wire contract", () => {
         identity: {
           provider: "github",
           source_instance_id: "github-owner",
-          resource_kind: "pull-request",
+          resource_kind: "pull_request",
           id_kind: "external",
           native_id: "Jones-Systems/Codex-V3#42",
           account_provenance: { kind: "not_account_scoped" },
         },
         pr_locator: {
           host: "github.com",
-          repository_owner: "Jones-Systems",
-          repository_name: "Codex-V3",
+          repository_owner: "jones-systems",
+          repository_name: "codex-v3",
           number: 42,
         },
         registration: {
-          state: "attested",
-          attestation_version: 1,
-          attested_at: "2026-09-12T12:00:00Z",
+          state: "verification-pending",
+          attestation_version: 0,
+          attested_at: null,
           expires_at: null,
           evidence: null,
         },
@@ -97,15 +97,18 @@ describe("Workstream wire contract", () => {
         created_registry_version: 1,
       },
       latest_observation: {
+        native_reference_id: "reference-1",
         observation_version: 3,
         attempted_at: "2026-09-12T12:01:00Z",
         outcome: "observed",
+        retry_after_seconds: null,
         last_success: {
           state: "open",
           draft: true,
           observed_at: "2026-09-12T12:01:00Z",
           provider_updated_at: null,
         },
+        command_id: "command-refresh-0001",
       },
     } as const;
     expect(Schema.decodeUnknownSync(WorkstreamReferenceDetail)(fixture).latest_observation).toEqual(

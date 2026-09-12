@@ -53,7 +53,13 @@ it.effect("sends bounded signed HTTPS requests and runtime-decodes responses", (
           manifest_sha256: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
           context: { owner_id: "owner-fixture", server_generation: 7, registry_version: 11 },
           permissions: ["workstreams:read"],
+          max_request_bytes: 32_768,
+          max_response_bytes: 1_048_576,
+          max_json_depth: 10,
           max_page_items: 100,
+          max_pr_response_bytes: 262_144,
+          max_pr_request_seconds: 15,
+          cursor_ttl_seconds: 900,
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );

@@ -318,7 +318,9 @@ export function makeControlPlaneWorkstreamTransport(
             ),
         }),
       );
-      return yield* Schema.decodeEffect(Schema.fromJsonString(schema))(responseBody).pipe(
+      return yield* Schema.decodeEffect(Schema.fromJsonString(schema))(responseBody, {
+        onExcessProperty: "error",
+      }).pipe(
         Effect.mapError(
           (cause) =>
             new WorkstreamTransportError({

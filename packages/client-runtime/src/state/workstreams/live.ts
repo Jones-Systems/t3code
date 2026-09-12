@@ -57,6 +57,22 @@ export function appendWorkstreamDtoPage<Item>(
   };
 }
 
+export function appendWorkstreamListResult(
+  current: T3WorkstreamListResult,
+  next: T3WorkstreamListResult,
+): T3WorkstreamListResult {
+  if (bindingKey(current.binding) !== bindingKey(next.binding)) {
+    throw new Error("Workstream list binding changed during pagination.");
+  }
+  return {
+    ...current,
+    items: [...current.items, ...next.items],
+    nextCursor: next.nextCursor,
+    source: current.source === "live" && next.source === "live" ? "live" : "cache",
+    stale: current.stale || next.stale,
+  };
+}
+
 const bindingKey = (binding: T3WorkstreamBinding): string =>
   [
     binding.registryId,

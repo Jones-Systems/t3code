@@ -3,6 +3,7 @@ import type { T3WorkstreamBinding, T3WorkstreamMetadata } from "@t3tools/contrac
 
 import {
   appendWorkstreamDtoPage,
+  appendWorkstreamListResult,
   LiveWorkstreamMetadataCache,
   orderWorkstreamMetadata,
   planWorkstreamOwnerOrder,
@@ -76,5 +77,33 @@ describe("live Workstream DTO projection", () => {
     expect(cache.read(binding)?.items).toHaveLength(1);
     cache.purgeAuthorization();
     expect(cache.read(binding)).toBeNull();
+  });
+
+  it("merges cross-page owner lists without losing freshness or binding fences", () => {
+    const first = {
+      binding,
+      items: [item("z", 1)],
+      nextCursor: "page-2",
+      source: "live" as const,
+      stale: false,
+    };
+    const merged = appendWorkstreamListResult(first, {
+      ...first,
+      items: [item("a", 1)],
+      nextCursor: null,
+      source: "cache",
+      stale: true,
+    });
+    expect(orderWorkstreamMetadata(merged.items).map((value) => value.workstreamId)).toEqual([
+      "a",
+      "z",
+    ]);
+    expect(merged).toMatchObject({ nextCursor: null, source: "cache", stale: true });
+    expect(() =>
+      appendWorkstreamListResult(first, {
+        ...first,
+        binding: { ...binding, registryVersion: 12 },
+      }),
+    ).toThrow("binding changed");
   });
 });

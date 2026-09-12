@@ -13,6 +13,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   appendWorkstreamDtoPage,
+  appendWorkstreamListResult,
   LiveWorkstreamMetadataCache,
   orderWorkstreamMetadata,
   type WorkstreamDtoPage,
@@ -43,6 +44,19 @@ async function loadAllPages<Item>(
   return result;
 }
 
+export async function loadCompleteWorkstreamList(
+  load: (cursor?: string) => Promise<T3WorkstreamListResult>,
+): Promise<T3WorkstreamListResult> {
+  let result = await load();
+  const cursors = new Set<string>();
+  while (result.nextCursor !== null) {
+    if (cursors.has(result.nextCursor)) throw new Error("Workstream list cursor repeated.");
+    cursors.add(result.nextCursor);
+    result = appendWorkstreamListResult(result, await load(result.nextCursor));
+  }
+  return result;
+}
+
 export interface WorkstreamListView {
   readonly data: T3WorkstreamListResult | null;
   readonly error: string | null;
@@ -58,6 +72,10 @@ export interface WorkstreamListView {
     readonly references: WorkstreamReferencePage;
   }>;
   readonly loadReference: (nativeReferenceId: string) => Promise<WorkstreamReferenceDetail>;
+  readonly loadThreadMembershipIndex: () => Promise<{
+    readonly memberships: ReadonlyArray<WorkstreamMembershipPage["items"]>;
+    readonly references: WorkstreamReferencePage;
+  }>;
 }
 
 export function useWorkstreams(): WorkstreamListView {
@@ -71,7 +89,14 @@ export function useWorkstreams(): WorkstreamListView {
   useEffect(() => {
     const current = ++generation.current;
     setLoading(true);
-    void request((client) => client.workstreams.list({ headers: {}, payload: { limit: 50 } }))
+    void loadCompleteWorkstreamList((cursor) =>
+      request((client) =>
+        client.workstreams.list({
+          headers: {},
+          payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+        }),
+      ),
+    )
       .then((value) => {
         if (generation.current !== current) return;
         const normalized = { ...value, items: [...orderWorkstreamMetadata(value.items)] };
@@ -214,5 +239,54 @@ export function useWorkstreams(): WorkstreamListView {
     }
   }, []);
 
-  return { data, error, loading, refresh, submit, loadDetail, loadReference };
+  const loadThreadMembershipIndex = useCallback(async () => {
+    if (!data) throw new Error("Workstream metadata is not loaded.");
+    try {
+      const references = await loadAllPages((cursor) =>
+        request((client) =>
+          client.workstreams.references({
+            headers: {},
+            payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+          }),
+        ),
+      );
+      const memberships: WorkstreamMembershipPage["items"][] = [];
+      // Sequential reads bound concurrency while still resolving cross-page owner ordering.
+      for (const workstream of data.items) {
+        const page = await loadAllPages((cursor) =>
+          request((client) =>
+            client.workstreams.memberships({
+              headers: {},
+              params: { workstreamId: workstream.workstreamId },
+              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+            }),
+          ),
+        );
+        if (
+          page.context.owner_id !== references.context.owner_id ||
+          page.context.server_generation !== references.context.server_generation ||
+          page.context.registry_version !== references.context.registry_version
+        ) {
+          throw new Error("Workstream memberships changed while grouping threads; reload them.");
+        }
+        memberships.push(page.items);
+      }
+      return { memberships, references };
+    } catch (cause) {
+      metadataCache.purgeAuthorization();
+      setData(null);
+      throw cause;
+    }
+  }, [data]);
+
+  return {
+    data,
+    error,
+    loading,
+    refresh,
+    submit,
+    loadDetail,
+    loadReference,
+    loadThreadMembershipIndex,
+  };
 }

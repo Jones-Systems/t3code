@@ -83,7 +83,13 @@ export const makeSyntheticWorkstreamTransport = (
         manifest_sha256: options.manifestSha256 ?? WORKSTREAM_CONTRACT_MANIFEST_SHA256,
         context,
         permissions: options.permissions ?? ["workstreams:read", "workstreams:write"],
+        max_request_bytes: 32_768,
+        max_response_bytes: 1_048_576,
+        max_json_depth: 10,
         max_page_items: 100,
+        max_pr_response_bytes: 262_144,
+        max_pr_request_seconds: 15,
+        cursor_ttl_seconds: 900,
       } satisfies WorkstreamCapabilities);
     },
     listWorkstreams: ({ limit, cursor }) => {

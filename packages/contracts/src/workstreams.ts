@@ -8,6 +8,47 @@ export const WORKSTREAM_CONTRACT_MANIFEST_SHA256 =
 export const WORKSTREAM_MAX_PAGE_ITEMS = 100;
 export const WORKSTREAM_MAX_RESPONSE_BYTES = 1_048_576;
 
+const Id = Schema.String.check(
+  Schema.isMaxLength(128),
+  Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/),
+);
+const CommandId = Schema.String.check(
+  Schema.isMinLength(16),
+  Schema.isMaxLength(128),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/),
+);
+const Timestamp = Schema.String.check(
+  Schema.isMaxLength(27),
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/),
+);
+const Version = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+);
+const PositiveVersion = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+);
+const Name = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(160),
+  Schema.isPattern(/\S/),
+);
+const DeclarationText = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(4096),
+  Schema.isPattern(/\S/),
+);
+const NativeId = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(512),
+  Schema.isPattern(/^[^\u0000-\u001f\u007f]+$/),
+);
+const Cursor = Schema.String.check(
+  Schema.isMaxLength(512),
+  Schema.isPattern(/^[A-Za-z0-9_-]{1,512}$/),
+);
+
 export const WorkstreamLifecycle = Schema.Literals([
   "planned",
   "active",
@@ -20,8 +61,8 @@ export type WorkstreamLifecycle = typeof WorkstreamLifecycle.Type;
 
 export const WorkstreamProgress = Schema.Union([
   Schema.Struct({ state: Schema.Literals(["progressing", "unknown", "stale"]) }),
-  Schema.Struct({ state: Schema.Literal("waiting"), condition: Schema.String }),
-  Schema.Struct({ state: Schema.Literal("blocked"), impediment: Schema.String }),
+  Schema.Struct({ state: Schema.Literal("waiting"), condition: DeclarationText }),
+  Schema.Struct({ state: Schema.Literal("blocked"), impediment: DeclarationText }),
 ]);
 export type WorkstreamProgress = typeof WorkstreamProgress.Type;
 
@@ -49,28 +90,28 @@ export const WorkstreamFreshness = Schema.Literals([
 ]);
 export type WorkstreamFreshness = typeof WorkstreamFreshness.Type;
 
-export const WorkstreamActor = Schema.Struct({ principal_id: Schema.String });
+export const WorkstreamActor = Schema.Struct({ principal_id: Id });
 export type WorkstreamActor = typeof WorkstreamActor.Type;
 
 export const WorkstreamReadContext = Schema.Struct({
-  owner_id: Schema.String,
-  server_generation: Schema.Number,
-  registry_version: Schema.Number,
+  owner_id: Id,
+  server_generation: PositiveVersion,
+  registry_version: Version,
 });
 export type WorkstreamReadContext = typeof WorkstreamReadContext.Type;
 
 export const Workstream = Schema.Struct({
-  workstream_id: Schema.String,
-  owner_id: Schema.String,
-  name: Schema.String,
+  workstream_id: Id,
+  owner_id: Id,
+  name: Name,
   lifecycle: WorkstreamLifecycle,
   progress: WorkstreamProgress,
   delivery: WorkstreamDelivery,
   freshness: WorkstreamFreshness,
-  sort_order: Schema.Number,
-  version: Schema.Number,
-  created_at: Schema.String,
-  updated_at: Schema.String,
+  sort_order: Version.check(Schema.isLessThanOrEqualTo(2_147_483_647)),
+  version: PositiveVersion,
+  created_at: Timestamp,
+  updated_at: Timestamp,
   created_by: WorkstreamActor,
   updated_by: WorkstreamActor,
 });
@@ -79,17 +120,23 @@ export type Workstream = typeof Workstream.Type;
 export const AccountProvenance = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("account"),
-    account_id: Schema.String,
-    account_namespace: Schema.String,
+    account_id: Id,
+    account_namespace: NativeId,
   }),
   Schema.Struct({ kind: Schema.Literal("not_account_scoped") }),
 ]);
 
 export const WorkstreamPrLocator = Schema.Struct({
   host: Schema.Literal("github.com"),
-  repository_owner: Schema.String,
-  repository_name: Schema.String,
-  number: Schema.Number,
+  repository_owner: Schema.String.check(
+    Schema.isMaxLength(39),
+    Schema.isPattern(/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/),
+  ),
+  repository_name: Schema.String.check(
+    Schema.isMaxLength(100),
+    Schema.isPattern(/^[a-z0-9._-]{1,100}$/),
+  ),
+  number: PositiveVersion.check(Schema.isLessThanOrEqualTo(2_147_483_647)),
 });
 export type WorkstreamPrLocator = typeof WorkstreamPrLocator.Type;
 
@@ -111,48 +158,69 @@ export function canonicalGitHubPullRequestUrl(locator: WorkstreamPrLocator): str
   return `https://github.com/${locator.repository_owner}/${locator.repository_name}/pull/${locator.number}`;
 }
 
+export const WorkstreamNativeIdentity = Schema.Struct({
+  provider: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,62}$/)),
+  source_instance_id: Id,
+  resource_kind: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_]{0,62}$/)),
+  id_kind: Schema.Literals(["internal", "external"]),
+  native_id: NativeId,
+  account_provenance: AccountProvenance,
+});
+export const WorkstreamRegistrationVerification = Schema.Struct({
+  state: Schema.Literals([
+    "quarantined",
+    "verification-pending",
+    "attested",
+    "verification-failed",
+    "expired",
+    "re-attestation-required",
+  ]),
+  attestation_version: Version,
+  attested_at: Schema.NullOr(Timestamp),
+  expires_at: Schema.NullOr(Timestamp),
+  evidence: Schema.NullOr(
+    Schema.Struct({
+      provider: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,62}$/)),
+      source_instance_id: Id,
+      authority_namespace: NativeId,
+      native_id: NativeId,
+      store_generation: PositiveVersion,
+      evidence_sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+    }),
+  ),
+}).check(
+  Schema.makeFilter(
+    (value) =>
+      value.state !== "attested" ||
+      (value.attestation_version > 0 &&
+        value.attested_at !== null &&
+        value.expires_at !== null &&
+        value.evidence !== null) ||
+      "Attested references require positive version, timestamps, and immutable evidence.",
+  ),
+);
 export const NativeReference = Schema.Struct({
-  native_reference_id: Schema.String,
-  owner_id: Schema.String,
-  identity: Schema.Struct({
-    provider: Schema.String,
-    source_instance_id: Schema.String,
-    resource_kind: Schema.String,
-    id_kind: Schema.Literals(["internal", "external"]),
-    native_id: Schema.String,
-    account_provenance: AccountProvenance,
-  }),
+  native_reference_id: Id,
+  owner_id: Id,
+  identity: WorkstreamNativeIdentity,
   pr_locator: Schema.NullOr(WorkstreamPrLocator),
-  registration: Schema.Struct({
-    state: Schema.Literals([
-      "quarantined",
-      "verification-pending",
-      "attested",
-      "verification-failed",
-      "expired",
-      "re-attestation-required",
-    ]),
-    attestation_version: Schema.Number,
-    attested_at: Schema.NullOr(Schema.String),
-    expires_at: Schema.NullOr(Schema.String),
-    evidence: Schema.NullOr(Schema.Unknown),
-  }),
-  created_at: Schema.String,
+  registration: WorkstreamRegistrationVerification,
+  created_at: Timestamp,
   created_by: WorkstreamActor,
-  created_registry_version: Schema.Number,
+  created_registry_version: Version,
 });
 export type NativeReference = typeof NativeReference.Type;
 
 const EpisodeBoundary = Schema.Struct({
-  at: Schema.String,
+  at: Timestamp,
   actor: WorkstreamActor,
-  command_id: Schema.String,
-  registry_version: Schema.Number,
+  command_id: CommandId,
+  registry_version: Version,
 });
 export const MembershipEpisode = Schema.Struct({
-  membership_id: Schema.String,
-  workstream_id: Schema.String,
-  native_reference_id: Schema.String,
+  membership_id: Id,
+  workstream_id: Id,
+  native_reference_id: Id,
   kind: Schema.Literals(["primary", "secondary"]),
   opened: EpisodeBoundary,
   closed: Schema.NullOr(
@@ -168,29 +236,29 @@ export const MembershipEpisode = Schema.Struct({
         "abandoned",
         "other",
       ]),
-      other_reason: Schema.NullOr(Schema.String),
+      other_reason: Schema.NullOr(Schema.String.check(Schema.isMaxLength(512))),
     }),
   ),
 });
 export type MembershipEpisode = typeof MembershipEpisode.Type;
 
 export const DeclarationRevision = Schema.Struct({
-  declaration_id: Schema.String,
-  workstream_id: Schema.String,
-  revision: Schema.Number,
-  text: Schema.String,
+  declaration_id: Id,
+  workstream_id: Id,
+  revision: PositiveVersion,
+  text: DeclarationText,
   state: Schema.Literals(["active", "withdrawn"]),
-  recorded_at: Schema.String,
+  recorded_at: Timestamp,
   actor: WorkstreamActor,
-  command_id: Schema.String,
-  registry_version: Schema.Number,
+  command_id: CommandId,
+  registry_version: Version,
 });
 export type DeclarationRevision = typeof DeclarationRevision.Type;
 
 export const WorkstreamEdge = Schema.Struct({
-  edge_id: Schema.String,
-  from_workstream_id: Schema.String,
-  to_workstream_id: Schema.String,
+  edge_id: Id,
+  from_workstream_id: Id,
+  to_workstream_id: Id,
   relation: Schema.Literals(["continues_as", "superseded_by"]),
   opened: EpisodeBoundary,
   closed: Schema.NullOr(EpisodeBoundary),
@@ -198,17 +266,27 @@ export const WorkstreamEdge = Schema.Struct({
 export type WorkstreamEdge = typeof WorkstreamEdge.Type;
 
 export const WorkstreamLifecycleDeclaration = Schema.Struct({
-  lifecycle_declaration_id: Schema.String,
-  workstream_id: Schema.String,
-  revision: Schema.Number,
+  lifecycle_declaration_id: Id,
+  workstream_id: Id,
+  revision: PositiveVersion,
   prior_lifecycle: Schema.NullOr(WorkstreamLifecycle),
   new_lifecycle: WorkstreamLifecycle,
-  recorded_at: Schema.String,
+  recorded_at: Timestamp,
   actor: WorkstreamActor,
-  command_id: Schema.String,
-  supersedes_lifecycle_declaration_id: Schema.NullOr(Schema.String),
-  registry_version: Schema.Number,
-});
+  command_id: CommandId,
+  supersedes_lifecycle_declaration_id: Schema.NullOr(Id),
+  registry_version: PositiveVersion,
+}).check(
+  Schema.makeFilter(
+    (value) =>
+      value.prior_lifecycle === null ||
+      !(["completed", "abandoned"] as const).includes(
+        value.prior_lifecycle as "completed" | "abandoned",
+      ) ||
+      value.supersedes_lifecycle_declaration_id !== null ||
+      "Reopening a terminal lifecycle requires the superseded declaration.",
+  ),
+);
 
 export const WorkstreamOperation = Schema.Literals([
   "create_workstream",
@@ -232,19 +310,19 @@ export type WorkstreamOperation = typeof WorkstreamOperation.Type;
 
 const CreateWorkstreamAction = Schema.Struct({
   operation: Schema.Literal("create_workstream"),
-  name: Schema.String,
+  name: Name,
   lifecycle: WorkstreamLifecycle,
   progress: WorkstreamProgress,
-  sort_order: Schema.Number,
+  sort_order: Version.check(Schema.isLessThanOrEqualTo(2_147_483_647)),
 });
 const UpdateWorkstreamAction = Schema.Struct({
   operation: Schema.Literal("update_workstream"),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  name: Schema.String,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  name: Name,
   lifecycle: WorkstreamLifecycle,
   progress: WorkstreamProgress,
-  sort_order: Schema.Number,
+  sort_order: Version.check(Schema.isLessThanOrEqualTo(2_147_483_647)),
 });
 const RegisterReferenceAction = Schema.Struct({
   operation: Schema.Literal("register_reference"),
@@ -253,40 +331,40 @@ const RegisterReferenceAction = Schema.Struct({
 });
 const VerifyReferenceAction = Schema.Struct({
   operation: Schema.Literal("verify_reference"),
-  native_reference_id: Schema.String,
-  expected_attestation_version: Schema.Number,
+  native_reference_id: Id,
+  expected_attestation_version: Version,
 });
 const AttachPrimaryAction = Schema.Struct({
   operation: Schema.Literals(["attach_primary", "reattach_primary"]),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  native_reference_id: Schema.String,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  native_reference_id: Id,
 });
 const LinkSecondaryAction = Schema.Struct({
   operation: Schema.Literal("link_secondary"),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  native_reference_id: Schema.String,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  native_reference_id: Id,
 });
 const RemoveMembershipAction = Schema.Struct({
   operation: Schema.Literal("remove_membership"),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  membership_id: Schema.String,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  membership_id: Id,
 });
 const MovePrimaryAction = Schema.Struct({
   operation: Schema.Literal("move_primary"),
-  source_workstream_id: Schema.String,
-  expected_source_version: Schema.Number,
-  source_membership_id: Schema.String,
-  destination_workstream_id: Schema.String,
-  expected_destination_version: Schema.Number,
+  source_workstream_id: Id,
+  expected_source_version: PositiveVersion,
+  source_membership_id: Id,
+  destination_workstream_id: Id,
+  expected_destination_version: PositiveVersion,
 });
 const SetDispositionAction = Schema.Struct({
   operation: Schema.Literal("set_coordination_disposition"),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  membership_id: Schema.String,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  membership_id: Id,
   disposition: Schema.Literals([
     "completed",
     "completed-and-delivery-verified",
@@ -296,51 +374,51 @@ const SetDispositionAction = Schema.Struct({
     "abandoned",
     "other",
   ]),
-  other_disposition: Schema.NullOr(Schema.String),
+  other_disposition: Schema.NullOr(Schema.String.check(Schema.isMaxLength(512))),
 });
 const NativeSettlementAction = Schema.Struct({
   operation: Schema.Literal("request_native_t3_settlement"),
-  native_reference_id: Schema.String,
-  expected_attestation_version: Schema.Number,
+  native_reference_id: Id,
+  expected_attestation_version: Version,
   native_action: Schema.Literals(["settle", "unsettle"]),
 });
 const SetDeclarationAction = Schema.Struct({
   operation: Schema.Literal("set_declaration"),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  declaration_id: Schema.NullOr(Schema.String),
-  expected_revision: Schema.Number,
-  text: Schema.String,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  declaration_id: Schema.NullOr(Id),
+  expected_revision: Version,
+  text: DeclarationText,
 });
 const WithdrawDeclarationAction = Schema.Struct({
   operation: Schema.Literal("withdraw_declaration"),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  declaration_id: Schema.String,
-  expected_revision: Schema.Number,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  declaration_id: Id,
+  expected_revision: PositiveVersion,
 });
 const AddEdgeAction = Schema.Struct({
   operation: Schema.Literal("add_edge"),
-  from_workstream_id: Schema.String,
-  expected_from_version: Schema.Number,
-  to_workstream_id: Schema.String,
-  expected_to_version: Schema.Number,
+  from_workstream_id: Id,
+  expected_from_version: PositiveVersion,
+  to_workstream_id: Id,
+  expected_to_version: PositiveVersion,
   relation: Schema.Literals(["continues_as", "superseded_by"]),
 });
 const RemoveEdgeAction = Schema.Struct({
   operation: Schema.Literal("remove_edge"),
-  edge_id: Schema.String,
-  from_workstream_id: Schema.String,
-  expected_from_version: Schema.Number,
-  to_workstream_id: Schema.String,
-  expected_to_version: Schema.Number,
+  edge_id: Id,
+  from_workstream_id: Id,
+  expected_from_version: PositiveVersion,
+  to_workstream_id: Id,
+  expected_to_version: PositiveVersion,
 });
 const RefreshLinkedPrAction = Schema.Struct({
   operation: Schema.Literal("refresh_linked_pr"),
-  workstream_id: Schema.String,
-  expected_version: Schema.Number,
-  membership_id: Schema.String,
-  expected_observation_version: Schema.Number,
+  workstream_id: Id,
+  expected_version: PositiveVersion,
+  membership_id: Id,
+  expected_observation_version: Version,
 });
 export const WorkstreamAction = Schema.Union([
   CreateWorkstreamAction,
@@ -360,22 +438,57 @@ export const WorkstreamAction = Schema.Union([
   RefreshLinkedPrAction,
 ]);
 export const WorkstreamCommand = Schema.Struct({
-  command_id: Schema.String,
-  expected_server_generation: Schema.Number,
-  expected_registry_version: Schema.Number,
+  command_id: CommandId,
+  expected_server_generation: PositiveVersion,
+  expected_registry_version: Version,
   action: WorkstreamAction,
 });
 export type WorkstreamCommand = typeof WorkstreamCommand.Type;
 
 const ReceiptBase = {
-  command_id: Schema.String,
-  owner_id: Schema.String,
+  command_id: CommandId,
+  owner_id: Id,
   actor: WorkstreamActor,
   operation: WorkstreamOperation,
-  request_sha256: Schema.String,
-  server_generation: Schema.Number,
-  accepted_at: Schema.String,
+  request_sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  server_generation: PositiveVersion,
+  accepted_at: Timestamp,
 };
+export const WorkstreamError = Schema.Struct({
+  code: Schema.Literals([
+    "unauthorized",
+    "forbidden",
+    "not_found",
+    "invalid_request",
+    "contract_mismatch",
+    "version_conflict",
+    "generation_conflict",
+    "identity_conflict",
+    "membership_conflict",
+    "relationship_conflict",
+    "cycle_conflict",
+    "idempotency_conflict",
+    "cursor_invalid",
+    "cursor_stale",
+    "payload_too_large",
+    "unsupported_media_type",
+    "backpressure",
+    "provider_unconfigured",
+    "unavailable",
+    "unknown_effect",
+  ]),
+  status: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 400, maximum: 599 })),
+  request_id: Id,
+  recovery: Schema.Literals([
+    "stop",
+    "correct_request",
+    "reload",
+    "reconcile",
+    "restart_page",
+    "retry_after",
+  ]),
+  retry_after_seconds: Schema.optionalKey(PositiveVersion.check(Schema.isLessThanOrEqualTo(3600))),
+});
 const WorkstreamReceiptEffects = Schema.Struct({
   workstream_versions: Schema.Array(
     Schema.Struct({ workstream_id: Schema.String, version: Schema.Number }),
@@ -403,21 +516,21 @@ export const WorkstreamReceipt = Schema.Union([
   Schema.Struct({
     ...ReceiptBase,
     state: Schema.Literal("committed"),
-    completed_at: Schema.String,
-    registry_version: Schema.Number,
+    completed_at: Timestamp,
+    registry_version: Version,
     changed: Schema.Boolean,
     effects: WorkstreamReceiptEffects,
   }),
   Schema.Struct({
     ...ReceiptBase,
     state: Schema.Literals(["pending", "unresolved"]),
-    retry_after_seconds: Schema.Number,
+    retry_after_seconds: PositiveVersion.check(Schema.isLessThanOrEqualTo(3600)),
   }),
   Schema.Struct({
     ...ReceiptBase,
     state: Schema.Literal("rejected"),
-    completed_at: Schema.String,
-    error: Schema.Struct({ code: Schema.String }),
+    completed_at: Timestamp,
+    error: WorkstreamError,
   }),
 ]);
 export type WorkstreamReceipt = typeof WorkstreamReceipt.Type;
@@ -425,16 +538,16 @@ export type WorkstreamReceipt = typeof WorkstreamReceipt.Type;
 export const WorkstreamCapabilities = Schema.Struct({
   contract_family: Schema.Literal(WORKSTREAM_CONTRACT_FAMILY),
   contract_version: Schema.Literal(WORKSTREAM_CONTRACT_VERSION),
-  manifest_sha256: Schema.String,
+  manifest_sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
   context: WorkstreamReadContext,
   permissions: Schema.Array(Schema.Literals(["workstreams:read", "workstreams:write"])),
-  max_request_bytes: Schema.optional(Schema.Number),
-  max_response_bytes: Schema.optional(Schema.Number),
-  max_json_depth: Schema.optional(Schema.Number),
-  max_page_items: Schema.Number,
-  max_pr_response_bytes: Schema.optional(Schema.Number),
-  max_pr_request_seconds: Schema.optional(Schema.Number),
-  cursor_ttl_seconds: Schema.optional(Schema.Number),
+  max_request_bytes: Schema.Literal(32_768),
+  max_response_bytes: Schema.Literal(1_048_576),
+  max_json_depth: Schema.Literal(10),
+  max_page_items: Schema.Literal(100),
+  max_pr_response_bytes: Schema.Literal(262_144),
+  max_pr_request_seconds: Schema.Literal(15),
+  cursor_ttl_seconds: Schema.Literal(900),
 });
 export type WorkstreamCapabilities = typeof WorkstreamCapabilities.Type;
 
@@ -442,7 +555,7 @@ const page = <Item extends Schema.Top>(item: Item) =>
   Schema.Struct({
     context: WorkstreamReadContext,
     items: Schema.Array(item),
-    next_cursor: Schema.NullOr(Schema.String),
+    next_cursor: Schema.NullOr(Cursor),
   });
 export const WorkstreamPage = page(Workstream);
 export const WorkstreamReferencePage = page(NativeReference);
@@ -481,31 +594,33 @@ export const WorkstreamDetail = Schema.Struct({
   workstream: Workstream,
 });
 export type WorkstreamDetail = typeof WorkstreamDetail.Type;
+export const WorkstreamPrObservation = Schema.Struct({
+  native_reference_id: Id,
+  observation_version: PositiveVersion,
+  attempted_at: Timestamp,
+  outcome: Schema.Literals([
+    "observed",
+    "not_modified",
+    "inaccessible",
+    "rate_limited",
+    "unavailable",
+    "invalid_response",
+  ]),
+  retry_after_seconds: Schema.NullOr(PositiveVersion.check(Schema.isLessThanOrEqualTo(3600))),
+  last_success: Schema.NullOr(
+    Schema.Struct({
+      state: Schema.Literals(["open", "closed", "merged"]),
+      draft: Schema.Boolean,
+      observed_at: Timestamp,
+      provider_updated_at: Schema.NullOr(Timestamp),
+    }),
+  ),
+  command_id: CommandId,
+});
 export const WorkstreamReferenceDetail = Schema.Struct({
   context: WorkstreamReadContext,
   reference: NativeReference,
-  latest_observation: Schema.NullOr(
-    Schema.Struct({
-      observation_version: Schema.Number,
-      attempted_at: Schema.String,
-      outcome: Schema.Literals([
-        "observed",
-        "not_modified",
-        "inaccessible",
-        "rate_limited",
-        "unavailable",
-        "invalid_response",
-      ]),
-      last_success: Schema.NullOr(
-        Schema.Struct({
-          state: Schema.Literals(["open", "closed", "merged"]),
-          draft: Schema.Boolean,
-          observed_at: Schema.String,
-          provider_updated_at: Schema.NullOr(Schema.String),
-        }),
-      ),
-    }),
-  ),
+  latest_observation: Schema.NullOr(WorkstreamPrObservation),
 });
 export type WorkstreamReferenceDetail = typeof WorkstreamReferenceDetail.Type;
 
@@ -555,7 +670,7 @@ export const T3WorkstreamListQuery = {
   limit: Schema.optional(
     Schema.FiniteFromString.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 100 })),
   ),
-  cursor: Schema.optional(Schema.String),
+  cursor: Schema.optional(Cursor),
 };
 
 export const T3WorkstreamCommandRequest = Schema.Struct({ command: WorkstreamCommand });
