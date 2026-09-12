@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import {
   makeControlPlaneWorkstreamTransport,
+  signWorkstreamRequest,
   type WorkstreamFetch,
 } from "./ControlPlaneWorkstreamTransport.ts";
 
@@ -22,6 +23,23 @@ const activation = {
     signingSecret: "test-secret-not-production",
   },
 } as const;
+
+it("matches the accepted workstreams/1.0.0 HMAC vector", () => {
+  expect(
+    signWorkstreamRequest({
+      requestId: "request-0001",
+      idempotencyKey: "command-0001",
+      sentAt: "2026-09-12T12:34:56.000Z",
+      nonce: "nonce-0001",
+      principalId: "principal-0001",
+      keyId: "key-0001",
+      method: "POST",
+      target: "/workstreams/v1/commands",
+      contentSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      signingSecret: "vector-secret",
+    }),
+  ).toBe("qt-9bXKflLjem1fKDvUj3b2fBUTToy9veOoC9oODFm4");
+});
 
 it.effect("sends bounded signed HTTPS requests and runtime-decodes responses", () =>
   Effect.gen(function* () {
@@ -108,5 +126,65 @@ it.effect("disables non-HTTPS and header-unsafe activation before transport", ()
     expect(unavailable.effect).toBe("no-effect");
     expect(configured.binding.authorizationRevision).toBe(0);
     expect(requests).toBe(0);
+  }),
+);
+
+it.effect("cancels a chunked response as soon as it crosses the byte bound", () =>
+  Effect.gen(function* () {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(700_000));
+        controller.enqueue(new Uint8Array(400_000));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const configured = makeControlPlaneWorkstreamTransport(
+      activation,
+      async () => new Response(stream, { headers: { "content-type": "application/json" } }),
+    );
+    const failure = yield* configured.transport
+      .getCapabilities({
+        contractVersion: "workstreams/1.0.0",
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      })
+      .pipe(Effect.flip);
+
+    expect(failure.detail).toBe("response_too_large");
+    expect(cancelled).toBe(true);
+  }),
+);
+
+it.effect("does not expose transport or decoder causes", () =>
+  Effect.gen(function* () {
+    const privateMarker = "PRIVATE-MARKER-MUST-NOT-ESCAPE";
+    const network = makeControlPlaneWorkstreamTransport(activation, async () => {
+      throw new Error(privateMarker);
+    });
+    const networkFailure = yield* network.transport
+      .getCapabilities({
+        contractVersion: "workstreams/1.0.0",
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      })
+      .pipe(Effect.flip);
+    expect(networkFailure.detail).toBe("transport_unavailable");
+    expect(networkFailure.cause).toBeUndefined();
+
+    const decoder = makeControlPlaneWorkstreamTransport(
+      activation,
+      async () => new Response(`{"private":"${privateMarker}"}`),
+    );
+    const decoderFailure = yield* decoder.transport
+      .getCapabilities({
+        contractVersion: "workstreams/1.0.0",
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      })
+      .pipe(Effect.flip);
+    expect(decoderFailure.detail).toBe(
+      "Control-plane returned invalid JSON for the accepted contract.",
+    );
+    expect(decoderFailure.cause).toBeUndefined();
   }),
 );

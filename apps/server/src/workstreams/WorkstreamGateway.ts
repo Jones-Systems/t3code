@@ -180,7 +180,6 @@ const transportFailure = (error: WorkstreamTransportError) =>
   new WorkstreamGatewayError({
     reason: error.effect === "unknown-effect" ? "unknown-effect" : "offline",
     detail: error.detail,
-    cause: error,
   });
 
 function pageInput(input: { readonly limit?: number; readonly cursor?: string } = {}): PageInput {

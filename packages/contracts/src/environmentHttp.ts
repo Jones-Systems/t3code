@@ -60,11 +60,14 @@ import {
   T3WorkstreamListQuery,
   T3WorkstreamListResult,
   T3WorkstreamPageQuery,
+  T3WorkstreamReferenceParams,
   WorkstreamDeclarationPage,
   WorkstreamDetail,
   WorkstreamEdgePage,
   WorkstreamHistoryPage,
   WorkstreamMembershipPage,
+  WorkstreamReferenceDetail,
+  WorkstreamReferencePage,
   WorkstreamReceipt,
 } from "./workstreams.ts";
 
@@ -573,6 +576,22 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       payload: T3WorkstreamListQuery,
       success: T3WorkstreamListResult,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("references", "/api/workstreams/references", {
+      headers: OptionalBearerHeaders,
+      payload: T3WorkstreamPageQuery,
+      success: WorkstreamReferencePage,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("reference", "/api/workstreams/references/:nativeReferenceId", {
+      headers: OptionalBearerHeaders,
+      params: T3WorkstreamReferenceParams,
+      success: WorkstreamReferenceDetail,
       error: EnvironmentOrchestrationSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 
 import {
   WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+  WORKSTREAM_CONTRACT_HEADER_VERSION,
   WORKSTREAM_CONTRACT_VERSION,
   WORKSTREAM_MAX_RESPONSE_BYTES,
   WorkstreamCapabilities,
@@ -24,6 +25,15 @@ import { WorkstreamTransportError, type WorkstreamTransport } from "./Workstream
 
 const EMPTY_SHA256 = createHash("sha256").update("").digest("hex");
 const TIMEOUT_MS = 15_000;
+
+class BoundedTransportFailure extends Error {
+  readonly reason: "invalid_target" | "response_too_large" | "http_error";
+
+  constructor(reason: "invalid_target" | "response_too_large" | "http_error") {
+    super(reason);
+    this.reason = reason;
+  }
+}
 
 export interface ControlPlaneWorkstreamActivation {
   readonly baseUrl: URL;
@@ -128,6 +138,66 @@ function query(input: { readonly limit: number; readonly cursor?: string }): str
   return value.toString();
 }
 
+export function signWorkstreamRequest(input: {
+  readonly requestId: string;
+  readonly idempotencyKey?: string;
+  readonly sentAt: string;
+  readonly nonce: string;
+  readonly principalId: string;
+  readonly keyId: string;
+  readonly method: "GET" | "POST";
+  readonly target: string;
+  readonly contentSha256: string;
+  readonly signingSecret: string;
+}): string {
+  const canonical = [
+    "hmac-sha256-v1",
+    WORKSTREAM_CONTRACT_HEADER_VERSION,
+    input.requestId,
+    input.idempotencyKey ?? "",
+    input.sentAt,
+    input.nonce,
+    input.principalId,
+    input.keyId,
+    input.method,
+    input.target,
+    input.contentSha256,
+  ].join("\n");
+  return createHmac("sha256", input.signingSecret).update(canonical).digest("base64url");
+}
+
+async function readBoundedResponse(response: Response): Promise<string> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && Number(declared) > WORKSTREAM_MAX_RESPONSE_BYTES) {
+    await response.body?.cancel();
+    throw new BoundedTransportFailure("response_too_large");
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new BoundedTransportFailure("http_error");
+  }
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let total = 0;
+  let body = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      total += chunk.value.byteLength;
+      if (total > WORKSTREAM_MAX_RESPONSE_BYTES) {
+        throw new BoundedTransportFailure("response_too_large");
+      }
+      body += decoder.decode(chunk.value, { stream: true });
+    }
+    return body + decoder.decode();
+  } catch (cause) {
+    await reader.cancel().catch(() => undefined);
+    throw cause;
+  }
+}
+
 async function performRequest(input: {
   readonly fetch: WorkstreamFetch;
   readonly config: ControlPlaneWorkstreamActivation;
@@ -143,27 +213,23 @@ async function performRequest(input: {
     input.target.includes("#") ||
     /[\r\n]/.test(input.target)
   )
-    throw new Error("invalid_target");
+    throw new BoundedTransportFailure("invalid_target");
   const requestId = randomUUID();
   const nonce = randomBytes(24).toString("base64url");
   const contentSha256 =
     input.body === "" ? EMPTY_SHA256 : createHash("sha256").update(input.body).digest("hex");
-  const canonical = [
-    "hmac-sha256-v1",
-    WORKSTREAM_CONTRACT_VERSION,
+  const signature = signWorkstreamRequest({
     requestId,
-    input.idempotencyKey ?? "",
-    input.sentAt,
+    ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+    sentAt: input.sentAt,
     nonce,
-    input.config.principalId,
-    input.config.keyId,
-    input.method,
-    input.target,
+    principalId: input.config.principalId,
+    keyId: input.config.keyId,
+    method: input.method,
+    target: input.target,
     contentSha256,
-  ].join("\n");
-  const signature = createHmac("sha256", input.config.signingSecret)
-    .update(canonical)
-    .digest("base64url");
+    signingSecret: input.config.signingSecret,
+  });
   const response = await input.fetch(new URL(input.target, input.config.baseUrl), {
     method: input.method,
     redirect: "error",
@@ -185,13 +251,7 @@ async function performRequest(input: {
     },
     ...(input.body === "" ? {} : { body: input.body }),
   });
-  const declared = response.headers.get("content-length");
-  if (declared !== null && Number(declared) > WORKSTREAM_MAX_RESPONSE_BYTES)
-    throw new Error("response_too_large");
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > WORKSTREAM_MAX_RESPONSE_BYTES) throw new Error("response_too_large");
-  if (!response.ok) throw new Error(`http_${response.status}`);
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return readBoundedResponse(response);
 }
 
 export function makeControlPlaneWorkstreamTransport(
@@ -242,8 +302,8 @@ export function makeControlPlaneWorkstreamTransport(
           new WorkstreamTransportError({
             operation,
             effect: method === "POST" ? "unknown-effect" : "no-effect",
-            detail: cause instanceof Error ? cause.message : "Control-plane request failed.",
-            cause,
+            detail:
+              cause instanceof BoundedTransportFailure ? cause.reason : "transport_unavailable",
           }),
       }).pipe(
         Effect.timeoutOrElse({
@@ -265,7 +325,6 @@ export function makeControlPlaneWorkstreamTransport(
               operation,
               effect: method === "POST" ? "unknown-effect" : "no-effect",
               detail: "Control-plane returned invalid JSON for the accepted contract.",
-              cause,
             }),
         ),
       );

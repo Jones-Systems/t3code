@@ -7,9 +7,13 @@ import {
   type WorkstreamEdgePage,
   type WorkstreamHistoryPage,
   type WorkstreamMembershipPage,
+  type WorkstreamReferenceDetail,
+  type WorkstreamReferencePage,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as HttpEffect from "effect/unstable/http/HttpEffect";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import {
@@ -20,6 +24,30 @@ import {
 import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
 import { WorkstreamGateway, make, type WorkstreamGatewayError } from "./WorkstreamGateway.ts";
 
+export const WORKSTREAM_RESPONSE_HEADERS = {
+  "cache-control": "private, no-store",
+  "x-content-type-options": "nosniff",
+} as const;
+
+export const isWorkstreamHttpTarget = (originalUrl: string): boolean => {
+  const path = originalUrl.split(/[?#]/, 1)[0];
+  return path === "/api/workstreams" || path?.startsWith("/api/workstreams/") === true;
+};
+
+const appendWorkstreamResponseHeaders = HttpEffect.appendPreResponseHandler((_request, response) =>
+  Effect.succeed(HttpServerResponse.setHeaders(response, WORKSTREAM_RESPONSE_HEADERS)),
+);
+
+export const workstreamResponseHeadersLayer = HttpRouter.middleware(
+  (httpEffect) =>
+    Effect.gen(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      if (isWorkstreamHttpTarget(request.originalUrl)) yield* appendWorkstreamResponseHeaders;
+      return yield* httpEffect;
+    }),
+  { global: true },
+);
+
 const configured = makeControlPlaneWorkstreamTransport();
 export const workstreamGatewayLayerLive = Layer.effect(
   WorkstreamGateway,
@@ -28,7 +56,9 @@ export const workstreamGatewayLayerLive = Layer.effect(
 
 const internal = <A>(operation: string, effect: Effect.Effect<A, WorkstreamGatewayError>) =>
   effect.pipe(
-    Effect.catch((cause) => failEnvironmentInternal("internal_error", { operation, cause })),
+    Effect.catch((error) =>
+      failEnvironmentInternal("internal_error", { operation, reason: error.reason }),
+    ),
   );
 
 const pageInput = (payload: {
@@ -62,6 +92,24 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
           Effect.andThen(
             internal("detail", gateway.readDetail(args.params.workstreamId)).pipe(
               Effect.map((value) => value as WorkstreamDetail),
+            ),
+          ),
+        ),
+      )
+      .handle("references", (args) =>
+        read(args.endpoint.name).pipe(
+          Effect.andThen(
+            internal("references", gateway.readReferences(pageInput(args.payload))).pipe(
+              Effect.map((value) => value as WorkstreamReferencePage),
+            ),
+          ),
+        ),
+      )
+      .handle("reference", (args) =>
+        read(args.endpoint.name).pipe(
+          Effect.andThen(
+            internal("reference", gateway.readReference(args.params.nativeReferenceId)).pipe(
+              Effect.map((value) => value as WorkstreamReferenceDetail),
             ),
           ),
         ),

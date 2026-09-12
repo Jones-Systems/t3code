@@ -484,8 +484,30 @@ export type WorkstreamDetail = typeof WorkstreamDetail.Type;
 export const WorkstreamReferenceDetail = Schema.Struct({
   context: WorkstreamReadContext,
   reference: NativeReference,
-  latest_observation: Schema.NullOr(Schema.Unknown),
+  latest_observation: Schema.NullOr(
+    Schema.Struct({
+      observation_version: Schema.Number,
+      attempted_at: Schema.String,
+      outcome: Schema.Literals([
+        "observed",
+        "not_modified",
+        "inaccessible",
+        "rate_limited",
+        "unavailable",
+        "invalid_response",
+      ]),
+      last_success: Schema.NullOr(
+        Schema.Struct({
+          state: Schema.Literals(["open", "closed", "merged"]),
+          draft: Schema.Boolean,
+          observed_at: Schema.String,
+          provider_updated_at: Schema.NullOr(Schema.String),
+        }),
+      ),
+    }),
+  ),
 });
+export type WorkstreamReferenceDetail = typeof WorkstreamReferenceDetail.Type;
 
 export const WorkstreamSession = Schema.Struct({
   context: WorkstreamReadContext,
@@ -539,4 +561,5 @@ export const T3WorkstreamListQuery = {
 export const T3WorkstreamCommandRequest = Schema.Struct({ command: WorkstreamCommand });
 export const T3WorkstreamCommandPollParams = Schema.Struct({ commandId: Schema.String });
 export const T3WorkstreamDetailParams = Schema.Struct({ workstreamId: Schema.String });
+export const T3WorkstreamReferenceParams = Schema.Struct({ nativeReferenceId: Schema.String });
 export const T3WorkstreamPageQuery = T3WorkstreamListQuery;
