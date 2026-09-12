@@ -4,7 +4,6 @@ import {
   getWorkstreamMemberActions,
   pageWindow,
   planWorkstreamDrop,
-  planWorkstreamKeyboardMove,
 } from "./workstreamPresentation";
 
 describe("workstream member actions", () => {
@@ -17,29 +16,21 @@ describe("workstream member actions", () => {
     expect(getWorkstreamMemberActions({ association: "primary", isRemoved: true })).toEqual([
       { id: "reattach", label: "Reattach to workstream" },
     ]);
+    expect(getWorkstreamMemberActions({ association: "secondary", isRemoved: false })).toEqual([
+      { id: "remove", label: "Unlink from workstream", destructive: true },
+    ]);
   });
 });
 
 describe("workstream movement planning", () => {
-  it("uses the same reorder command shape for pointer drop and keyboard movement", () => {
+  it("does not invent same-workstream member ordering", () => {
     expect(
       planWorkstreamDrop({
         memberRef: "thread:1",
         sourceWorkstreamId: "ws:1",
         targetWorkstreamId: "ws:1",
-        targetPosition: 1,
-        targetMemberCount: 3,
       }),
-    ).toEqual({ type: "reorder", workstreamId: "ws:1", memberRef: "thread:1", position: 1 });
-    expect(
-      planWorkstreamKeyboardMove({
-        workstreamId: "ws:1",
-        memberRef: "thread:1",
-        currentPosition: 0,
-        direction: "down",
-        memberCount: 3,
-      }),
-    ).toEqual({ type: "reorder", workstreamId: "ws:1", memberRef: "thread:1", position: 1 });
+    ).toBeNull();
   });
 
   it("plans cross-workstream drops as moves and rejects invalid positions", () => {
@@ -48,25 +39,13 @@ describe("workstream movement planning", () => {
         memberRef: "thread:1",
         sourceWorkstreamId: "ws:1",
         targetWorkstreamId: "ws:2",
-        targetPosition: 99,
-        targetMemberCount: 4,
       }),
     ).toEqual({
       type: "move",
       memberRef: "thread:1",
       fromWorkstreamId: "ws:1",
       toWorkstreamId: "ws:2",
-      position: 4,
     });
-    expect(
-      planWorkstreamDrop({
-        memberRef: "thread:1",
-        sourceWorkstreamId: "ws:1",
-        targetWorkstreamId: "ws:2",
-        targetPosition: -1,
-        targetMemberCount: 4,
-      }),
-    ).toBeNull();
   });
 });
 

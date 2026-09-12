@@ -195,6 +195,10 @@
       "types": "./src/state/vcs.ts",
       "default": "./src/state/vcs.ts"
     },
+    "./state/workstreams": {
+      "types": "./src/state/workstreams/index.ts",
+      "default": "./src/state/workstreams/index.ts"
+    },
     "./work-log/presentation": {
       "types": "./src/work-log/presentation.ts",
       "default": "./src/work-log/presentation.ts"

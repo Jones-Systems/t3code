@@ -175,6 +175,7 @@ import {
 } from "./Sidebar.snooze";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
+import { WorkstreamSidebarSection } from "./workstreams/WorkstreamSidebarSection";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
   deriveProviderEntriesByEnvironment,
@@ -3764,6 +3765,7 @@ export default function Sidebar() {
           </SidebarGroup>
         }
       >
+        {!isSearchingThreads ? <WorkstreamSidebarSection /> : null}
         <SidebarGroup className="ps-[calc(var(--sidebar-content-inset)+1px)] pe-[var(--sidebar-content-inset)] pb-1 pt-0">
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (

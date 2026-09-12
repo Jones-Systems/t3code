@@ -1,4 +1,5 @@
 import { ExternalLinkIcon, RefreshCwIcon } from "lucide-react";
+import { canonicalGitHubPullRequestUrl, type WorkstreamPrLocator } from "@t3tools/contracts";
 
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -20,7 +21,7 @@ export interface WorkstreamRelationshipPresentation {
 export interface LinkedPullRequestPresentation {
   readonly ref: string;
   readonly label: string;
-  readonly url: string;
+  readonly locator: WorkstreamPrLocator;
   readonly status: "open" | "closed" | "merged" | "unknown";
   readonly refreshing: boolean;
 }
@@ -120,7 +121,10 @@ export function WorkstreamDetailPanel(props: WorkstreamDetailPanelProps) {
               className="flex items-center gap-2 rounded-lg border border-border/70 p-2"
               key={pullRequest.ref}
             >
-              <a className="min-w-0 flex-1 truncate text-sm hover:underline" href={pullRequest.url}>
+              <a
+                className="min-w-0 flex-1 truncate text-sm hover:underline"
+                href={canonicalGitHubPullRequestUrl(pullRequest.locator)}
+              >
                 {pullRequest.label} <ExternalLinkIcon aria-hidden className="inline size-3" />
               </a>
               <Badge variant="outline">{pullRequest.status}</Badge>

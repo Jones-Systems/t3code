@@ -22,7 +22,7 @@ export interface WorkstreamMemberPresentation {
 export interface WorkstreamPresentation {
   readonly id: string;
   readonly name: string;
-  readonly lifecycle: "active" | "paused" | "completed";
+  readonly lifecycle: "planned" | "active" | "paused" | "completed" | "deferred" | "abandoned";
   readonly order: number;
   readonly members: readonly WorkstreamMemberPresentation[];
   readonly memberCount: number;
@@ -35,7 +35,6 @@ export type WorkstreamMembershipCommand =
       readonly memberRef: string;
       readonly fromWorkstreamId: string;
       readonly toWorkstreamId: string;
-      readonly position: number;
     }
   | {
       readonly type: "link";
@@ -53,12 +52,6 @@ export type WorkstreamMembershipCommand =
       readonly memberRef: string;
       readonly workstreamId: string;
       readonly association: WorkstreamAssociation;
-    }
-  | {
-      readonly type: "reorder";
-      readonly workstreamId: string;
-      readonly memberRef: string;
-      readonly position: number;
     };
 
 export interface WorkstreamHistoryEntry {

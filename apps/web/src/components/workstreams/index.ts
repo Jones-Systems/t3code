@@ -6,3 +6,4 @@ export * from "./WorkstreamMemberActions";
 export * from "./WorkstreamMembershipDialog";
 export * from "./WorkstreamReceiptStatus";
 export * from "./WorkstreamSidebarGroup";
+export * from "./WorkstreamSidebarSection";

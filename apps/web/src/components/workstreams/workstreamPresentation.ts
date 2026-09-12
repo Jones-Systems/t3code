@@ -21,11 +21,18 @@ export function getWorkstreamMemberActions(input: {
     return [{ id: "reattach", label: "Reattach to workstream" }];
   }
   return [
-    { id: "move", label: "Move to another workstream" },
     ...(input.association === "primary"
-      ? ([{ id: "link", label: "Link to another workstream" }] as const)
+      ? ([
+          { id: "move", label: "Move to another workstream" },
+          { id: "link", label: "Link to another workstream" },
+        ] as const)
       : []),
-    { id: "remove", label: "Remove from workstream", destructive: true },
+    {
+      id: "remove",
+      label:
+        input.association === "secondary" ? "Unlink from workstream" : "Remove from workstream",
+      destructive: true,
+    },
   ];
 }
 
@@ -33,43 +40,13 @@ export function planWorkstreamDrop(input: {
   readonly memberRef: string;
   readonly sourceWorkstreamId: string;
   readonly targetWorkstreamId: string;
-  readonly targetPosition: number;
-  readonly targetMemberCount: number;
 }): WorkstreamMembershipCommand | null {
-  if (!Number.isInteger(input.targetPosition) || input.targetPosition < 0) return null;
-  const position = Math.min(input.targetPosition, input.targetMemberCount);
-  if (input.sourceWorkstreamId === input.targetWorkstreamId) {
-    return {
-      type: "reorder",
-      workstreamId: input.sourceWorkstreamId,
-      memberRef: input.memberRef,
-      position,
-    };
-  }
+  if (input.sourceWorkstreamId === input.targetWorkstreamId) return null;
   return {
     type: "move",
     memberRef: input.memberRef,
     fromWorkstreamId: input.sourceWorkstreamId,
     toWorkstreamId: input.targetWorkstreamId,
-    position,
-  };
-}
-
-export function planWorkstreamKeyboardMove(input: {
-  readonly workstreamId: string;
-  readonly memberRef: string;
-  readonly currentPosition: number;
-  readonly direction: "up" | "down";
-  readonly memberCount: number;
-}): WorkstreamMembershipCommand | null {
-  const delta = input.direction === "up" ? -1 : 1;
-  const position = input.currentPosition + delta;
-  if (position < 0 || position >= input.memberCount) return null;
-  return {
-    type: "reorder",
-    workstreamId: input.workstreamId,
-    memberRef: input.memberRef,
-    position,
   };
 }
 

@@ -6,12 +6,12 @@ import {
   WORKSTREAM_CONTRACT_FAMILY,
   WORKSTREAM_CONTRACT_MANIFEST_SHA256,
   WORKSTREAM_CONTRACT_VERSION,
-  type CommittedWorkstreamReceipt,
   type WorkstreamCapabilities,
   type WorkstreamCommand,
   type WorkstreamMetadata,
   type WorkstreamPage,
   type WorkstreamTransport,
+  type WorkstreamReceipt,
   WorkstreamTransportError,
 } from "./WorkstreamGateway.ts";
 
@@ -57,12 +57,15 @@ export interface SyntheticWorkstreamTransportOptions {
 export const makeSyntheticWorkstreamTransport = (
   options: SyntheticWorkstreamTransportOptions = {},
 ): WorkstreamTransport => {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Synthetic Workstream transport is test-only");
+  }
   const context = {
     owner_id: "owner-fixture",
     server_generation: 7,
     registry_version: 11,
   } as const;
-  const unavailable = (operation: "capabilities" | "list" | "command") =>
+  const unavailable = (operation: string) =>
     Effect.fail(
       new WorkstreamTransportError({
         operation,
@@ -94,6 +97,31 @@ export const makeSyntheticWorkstreamTransport = (
         next_cursor: nextOffset < SYNTHETIC_WORKSTREAMS.length ? String(nextOffset) : null,
       } satisfies WorkstreamPage);
     },
+    getWorkstream: ({ workstreamId }) =>
+      Effect.succeed({
+        context,
+        workstream:
+          SYNTHETIC_WORKSTREAMS.find((item) => item.workstream_id === workstreamId) ??
+          SYNTHETIC_WORKSTREAMS[0],
+      }),
+    listReferences: () => Effect.succeed({ context, items: [], next_cursor: null }),
+    getReference: () => Effect.succeed({ context, reference: null, latest_observation: null }),
+    listMemberships: () => Effect.succeed({ context, items: [], next_cursor: null }),
+    listDeclarations: () => Effect.succeed({ context, items: [], next_cursor: null }),
+    listEdges: () => Effect.succeed({ context, items: [], next_cursor: null }),
+    listHistory: () => Effect.succeed({ context, items: [], next_cursor: null }),
+    getCommand: ({ commandId }) =>
+      Effect.succeed({
+        command_id: commandId,
+        owner_id: "owner-fixture",
+        actor: { principal_id: "principal-fixture" },
+        operation: "update_workstream",
+        request_sha256: "0".repeat(64),
+        server_generation: 7,
+        accepted_at: "2026-09-12T12:10:00Z",
+        state: "unresolved",
+        retry_after_seconds: 1,
+      }),
     submitCommand: ({ body, command }) => {
       if (options.offline === true) return unavailable("command");
       return Effect.succeed(makeSyntheticReceipt(command, body));
@@ -104,7 +132,7 @@ export const makeSyntheticWorkstreamTransport = (
 const makeSyntheticReceipt = (
   command: WorkstreamCommand,
   body: string,
-): CommittedWorkstreamReceipt => {
+): Extract<WorkstreamReceipt, { readonly state: "committed" }> => {
   const coordination =
     command.action.operation === "set_coordination_disposition"
       ? {

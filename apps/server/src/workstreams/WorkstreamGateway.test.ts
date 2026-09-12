@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
@@ -11,6 +13,13 @@ import {
 } from "./WorkstreamGateway.ts";
 import { makeSyntheticWorkstreamTransport } from "./SyntheticWorkstreamTransport.ts";
 
+const binding = {
+  registryId: "fixture-registry",
+  ownerId: "owner-fixture",
+  principalId: "principal-fixture",
+  authorizationRevision: 1,
+} as const;
+
 const updateCommand = (overrides: Partial<WorkstreamCommand> = {}): WorkstreamCommand => ({
   command_id: "command-fixture-0001",
   expected_server_generation: 7,
@@ -20,6 +29,7 @@ const updateCommand = (overrides: Partial<WorkstreamCommand> = {}): WorkstreamCo
     workstream_id: "ws-core-v1",
     expected_version: 3,
     name: "Cross-system Workstreams",
+    lifecycle: "active",
     progress: { state: "progressing" },
     sort_order: 10,
   },
@@ -30,9 +40,20 @@ it.effect("bounds metadata reads and falls back only to its metadata cache", () 
   Effect.gen(function* () {
     const fixture = makeSyntheticWorkstreamTransport();
     let offline = false;
+    let authOffline = false;
     let now = 1_000;
     const transport: WorkstreamTransport = {
       ...fixture,
+      getCapabilities: (input) =>
+        authOffline
+          ? Effect.fail(
+              new WorkstreamTransportError({
+                operation: "capabilities",
+                effect: "no-effect",
+                detail: "authorization unavailable",
+              }),
+            )
+          : fixture.getCapabilities(input),
       listWorkstreams: (input) =>
         offline
           ? Effect.fail(
@@ -44,13 +65,13 @@ it.effect("bounds metadata reads and falls back only to its metadata cache", () 
             )
           : fixture.listWorkstreams(input),
     };
-    const gateway = yield* make(transport, { now: () => now, cacheMaxAgeMs: 50 });
+    const gateway = yield* make(transport, { binding, now: () => now, cacheMaxAgeMs: 50 });
 
     const live = yield* gateway.readMetadata({ limit: 1 });
     expect(live.source).toBe("live");
     expect(live.stale).toBe(false);
-    expect(live.page.items).toHaveLength(1);
-    expect(Object.keys(live.page.items[0] ?? {})).not.toContain("declarations");
+    expect(live.items).toHaveLength(1);
+    expect(Object.keys(live.items[0] ?? {})).not.toContain("created_by");
 
     offline = true;
     now = 1_020;
@@ -63,18 +84,46 @@ it.effect("bounds metadata reads and falls back only to its metadata cache", () 
     expect(staleCache.source).toBe("cache");
     expect(staleCache.stale).toBe(true);
 
+    authOffline = true;
+    const unauthorizedCache = yield* gateway.readMetadata({ limit: 1 }).pipe(Effect.flip);
+    expect(unauthorizedCache.reason).toBe("offline");
+    authOffline = false;
+
     const invalid = yield* gateway.readMetadata({ limit: 101 }).pipe(Effect.flip);
     expect(invalid.reason).toBe("invalid-response");
   }),
 );
 
+it.effect("rejects a receipt attributed to another principal", () =>
+  Effect.gen(function* () {
+    const fixture = makeSyntheticWorkstreamTransport();
+    const gateway = yield* make(
+      {
+        ...fixture,
+        submitCommand: (input) =>
+          fixture.submitCommand(input).pipe(
+            Effect.map((receipt) => ({
+              ...receipt,
+              actor: { principal_id: "different-principal" },
+            })),
+          ),
+      },
+      { binding },
+    );
+    const error = yield* gateway.submit(updateCommand()).pipe(Effect.flip);
+    expect(error.reason).toBe("invalid-response");
+  }),
+);
+
 it.effect("refuses mutations while offline or against stale generation and revision", () =>
   Effect.gen(function* () {
-    const offlineGateway = yield* make(makeSyntheticWorkstreamTransport({ offline: true }));
+    const offlineGateway = yield* make(makeSyntheticWorkstreamTransport({ offline: true }), {
+      binding,
+    });
     const offline = yield* offlineGateway.submit(updateCommand()).pipe(Effect.flip);
     expect(offline.reason).toBe("offline");
 
-    const gateway = yield* make(makeSyntheticWorkstreamTransport());
+    const gateway = yield* make(makeSyntheticWorkstreamTransport(), { binding });
     const stale = yield* gateway
       .submit(updateCommand({ expected_registry_version: 10 }))
       .pipe(Effect.flip);
@@ -93,7 +142,7 @@ it.effect("binds the accepted contract and exact idempotency bytes", () =>
         return fixture.submitCommand(input);
       },
     };
-    const gateway = yield* make(transport);
+    const gateway = yield* make(transport, { binding });
     const command = updateCommand();
 
     const first = yield* gateway.submit(command);
@@ -116,6 +165,7 @@ it.effect("binds the accepted contract and exact idempotency bytes", () =>
 
     const mismatchGateway = yield* make(
       makeSyntheticWorkstreamTransport({ manifestSha256: "0".repeat(64) }),
+      { binding },
     );
     const mismatch = yield* mismatchGateway.submit(command).pipe(Effect.flip);
     expect(mismatch.reason).toBe("contract-mismatch");
@@ -124,7 +174,7 @@ it.effect("binds the accepted contract and exact idempotency bytes", () =>
 
 it.effect("keeps coordination disposition and native T3 settlement as distinct receipts", () =>
   Effect.gen(function* () {
-    const gateway = yield* make(makeSyntheticWorkstreamTransport());
+    const gateway = yield* make(makeSyntheticWorkstreamTransport(), { binding });
     const coordination = yield* gateway.submit({
       command_id: "command-coordinate-0001",
       expected_server_generation: 7,
@@ -135,7 +185,7 @@ it.effect("keeps coordination disposition and native T3 settlement as distinct r
         expected_version: 3,
         membership_id: "membership-1",
         disposition: "completed",
-        other_reason: null,
+        other_disposition: null,
       },
     });
     const settlement = yield* gateway.submit({
@@ -144,9 +194,8 @@ it.effect("keeps coordination disposition and native T3 settlement as distinct r
       expected_registry_version: 11,
       action: {
         operation: "request_native_t3_settlement",
-        workstream_id: "ws-core-v1",
-        expected_version: 3,
         native_reference_id: "reference-t3-1",
+        expected_attestation_version: 1,
         native_action: "settle",
       },
     });
@@ -165,5 +214,64 @@ it.effect("keeps coordination disposition and native T3 settlement as distinct r
       native_action: "settle",
       outcome: "committed",
     });
+  }),
+);
+
+it.effect("reconciles pending and unresolved commands only through the exact GET route", () =>
+  Effect.gen(function* () {
+    const fixture = makeSyntheticWorkstreamTransport();
+    const command = updateCommand({ command_id: "command-pending-0001" });
+    const body = JSON.stringify(command);
+    const terminal = yield* fixture.submitCommand({
+      body,
+      command,
+      idempotencyKey: command.command_id,
+      contractVersion: WORKSTREAM_CONTRACT_HEADER_VERSION,
+      contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+    });
+    if (terminal.state !== "committed") return;
+    let polls = 0;
+    let submissions = 0;
+    const transport: WorkstreamTransport = {
+      ...fixture,
+      submitCommand: (input) => {
+        submissions += 1;
+        return Effect.succeed({
+          command_id: input.command.command_id,
+          owner_id: binding.ownerId,
+          actor: { principal_id: binding.principalId },
+          operation: input.command.action.operation,
+          request_sha256: createHash("sha256").update(input.body).digest("hex"),
+          server_generation: 7,
+          accepted_at: terminal.accepted_at,
+          state: "pending",
+          retry_after_seconds: 1,
+        });
+      },
+      getCommand: () => {
+        polls += 1;
+        return Effect.succeed(
+          polls === 1
+            ? {
+                command_id: command.command_id,
+                owner_id: binding.ownerId,
+                actor: { principal_id: binding.principalId },
+                operation: command.action.operation,
+                request_sha256: terminal.request_sha256,
+                server_generation: 7,
+                accepted_at: terminal.accepted_at,
+                state: "unresolved" as const,
+                retry_after_seconds: 1,
+              }
+            : terminal,
+        );
+      },
+    };
+    const gateway = yield* make(transport, { binding });
+    expect((yield* gateway.submit(command)).state).toBe("pending");
+    expect((yield* gateway.pollCommand(command.command_id)).state).toBe("unresolved");
+    expect((yield* gateway.pollCommand(command.command_id)).state).toBe("committed");
+    expect(submissions).toBe(1);
+    expect(polls).toBe(2);
   }),
 );

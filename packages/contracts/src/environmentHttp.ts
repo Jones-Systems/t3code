@@ -53,6 +53,20 @@ import {
   RelayEnvironmentMintResponse,
   RelayLinkProofRequest,
 } from "./relay.ts";
+import {
+  T3WorkstreamCommandPollParams,
+  T3WorkstreamCommandRequest,
+  T3WorkstreamDetailParams,
+  T3WorkstreamListQuery,
+  T3WorkstreamListResult,
+  T3WorkstreamPageQuery,
+  WorkstreamDeclarationPage,
+  WorkstreamDetail,
+  WorkstreamEdgePage,
+  WorkstreamHistoryPage,
+  WorkstreamMembershipPage,
+  WorkstreamReceipt,
+} from "./workstreams.ts";
 
 const OptionalBearerHeaders = Schema.Struct({
   authorization: Schema.optionalKey(Schema.String),
@@ -553,6 +567,76 @@ export class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullReque
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
 
+export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstreams")
+  .add(
+    HttpApiEndpoint.get("list", "/api/workstreams", {
+      headers: OptionalBearerHeaders,
+      payload: T3WorkstreamListQuery,
+      success: T3WorkstreamListResult,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("detail", "/api/workstreams/:workstreamId", {
+      headers: OptionalBearerHeaders,
+      params: T3WorkstreamDetailParams,
+      success: WorkstreamDetail,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("memberships", "/api/workstreams/:workstreamId/memberships", {
+      headers: OptionalBearerHeaders,
+      params: T3WorkstreamDetailParams,
+      payload: T3WorkstreamPageQuery,
+      success: WorkstreamMembershipPage,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("declarations", "/api/workstreams/:workstreamId/declarations", {
+      headers: OptionalBearerHeaders,
+      params: T3WorkstreamDetailParams,
+      payload: T3WorkstreamPageQuery,
+      success: WorkstreamDeclarationPage,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("edges", "/api/workstreams/:workstreamId/edges", {
+      headers: OptionalBearerHeaders,
+      params: T3WorkstreamDetailParams,
+      payload: T3WorkstreamPageQuery,
+      success: WorkstreamEdgePage,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("history", "/api/workstreams/:workstreamId/history", {
+      headers: OptionalBearerHeaders,
+      params: T3WorkstreamDetailParams,
+      payload: T3WorkstreamPageQuery,
+      success: WorkstreamHistoryPage,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("command", "/api/workstreams/commands/:commandId", {
+      headers: OptionalBearerHeaders,
+      params: T3WorkstreamCommandPollParams,
+      success: WorkstreamReceipt,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("submit", "/api/workstreams/commands", {
+      headers: OptionalBearerHeaders,
+      payload: T3WorkstreamCommandRequest,
+      success: WorkstreamReceipt,
+      error: EnvironmentOrchestrationDispatchErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 export class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
@@ -619,4 +703,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
+  .add(EnvironmentWorkstreamsHttpApi)
   .add(EnvironmentConnectHttpApi) {}

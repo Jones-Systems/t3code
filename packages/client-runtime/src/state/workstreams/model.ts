@@ -1,39 +1,15 @@
-export const WORKSTREAM_CONTRACT_VERSION = "workstreams/1.0.0";
-export const WORKSTREAM_CONTRACT_MANIFEST =
-  "a03e34613ea1293b579316a21f98d4edd69a19221f9907cf0449e3b4933420dd";
+import {
+  WORKSTREAM_CONTRACT_HEADER_VERSION,
+  WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+  type WorkstreamDelivery,
+  type WorkstreamFreshness,
+  type WorkstreamLifecycle,
+  type WorkstreamProgress,
+} from "@t3tools/contracts";
 
-export type WorkstreamLifecycle =
-  | "planned"
-  | "active"
-  | "paused"
-  | "completed"
-  | "deferred"
-  | "abandoned";
-
-export type WorkstreamProgress =
-  | { readonly state: "progressing" | "unknown" | "stale" }
-  | { readonly state: "waiting"; readonly condition: string }
-  | { readonly state: "blocked"; readonly impediment: string };
-
-export type WorkstreamDelivery =
-  | "none-observed"
-  | "branch-open"
-  | "pr-open"
-  | "merged"
-  | "released"
-  | "deployed"
-  | "deployment-verified"
-  | "failed"
-  | "unknown"
-  | "stale";
-
-export type WorkstreamFreshness =
-  | "current"
-  | "stale"
-  | "inaccessible"
-  | "partial-coverage"
-  | "conflicting"
-  | "unknown";
+export const WORKSTREAM_CONTRACT_VERSION = WORKSTREAM_CONTRACT_HEADER_VERSION;
+export const WORKSTREAM_CONTRACT_MANIFEST = WORKSTREAM_CONTRACT_MANIFEST_SHA256;
+export type { WorkstreamDelivery, WorkstreamFreshness, WorkstreamLifecycle, WorkstreamProgress };
 
 export interface WorkstreamRecord {
   readonly workstreamId: string;
@@ -170,11 +146,7 @@ export interface WorkstreamEdge {
   readonly closed: EpisodeBoundary | null;
 }
 
-export type WorkstreamReceiptState =
-  | "committed"
-  | "pending"
-  | "unresolved"
-  | "rejected";
+export type WorkstreamReceiptState = "committed" | "pending" | "unresolved" | "rejected";
 
 export type WorkstreamOperation =
   | "create_workstream"
@@ -204,10 +176,7 @@ export interface WorkstreamReceipt {
   readonly changed: boolean | null;
   readonly coordinationDisposition: {
     readonly membershipId: string;
-    readonly disposition: Exclude<
-      NonNullable<MembershipEpisode["closed"]>["reason"],
-      "removed"
-    >;
+    readonly disposition: Exclude<NonNullable<MembershipEpisode["closed"]>["reason"], "removed">;
   } | null;
   readonly nativeSettlement: {
     readonly nativeReferenceId: string;

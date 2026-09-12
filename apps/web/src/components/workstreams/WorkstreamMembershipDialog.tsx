@@ -55,7 +55,6 @@ export function WorkstreamMembershipDialog(props: WorkstreamMembershipDialogProp
             memberRef: props.member.ref,
             fromWorkstreamId: props.sourceWorkstreamId,
             toWorkstreamId: target.id,
-            position: target.memberCount,
           }
         : props.action === "link"
           ? {

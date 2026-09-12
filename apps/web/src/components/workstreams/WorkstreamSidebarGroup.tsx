@@ -98,7 +98,7 @@ export function WorkstreamSidebarGroup(props: WorkstreamSidebarGroupProps) {
                 member.ref === props.selectedMemberRef && "bg-accent",
                 member.removedAt && "opacity-64",
               )}
-              draggable={!member.removedAt}
+              draggable={!member.removedAt && member.association === "primary"}
               key={member.ref}
               onDragOver={(event) => event.preventDefault()}
               onDragStart={() => props.onDragMemberStart(member)}
@@ -124,10 +124,8 @@ export function WorkstreamSidebarGroup(props: WorkstreamSidebarGroupProps) {
               </button>
               <WorkstreamMemberActions
                 member={member}
-                memberCount={props.workstream.members.length}
                 onChooseTarget={(action) => props.onChooseMemberTarget(member, action)}
                 onCommand={props.onMemberCommand}
-                position={position}
                 workstreamId={props.workstream.id}
               />
             </li>

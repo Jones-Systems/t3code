@@ -372,15 +372,15 @@ describe("Workstream reducer and cache", () => {
     cache.write(first);
 
     expect(cache.read(first.context, false)).toBeNull();
-    expect(cache.read(first.context, true)).toBe(first);
+    const cached = cache.read(first.context, true);
+    expect(cached?.workstreams.first?.name).toBe("first");
+    expect(Object.keys(cached ?? {})).toEqual(["context", "workstreams"]);
+    expect(cached).not.toHaveProperty("memberships");
+    expect(cached).not.toHaveProperty("declarations");
+    expect(cached).not.toHaveProperty("receipts");
+    expect(cache.read(context(1, { authorizationRevision: 8 }), true)).toBeNull();
     expect(
-      cache.read(context(1, { authorizationRevision: 8 }), true),
-    ).toBeNull();
-    expect(
-      cache.transitionBinding(
-        first.context,
-        context(1, { authorizationRevision: 8 }),
-      ),
+      cache.transitionBinding(first.context, context(1, { authorizationRevision: 8 })),
     ).toBeNull();
     expect(cache.read(first.context, true)).toBeNull();
 
