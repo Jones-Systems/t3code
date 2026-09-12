@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { groupNativeThreadsByWorkstream, nativeWorkstreamThreadKey } from "./nativeThreadGrouping";
+import {
+  groupNativeThreadsByWorkstream,
+  nativeWorkstreamThreadKey,
+  secondaryNativeWorkstreamLabels,
+} from "./nativeThreadGrouping";
 
 const trustedNow = "2026-09-12T12:00:00Z";
 const trustedEnvironments = (...environmentIds: readonly string[]) =>
@@ -72,6 +76,31 @@ const member = (
 });
 
 describe("native Workstream thread grouping", () => {
+  it("resolves the Sidebar secondary label through the same colon-safe key and deduplicates links", () => {
+    const thread = { environmentId: "a:b", id: "c" };
+    const other = { environmentId: "a", id: "b:c" };
+    const input = {
+      workstreams: [{ ...ws("secondary", 0), name: "Secondary label" }],
+      references: [ref("reference", thread.environmentId, thread.id)],
+      memberships: [
+        member("first", "secondary", "reference", "secondary"),
+        member("duplicate", "secondary", "reference", "secondary"),
+      ],
+      threads: [thread, other],
+      trustedNow,
+      trustedEnvironments: trustedEnvironments("a:b", "a"),
+    };
+    const grouping = groupNativeThreadsByWorkstream(input);
+    expect(secondaryNativeWorkstreamLabels(grouping, thread)).toEqual(["Secondary label"]);
+    expect(secondaryNativeWorkstreamLabels(grouping, other)).toEqual([]);
+    expect(
+      secondaryNativeWorkstreamLabels(
+        groupNativeThreadsByWorkstream({ ...input, trustedEnvironments: new Map() }),
+        thread,
+      ),
+    ).toEqual([]);
+    expect(grouping.ordered).toEqual([thread, other]);
+  });
   it("groups active projection placements once and preserves native actions and missing-group fallback", () => {
     const nativeAction = () => "native-action";
     const threads = [

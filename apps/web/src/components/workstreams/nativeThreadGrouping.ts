@@ -22,11 +22,23 @@ export interface NativeWorkstreamThreadGrouping<Thread extends WorkstreamThreadL
   readonly ordered: readonly Thread[];
   readonly groupedKeys: ReadonlySet<string>;
   readonly secondaryWorkstreamIdsByKey: ReadonlyMap<string, readonly string[]>;
+  readonly secondaryWorkstreamLabelsByKey: ReadonlyMap<string, readonly string[]>;
   readonly conflictingKeys: ReadonlySet<string>;
 }
 
 export const nativeWorkstreamThreadKey = (environmentId: string, threadId: string) =>
   JSON.stringify([environmentId, threadId]);
+
+export const secondaryNativeWorkstreamLabels = (
+  grouping: Pick<
+    NativeWorkstreamThreadGrouping<WorkstreamThreadLike>,
+    "secondaryWorkstreamLabelsByKey"
+  >,
+  thread: WorkstreamThreadLike,
+): readonly string[] =>
+  grouping.secondaryWorkstreamLabelsByKey.get(
+    nativeWorkstreamThreadKey(thread.environmentId, thread.id),
+  ) ?? [];
 
 // This is the sole T3 activation convention. Other provider/resource identities remain unassigned.
 export interface TrustedT3EnvironmentAttestation {
@@ -112,15 +124,15 @@ export function groupNativeThreadsByWorkstream<Thread extends WorkstreamThreadLi
   for (const id of invalidReferences) referenceKeys.delete(id);
 
   const primaryByKey = new Map<string, string>();
-  const secondaryByKey = new Map<string, string[]>();
+  const secondaryByKey = new Map<string, Set<string>>();
   const conflictingKeys = new Set<string>();
   for (const membership of [...(input.memberships ?? []), ...(input.placements ?? [])]) {
     if ("closed" in membership && membership.closed !== null) continue;
     const key = referenceKeys.get(membership.native_reference_id);
     if (key === undefined) continue;
     if (membership.kind === "secondary") {
-      const current = secondaryByKey.get(key) ?? [];
-      if (!current.includes(membership.workstream_id)) current.push(membership.workstream_id);
+      const current = secondaryByKey.get(key) ?? new Set<string>();
+      current.add(membership.workstream_id);
       secondaryByKey.set(key, current);
       continue;
     }
@@ -158,12 +170,22 @@ export function groupNativeThreadsByWorkstream<Thread extends WorkstreamThreadLi
     const threads = threadsByWorkstream.get(workstream.workstreamId);
     return threads === undefined || threads.length === 0 ? [] : [{ workstream, threads }];
   });
+  const workstreamNames = new Map(input.workstreams.map((item) => [item.workstreamId, item.name]));
+  const secondaryWorkstreamIdsByKey = new Map(
+    [...secondaryByKey].map(([key, ids]) => [key, [...ids]]),
+  );
   return {
     groups,
     ungrouped,
     ordered: [...groups.flatMap((group) => group.threads), ...ungrouped],
     groupedKeys,
-    secondaryWorkstreamIdsByKey: secondaryByKey,
+    secondaryWorkstreamIdsByKey,
+    secondaryWorkstreamLabelsByKey: new Map(
+      [...secondaryWorkstreamIdsByKey].map(([key, ids]) => [
+        key,
+        ids.map((id) => workstreamNames.get(id) ?? id),
+      ]),
+    ),
     conflictingKeys,
   };
 }

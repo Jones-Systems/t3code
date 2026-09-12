@@ -68,8 +68,15 @@ function hasCanonicalActivation(config: ControlPlaneWorkstreamActivation): boole
     (config.baseUrl.pathname === "/" || config.baseUrl.pathname === "") &&
     Number.isSafeInteger(config.authorizationRevision) &&
     config.authorizationRevision > 0 &&
-    headerValues.every((value) => value.length > 0 && !/[\r\n]/.test(value))
+    headerValues.every((value) => value.length > 0 && !/[\r\n]/.test(value)) &&
+    decodeSigningSecret(config.signingSecret) !== null
   );
+}
+
+function decodeSigningSecret(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(value)) return null;
+  const key = Buffer.from(value, "base64");
+  return key.length === 32 && key.toString("base64") === value ? key : null;
 }
 
 function activationFromEnvironment(
@@ -157,6 +164,8 @@ export function signWorkstreamRequest(input: {
   readonly contentSha256: string;
   readonly signingSecret: string;
 }): string {
+  const key = decodeSigningSecret(input.signingSecret);
+  if (key === null) throw new Error("invalid_workstream_signing_secret");
   const canonical = [
     "hmac-sha256-v1",
     input.contractVersion ?? WORKSTREAM_CONTRACT_HEADER_VERSION,
@@ -170,7 +179,7 @@ export function signWorkstreamRequest(input: {
     input.target,
     input.contentSha256,
   ].join("\n");
-  return createHmac("sha256", input.signingSecret).update(canonical).digest("base64url");
+  return createHmac("sha256", key).update(canonical).digest("base64url");
 }
 
 async function readBoundedResponse(response: Response): Promise<string> {

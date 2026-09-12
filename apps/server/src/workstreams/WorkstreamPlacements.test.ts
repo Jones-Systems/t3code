@@ -39,7 +39,7 @@ const activation = {
     baseUrl: new URL("https://control.example.test"),
     ...binding,
     keyId: "key-fixture",
-    signingSecret: "synthetic-key",
+    signingSecret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
   },
 } as const;
 const headers = {
@@ -65,7 +65,7 @@ it.effect("signs the distinct placement contract and validates the response iden
           method: "GET",
           target: `${T3_PLACEMENT_ROUTE}?limit=100`,
           contentSha256: sent.get("x-control-content-sha256")!,
-          signingSecret: "synthetic-key",
+          signingSecret: activation.value.signingSecret,
         }),
       );
       return new Response(json(page), { headers });

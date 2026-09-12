@@ -179,6 +179,7 @@ import { WorkstreamSidebarSection } from "./workstreams/WorkstreamSidebarSection
 import {
   groupNativeThreadsByWorkstream,
   nativeWorkstreamThreadKey,
+  secondaryNativeWorkstreamLabels,
 } from "./workstreams/nativeThreadGrouping";
 import { useWorkstreams } from "../state/workstreams";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
@@ -4003,18 +4004,12 @@ export default function Sidebar() {
                     );
                   };
                   const renderSecondaryAssociations = (thread: EnvironmentThreadShell) => {
-                    const threadKey = scopedThreadKey(
-                      scopeThreadRef(thread.environmentId, thread.id),
+                    const threadKey = nativeWorkstreamThreadKey(thread.environmentId, thread.id);
+                    const labels = secondaryNativeWorkstreamLabels(
+                      workstreamThreadGrouping,
+                      thread,
                     );
-                    const workstreamIds =
-                      workstreamThreadGrouping.secondaryWorkstreamIdsByKey.get(threadKey) ?? [];
-                    if (workstreamIds.length === 0) return null;
-                    const labels = workstreamIds.map(
-                      (workstreamId) =>
-                        workstreamController.data?.items.find(
-                          (item) => item.workstreamId === workstreamId,
-                        )?.name ?? workstreamId,
-                    );
+                    if (labels.length === 0) return null;
                     return (
                       <li
                         key={`${threadKey}:secondary-workstreams`}

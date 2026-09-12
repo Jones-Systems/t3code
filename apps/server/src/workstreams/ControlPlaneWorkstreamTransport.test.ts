@@ -20,11 +20,11 @@ const activation = {
     principalId: "principal-fixture",
     authorizationRevision: 2,
     keyId: "key-fixture",
-    signingSecret: "test-secret-not-production",
+    signingSecret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
   },
 } as const;
 
-it("matches the accepted workstreams/1.0.0 HMAC vector", () => {
+it("matches the control-plane canonicalSignedRequest fixed 32-byte key vector", () => {
   expect(
     signWorkstreamRequest({
       requestId: "request-0001",
@@ -36,10 +36,45 @@ it("matches the accepted workstreams/1.0.0 HMAC vector", () => {
       method: "POST",
       target: "/workstreams/v1/commands",
       contentSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      signingSecret: "vector-secret",
+      signingSecret: activation.value.signingSecret,
     }),
-  ).toBe("qt-9bXKflLjem1fKDvUj3b2fBUTToy9veOoC9oODFm4");
+  ).toBe("qToaB5Zn6FJjf3DME-ZsRseYIw_rW-nF-2tiHjCc9V8");
 });
+
+it.effect("disables noncanonical or non-32-byte signing secrets without a request", () =>
+  Effect.gen(function* () {
+    let requests = 0;
+    const secret = activation.value.signingSecret;
+    for (const signingSecret of [
+      "",
+      "arbitrary-utf8-secret",
+      secret.slice(0, -1),
+      `${secret}\n`,
+      Buffer.alloc(31).toString("base64"),
+      Buffer.alloc(33).toString("base64"),
+      `${secret.slice(0, -2)}9=`,
+      "_".repeat(43) + "=",
+    ]) {
+      const configured = makeControlPlaneWorkstreamTransport(
+        { ...activation, value: { ...activation.value, signingSecret } },
+        async () => {
+          requests += 1;
+          return new Response("{}");
+        },
+      );
+      expect(configured.binding.authorizationRevision).toBe(0);
+      expect(
+        (yield* Effect.result(
+          configured.transport.getCapabilities({
+            contractVersion: "workstreams/1.0.0",
+            contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+          }),
+        ))._tag,
+      ).toBe("Failure");
+    }
+    expect(requests).toBe(0);
+  }),
+);
 
 it.effect("sends bounded signed HTTPS requests and runtime-decodes responses", () =>
   Effect.gen(function* () {
