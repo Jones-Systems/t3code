@@ -72,6 +72,67 @@ const member = (
 });
 
 describe("native Workstream thread grouping", () => {
+  it("groups active projection placements once and preserves native actions and missing-group fallback", () => {
+    const nativeAction = () => "native-action";
+    const threads = [
+      { environmentId: "env:a", id: "thread:a", projectId: "native-project", nativeAction },
+      { environmentId: "env", id: "a:thread:a", projectId: "other-native-project", nativeAction },
+    ];
+    const placement = {
+      membership_id: "m:1",
+      workstream_id: "ws:a",
+      native_reference_id: "ref:a",
+      kind: "primary" as const,
+      source_instance_id: "env:a",
+      native_thread_id: "thread:a",
+      attestation_version: 1,
+      attested_at: "2026-09-12T11:00:00Z",
+      expires_at: "2026-09-13T12:00:00Z",
+      evidence_sha256: "a".repeat(64),
+      source_binding_version: 1,
+      authority_namespace: "env:a",
+      store_generation: 1,
+    };
+    const input = {
+      workstreams: [ws("ws:a", 0)],
+      threads,
+      placements: [
+        placement,
+        {
+          ...placement,
+          membership_id: "m:2",
+          workstream_id: "ws:secondary",
+          kind: "secondary" as const,
+        },
+      ],
+      trustedNow,
+      trustedEnvironments: trustedEnvironments("env:a"),
+    };
+    const result = groupNativeThreadsByWorkstream(input);
+    expect(result.groups[0]?.threads).toEqual([threads[0]]);
+    expect(result.ungrouped).toEqual([threads[1]]);
+    expect(result.ordered).toHaveLength(2);
+    expect(result.groups[0]?.threads[0]?.nativeAction).toBe(nativeAction);
+    expect(
+      result.secondaryWorkstreamIdsByKey.get(nativeWorkstreamThreadKey("env:a", "thread:a")),
+    ).toEqual(["ws:secondary"]);
+    expect(groupNativeThreadsByWorkstream({ ...input, workstreams: [] }).ungrouped).toEqual(
+      threads,
+    );
+    expect(
+      groupNativeThreadsByWorkstream({ ...input, trustedEnvironments: new Map() }).ungrouped,
+    ).toEqual(threads);
+    for (const changed of [
+      { ...placement, authority_namespace: "other" },
+      { ...placement, store_generation: 2 },
+      { ...placement, expires_at: trustedNow },
+      { ...placement, attested_at: "2026-09-13T12:00:00Z" },
+    ]) {
+      expect(groupNativeThreadsByWorkstream({ ...input, placements: [changed] }).ungrouped).toEqual(
+        threads,
+      );
+    }
+  });
   it("places each primary once in owner order and preserves native thread order", () => {
     const threads = [
       { environmentId: "env-b", id: "same", projectId: "project-b" },

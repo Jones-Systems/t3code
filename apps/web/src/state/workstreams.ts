@@ -17,6 +17,8 @@ import {
   LiveWorkstreamMetadataCache,
   orderWorkstreamMetadata,
   type WorkstreamDtoPage,
+  loadLiveT3Placements,
+  type LiveT3Placements,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Effect from "effect/Effect";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -58,6 +60,7 @@ export async function loadCompleteWorkstreamList(
 }
 
 export interface WorkstreamListView {
+  readonly placements: LiveT3Placements | null;
   readonly data: T3WorkstreamListResult | null;
   readonly error: string | null;
   readonly loading: boolean;
@@ -74,16 +77,22 @@ export interface WorkstreamListView {
   readonly loadReference: (nativeReferenceId: string) => Promise<WorkstreamReferenceDetail>;
 }
 
-export function useWorkstreams(): WorkstreamListView {
+export function useWorkstreams(placementsEnabled = true): WorkstreamListView {
+  const [placements, setPlacements] = useState<LiveT3Placements | null>(null);
   const [data, setData] = useState<T3WorkstreamListResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
   const generation = useRef(0);
-  const refresh = useCallback(() => setRevision((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    generation.current += 1;
+    setPlacements(null);
+    setRevision((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     const current = ++generation.current;
+    setPlacements(null);
     setLoading(true);
     void loadCompleteWorkstreamList((cursor) =>
       request((client) =>
@@ -93,12 +102,27 @@ export function useWorkstreams(): WorkstreamListView {
         }),
       ),
     )
-      .then((value) => {
+      .then(async (value) => {
         if (generation.current !== current) return;
         const normalized = { ...value, items: [...orderWorkstreamMetadata(value.items)] };
         metadataCache.write(normalized);
         setData(metadataCache.read(normalized.binding));
         setError(null);
+        if (placementsEnabled) {
+          try {
+            const projection = await loadLiveT3Placements(normalized, (cursor) =>
+              request((client) =>
+                client.workstreams.threadPlacements({
+                  headers: {},
+                  payload: { limit: 100, ...(cursor === undefined ? {} : { cursor }) },
+                }),
+              ),
+            );
+            if (generation.current === current) setPlacements(projection);
+          } catch {
+            if (generation.current === current) setPlacements(null);
+          }
+        }
       })
       .catch((cause: unknown) => {
         if (generation.current !== current) return;
@@ -113,7 +137,17 @@ export function useWorkstreams(): WorkstreamListView {
     return () => {
       generation.current += 1;
     };
-  }, [revision]);
+  }, [revision, placementsEnabled]);
+
+  useEffect(() => {
+    if (!placements || placements.items.length === 0) return;
+    const expiry = Math.min(...placements.items.map((item) => Date.parse(item.expires_at)));
+    const timer = window.setTimeout(
+      () => setPlacements(null),
+      Math.max(0, Math.min(2_147_483_647, expiry - Date.now())),
+    );
+    return () => window.clearTimeout(timer);
+  }, [placements]);
 
   const submit = useCallback(
     async (command: WorkstreamCommand) => {
@@ -138,6 +172,8 @@ export function useWorkstreams(): WorkstreamListView {
         refresh();
         return receipt;
       } catch (cause) {
+        generation.current += 1;
+        setPlacements(null);
         metadataCache.purgeAuthorization();
         setData(null);
         throw cause;
@@ -217,6 +253,8 @@ export function useWorkstreams(): WorkstreamListView {
       }
       return { detail, memberships, declarations, edges, history, references };
     } catch (cause) {
+      generation.current += 1;
+      setPlacements(null);
       metadataCache.purgeAuthorization();
       setData(null);
       throw cause;
@@ -229,6 +267,8 @@ export function useWorkstreams(): WorkstreamListView {
         client.workstreams.reference({ headers: {}, params: { nativeReferenceId } }),
       );
     } catch (cause) {
+      generation.current += 1;
+      setPlacements(null);
       metadataCache.purgeAuthorization();
       setData(null);
       throw cause;
@@ -236,6 +276,7 @@ export function useWorkstreams(): WorkstreamListView {
   }, []);
 
   return {
+    placements,
     data,
     error,
     loading,

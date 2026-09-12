@@ -16,6 +16,10 @@ import {
   WorkstreamReferenceDetail,
   WorkstreamReferencePage,
   type T3WorkstreamBinding,
+  T3_PLACEMENT_CONTRACT,
+  T3_PLACEMENT_MANIFEST_SHA256,
+  T3_PLACEMENT_ROUTE,
+  T3PlacementPage,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -139,6 +143,9 @@ function query(input: { readonly limit: number; readonly cursor?: string }): str
 }
 
 export function signWorkstreamRequest(input: {
+  readonly contractVersion?:
+    | typeof WORKSTREAM_CONTRACT_HEADER_VERSION
+    | typeof T3_PLACEMENT_CONTRACT;
   readonly requestId: string;
   readonly idempotencyKey?: string;
   readonly sentAt: string;
@@ -152,7 +159,7 @@ export function signWorkstreamRequest(input: {
 }): string {
   const canonical = [
     "hmac-sha256-v1",
-    WORKSTREAM_CONTRACT_HEADER_VERSION,
+    input.contractVersion ?? WORKSTREAM_CONTRACT_HEADER_VERSION,
     input.requestId,
     input.idempotencyKey ?? "",
     input.sentAt,
@@ -208,8 +215,11 @@ async function performRequest(input: {
   readonly idempotencyKey?: string;
   readonly signal: AbortSignal;
 }): Promise<string> {
+  const placement =
+    input.target === T3_PLACEMENT_ROUTE || input.target.startsWith(`${T3_PLACEMENT_ROUTE}?`);
   if (
-    !input.target.startsWith("/workstreams/v1/") ||
+    (!input.target.startsWith("/workstreams/v1/") && !placement) ||
+    (placement && input.method !== "GET") ||
     input.target.includes("#") ||
     /[\r\n]/.test(input.target)
   )
@@ -219,6 +229,7 @@ async function performRequest(input: {
   const contentSha256 =
     input.body === "" ? EMPTY_SHA256 : createHash("sha256").update(input.body).digest("hex");
   const signature = signWorkstreamRequest({
+    contractVersion: placement ? T3_PLACEMENT_CONTRACT : WORKSTREAM_CONTRACT_HEADER_VERSION,
     requestId,
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
     sentAt: input.sentAt,
@@ -238,8 +249,12 @@ async function performRequest(input: {
       accept: "application/json",
       "content-type": "application/json; charset=utf-8",
       "x-control-algorithm": "hmac-sha256-v1",
-      "x-control-contract-version": `workstreams/${WORKSTREAM_CONTRACT_VERSION}`,
-      "x-control-contract-manifest": WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      "x-control-contract-version": placement
+        ? T3_PLACEMENT_CONTRACT
+        : `workstreams/${WORKSTREAM_CONTRACT_VERSION}`,
+      "x-control-contract-manifest": placement
+        ? T3_PLACEMENT_MANIFEST_SHA256
+        : WORKSTREAM_CONTRACT_MANIFEST_SHA256,
       "x-control-request-id": requestId,
       "x-control-timestamp": input.sentAt,
       "x-control-nonce": nonce,
@@ -251,6 +266,14 @@ async function performRequest(input: {
     },
     ...(input.body === "" ? {} : { body: input.body }),
   });
+  if (
+    placement &&
+    (response.headers.get("x-control-contract-version") !== T3_PLACEMENT_CONTRACT ||
+      response.headers.get("x-control-contract-manifest") !== T3_PLACEMENT_MANIFEST_SHA256)
+  ) {
+    await response.body?.cancel();
+    throw new BoundedTransportFailure("http_error");
+  }
   return readBoundedResponse(response);
 }
 
@@ -339,6 +362,13 @@ export function makeControlPlaneWorkstreamTransport(
       authorizationRevision: config.authorizationRevision,
     },
     transport: {
+      listThreadPlacements: (input) =>
+        request(
+          "thread_placements",
+          "GET",
+          `${T3_PLACEMENT_ROUTE}?${query(input)}`,
+          T3PlacementPage,
+        ),
       getCapabilities: () =>
         request("capabilities", "GET", "/workstreams/v1/capabilities", WorkstreamCapabilities),
       listWorkstreams: (input) =>

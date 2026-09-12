@@ -1808,7 +1808,7 @@ export default function Sidebar() {
   const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
-  const workstreamController = useWorkstreams();
+  const workstreamController = useWorkstreams(!isMobile);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
@@ -2249,14 +2249,23 @@ export default function Sidebar() {
     () =>
       groupNativeThreadsByWorkstream({
         workstreams: workstreamController.data?.items ?? [],
-        // The accepted API has no bounded active-membership projection. Fail closed until it does.
-        memberships: [],
-        references: [],
+        placements: isMobile ? [] : (workstreamController.placements?.items ?? []),
         threads: activeThreads,
         trustedNow: snoozeNow,
-        trustedEnvironments: new Map(),
+        trustedEnvironments: new Map(
+          (workstreamController.placements?.trustedEnvironments ?? []).map((value) => [
+            value.environmentId,
+            value,
+          ]),
+        ),
       }),
-    [activeThreads, snoozeNow, workstreamController.data?.items],
+    [
+      activeThreads,
+      snoozeNow,
+      isMobile,
+      workstreamController.data?.items,
+      workstreamController.placements,
+    ],
   );
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);

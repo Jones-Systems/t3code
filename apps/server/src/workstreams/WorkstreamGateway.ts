@@ -13,6 +13,9 @@ import {
   type WorkstreamCommand,
   type WorkstreamPage,
   type WorkstreamReceipt,
+  T3PlacementPage,
+  T3PlacementResult,
+  type TrustedT3PlacementEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -71,6 +74,9 @@ interface ContractInput {
 }
 
 export interface WorkstreamTransport {
+  readonly listThreadPlacements?: (
+    input: PageInput,
+  ) => Effect.Effect<T3PlacementPage, WorkstreamTransportError>;
   readonly getCapabilities: (
     input: ContractInput,
   ) => Effect.Effect<WorkstreamCapabilities, WorkstreamTransportError>;
@@ -111,6 +117,7 @@ export interface WorkstreamTransport {
 }
 
 export interface WorkstreamGatewayOptions {
+  readonly placementTrustProvider?: T3PlacementTrustProvider;
   readonly binding: Pick<
     T3WorkstreamBinding,
     "registryId" | "ownerId" | "principalId" | "authorizationRevision"
@@ -120,9 +127,18 @@ export interface WorkstreamGatewayOptions {
   readonly now?: () => number;
 }
 
+// Only an independently supplied T3 authority may provide native store trust; the registry response cannot.
+export interface T3PlacementTrustProvider {
+  readonly readTrustedEnvironments: () => readonly TrustedT3PlacementEnvironment[];
+}
+
 export class WorkstreamGateway extends Context.Service<
   WorkstreamGateway,
   {
+    readonly readThreadPlacements: (input?: {
+      readonly limit?: number;
+      readonly cursor?: string;
+    }) => Effect.Effect<T3PlacementResult, WorkstreamGatewayError>;
     readonly readSession: () => Effect.Effect<T3WorkstreamBinding, WorkstreamGatewayError>;
     readonly readMetadata: (input?: {
       readonly limit?: number;
@@ -344,6 +360,86 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
 
     const readSession = () =>
       authorize("workstreams:read").pipe(Effect.map(({ binding }) => binding));
+    const readThreadPlacements = Effect.fn("WorkstreamGateway.readThreadPlacements")(function* (
+      input: { readonly limit?: number; readonly cursor?: string } = {},
+    ) {
+      const authorized = yield* authorize("workstreams:read");
+      const request = yield* Effect.try({
+        try: () => pageInput(input),
+        catch: (cause) => cause as WorkstreamGatewayError,
+      });
+      if (!transport.listThreadPlacements)
+        return yield* new WorkstreamGatewayError({
+          reason: "offline",
+          detail: "Thread placements are unavailable.",
+        });
+      const raw = yield* transport
+        .listThreadPlacements(request)
+        .pipe(Effect.mapError(transportFailure));
+      const page = yield* Schema.decodeUnknownEffect(T3PlacementPage)(raw, {
+        onExcessProperty: "error",
+      }).pipe(
+        Effect.mapError(
+          () =>
+            new WorkstreamGatewayError({
+              reason: "invalid-response",
+              detail: "Invalid thread placement page.",
+            }),
+        ),
+      );
+      yield* validateContext(page, authorized.binding);
+      if (
+        page.context.principal_id !== options.binding.principalId ||
+        page.context.authorization_revision !== options.binding.authorizationRevision ||
+        page.items.length > request.limit ||
+        page.items.some(
+          (item) =>
+            !Number.isFinite(Date.parse(item.attested_at)) ||
+            !Number.isFinite(Date.parse(item.expires_at)) ||
+            Date.parse(item.attested_at) > now() ||
+            Date.parse(item.expires_at) <= now() ||
+            Date.parse(item.expires_at) <= Date.parse(item.attested_at),
+        )
+      )
+        return yield* new WorkstreamGatewayError({
+          reason: "stale",
+          detail:
+            "Thread placements do not match the current principal, grant, or attestation lifetime.",
+        });
+      const trustedEnvironments = yield* Effect.try({
+        try: () => options.placementTrustProvider?.readTrustedEnvironments() ?? [],
+        catch: () =>
+          new WorkstreamGatewayError({
+            reason: "invalid-response",
+            detail: "Native trust provider unavailable.",
+          }),
+      });
+      if (
+        new Set(trustedEnvironments.map((value) => value.environmentId)).size !==
+        trustedEnvironments.length
+      ) {
+        return yield* new WorkstreamGatewayError({
+          reason: "invalid-response",
+          detail: "Duplicate native trust environment.",
+        });
+      }
+      return yield* Schema.decodeUnknownEffect(T3PlacementResult)(
+        {
+          page,
+          trustedEnvironments,
+          readiness: options.placementTrustProvider ? "ready" : "trust-provider-required",
+        },
+        { onExcessProperty: "error" },
+      ).pipe(
+        Effect.mapError(
+          () =>
+            new WorkstreamGatewayError({
+              reason: "invalid-response",
+              detail: "Invalid native trust snapshot.",
+            }),
+        ),
+      );
+    });
     const readMetadata: WorkstreamGateway["Service"]["readMetadata"] = (input = {}) =>
       Effect.gen(function* () {
         const authorized = yield* authorize("workstreams:read");
@@ -496,6 +592,7 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
       });
 
     return WorkstreamGateway.of({
+      readThreadPlacements,
       readSession,
       readMetadata,
       readDetail: (id) =>

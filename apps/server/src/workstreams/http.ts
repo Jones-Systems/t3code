@@ -22,7 +22,12 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
-import { WorkstreamGateway, make, type WorkstreamGatewayError } from "./WorkstreamGateway.ts";
+import {
+  WorkstreamGateway,
+  make,
+  type WorkstreamGatewayError,
+  type T3PlacementTrustProvider,
+} from "./WorkstreamGateway.ts";
 
 export const WORKSTREAM_RESPONSE_HEADERS = {
   "cache-control": "private, no-store",
@@ -49,10 +54,15 @@ export const workstreamResponseHeadersLayer = HttpRouter.middleware(
 );
 
 const configured = makeControlPlaneWorkstreamTransport();
-export const workstreamGatewayLayerLive = Layer.effect(
-  WorkstreamGateway,
-  make(configured.transport, { binding: configured.binding }),
-);
+export const makeWorkstreamGatewayLayerLive = (placementTrustProvider?: T3PlacementTrustProvider) =>
+  Layer.effect(
+    WorkstreamGateway,
+    make(configured.transport, {
+      binding: configured.binding,
+      ...(placementTrustProvider ? { placementTrustProvider } : {}),
+    }),
+  );
+export const workstreamGatewayLayerLive = makeWorkstreamGatewayLayerLive();
 
 const internal = <A>(operation: string, effect: Effect.Effect<A, WorkstreamGatewayError>) =>
   effect.pipe(
@@ -82,6 +92,13 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
         yield* requireEnvironmentScope(AuthOrchestrationReadScope);
       });
     return handlers
+      .handle("threadPlacements", (args) =>
+        read(args.endpoint.name).pipe(
+          Effect.andThen(
+            internal("threadPlacements", gateway.readThreadPlacements(pageInput(args.payload))),
+          ),
+        ),
+      )
       .handle("list", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(internal("list", gateway.readMetadata(pageInput(args.payload)))),

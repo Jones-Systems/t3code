@@ -1,4 +1,10 @@
-import type { MembershipEpisode, NativeReference, T3WorkstreamMetadata } from "@t3tools/contracts";
+import type {
+  MembershipEpisode,
+  NativeReference,
+  T3ThreadPlacement,
+  T3WorkstreamMetadata,
+} from "@t3tools/contracts";
+import { currentT3Placement } from "@t3tools/client-runtime/state/workstreams";
 
 export interface WorkstreamThreadLike {
   readonly environmentId: string;
@@ -43,9 +49,16 @@ function nativeThreadKey(
     identity.id_kind !== "internal" ||
     identity.account_provenance.kind !== "not_account_scoped" ||
     registration.state !== "attested" ||
+    !Number.isSafeInteger(registration.attestation_version) ||
+    registration.attestation_version < 1 ||
+    registration.attested_at === null ||
+    !Number.isFinite(Date.parse(registration.attested_at)) ||
+    Date.parse(registration.attested_at) > trustedNowMs ||
     registration.expires_at === null ||
+    !Number.isFinite(Date.parse(registration.expires_at)) ||
     Date.parse(registration.expires_at) <= trustedNowMs ||
     evidence === null ||
+    !/^[a-f0-9]{64}$/.test(evidence.evidence_sha256) ||
     trustedEnvironment === undefined ||
     evidence.provider !== identity.provider ||
     evidence.source_instance_id !== identity.source_instance_id ||
@@ -59,26 +72,50 @@ function nativeThreadKey(
 
 export function groupNativeThreadsByWorkstream<Thread extends WorkstreamThreadLike>(input: {
   readonly workstreams: readonly T3WorkstreamMetadata[];
-  readonly memberships: readonly MembershipEpisode[];
-  readonly references: readonly NativeReference[];
+  readonly memberships?: readonly MembershipEpisode[];
+  readonly references?: readonly NativeReference[];
+  readonly placements?: readonly T3ThreadPlacement[];
   readonly threads: readonly Thread[];
   readonly trustedNow: string;
   readonly trustedEnvironments: ReadonlyMap<string, TrustedT3EnvironmentAttestation>;
 }): NativeWorkstreamThreadGrouping<Thread> {
   const trustedNowMs = Date.parse(input.trustedNow);
   const referenceKeys = new Map<string, string>();
-  for (const reference of input.references) {
+  for (const reference of input.references ?? []) {
     const key = Number.isFinite(trustedNowMs)
       ? nativeThreadKey(reference, trustedNowMs, input.trustedEnvironments)
       : null;
     if (key !== null) referenceKeys.set(reference.native_reference_id, key);
   }
+  const invalidReferences = new Set<string>();
+  for (const placement of input.placements ?? []) {
+    const trust = input.trustedEnvironments.get(placement.source_instance_id);
+    if (
+      !currentT3Placement(placement, trustedNowMs) ||
+      !trust ||
+      trust.authorityNamespace !== placement.authority_namespace ||
+      trust.storeGeneration !== placement.store_generation ||
+      !Number.isSafeInteger(placement.source_binding_version) ||
+      placement.source_binding_version < 1 ||
+      !Number.isSafeInteger(placement.attestation_version) ||
+      placement.attestation_version < 1 ||
+      !/^[a-f0-9]{64}$/.test(placement.evidence_sha256)
+    ) {
+      invalidReferences.add(placement.native_reference_id);
+      continue;
+    }
+    const key = nativeWorkstreamThreadKey(placement.source_instance_id, placement.native_thread_id);
+    const prior = referenceKeys.get(placement.native_reference_id);
+    if (prior !== undefined && prior !== key) invalidReferences.add(placement.native_reference_id);
+    referenceKeys.set(placement.native_reference_id, key);
+  }
+  for (const id of invalidReferences) referenceKeys.delete(id);
 
   const primaryByKey = new Map<string, string>();
   const secondaryByKey = new Map<string, string[]>();
   const conflictingKeys = new Set<string>();
-  for (const membership of input.memberships) {
-    if (membership.closed !== null) continue;
+  for (const membership of [...(input.memberships ?? []), ...(input.placements ?? [])]) {
+    if ("closed" in membership && membership.closed !== null) continue;
     const key = referenceKeys.get(membership.native_reference_id);
     if (key === undefined) continue;
     if (membership.kind === "secondary") {
@@ -99,10 +136,15 @@ export function groupNativeThreadsByWorkstream<Thread extends WorkstreamThreadLi
   const threadsByWorkstream = new Map<string, Thread[]>();
   const groupedKeys = new Set<string>();
   const ungrouped: Thread[] = [];
+  const availableWorkstreams = new Set(input.workstreams.map((item) => item.workstreamId));
   for (const thread of input.threads) {
     const key = nativeWorkstreamThreadKey(thread.environmentId, thread.id);
     const workstreamId = primaryByKey.get(key);
-    if (workstreamId === undefined || conflictingKeys.has(key)) {
+    if (
+      workstreamId === undefined ||
+      !availableWorkstreams.has(workstreamId) ||
+      conflictingKeys.has(key)
+    ) {
       ungrouped.push(thread);
       continue;
     }
