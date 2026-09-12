@@ -13,6 +13,16 @@ import {
   WorkstreamFreshness,
   WorkstreamLifecycleDeclaration,
   WorkstreamNativeIdentity,
+  NativeReference,
+  WorkstreamEdge,
+  WorkstreamAuditEvent,
+  WorkstreamOwnerGrant,
+  WorkstreamError,
+  WorkstreamSession,
+  WorkstreamCommittedReceipt,
+  WorkstreamPendingReceipt,
+  WorkstreamRejectedReceipt,
+  WorkstreamTerminalReceipt,
   WorkstreamProgress,
   WorkstreamPrLocator,
   WorkstreamRegistrationVerification,
@@ -43,10 +53,12 @@ interface FixtureCorpus {
 const supported = new Map<string, (value: unknown) => unknown>([
   ["Command", (value) => Schema.decodeUnknownSync(WorkstreamCommand)(value, options)],
   ["Workstream", (value) => Schema.decodeUnknownSync(Workstream)(value, options)],
+  ["NativeReference", (value) => Schema.decodeUnknownSync(NativeReference)(value, options)],
   ["NativeIdentity", (value) => Schema.decodeUnknownSync(WorkstreamNativeIdentity)(value, options)],
   ["PrLocator", (value) => Schema.decodeUnknownSync(WorkstreamPrLocator)(value, options)],
   ["MembershipEpisode", (value) => Schema.decodeUnknownSync(MembershipEpisode)(value, options)],
   ["DeclarationRevision", (value) => Schema.decodeUnknownSync(DeclarationRevision)(value, options)],
+  ["Edge", (value) => Schema.decodeUnknownSync(WorkstreamEdge)(value, options)],
   [
     "LifecycleDeclaration",
     (value) => Schema.decodeUnknownSync(WorkstreamLifecycleDeclaration)(value, options),
@@ -60,6 +72,20 @@ const supported = new Map<string, (value: unknown) => unknown>([
   ],
   ["PrObservation", (value) => Schema.decodeUnknownSync(WorkstreamPrObservation)(value, options)],
   ["Receipt", (value) => Schema.decodeUnknownSync(WorkstreamReceipt)(value, options)],
+  [
+    "CommittedReceipt",
+    (value) => Schema.decodeUnknownSync(WorkstreamCommittedReceipt)(value, options),
+  ],
+  ["PendingReceipt", (value) => Schema.decodeUnknownSync(WorkstreamPendingReceipt)(value, options)],
+  [
+    "RejectedReceipt",
+    (value) => Schema.decodeUnknownSync(WorkstreamRejectedReceipt)(value, options),
+  ],
+  [
+    "TerminalReceipt",
+    (value) => Schema.decodeUnknownSync(WorkstreamTerminalReceipt)(value, options),
+  ],
+  ["AuditEvent", (value) => Schema.decodeUnknownSync(WorkstreamAuditEvent)(value, options)],
   ["WorkstreamPage", (value) => Schema.decodeUnknownSync(WorkstreamPage)(value, options)],
   ["ReferencePage", (value) => Schema.decodeUnknownSync(WorkstreamReferencePage)(value, options)],
   ["MembershipPage", (value) => Schema.decodeUnknownSync(WorkstreamMembershipPage)(value, options)],
@@ -75,9 +101,26 @@ const supported = new Map<string, (value: unknown) => unknown>([
     (value) => Schema.decodeUnknownSync(WorkstreamReferenceDetail)(value, options),
   ],
   ["Capabilities", (value) => Schema.decodeUnknownSync(WorkstreamCapabilities)(value, options)],
+  ["OwnerGrant", (value) => Schema.decodeUnknownSync(WorkstreamOwnerGrant)(value, options)],
+  ["Error", (value) => Schema.decodeUnknownSync(WorkstreamError)(value, options)],
+  ["BrowserSession", (value) => Schema.decodeUnknownSync(WorkstreamSession)(value, options)],
 ]);
 
 const schemaName = (reference: string) => reference.slice(reference.lastIndexOf("/") + 1);
+const fixtureFor = (name: string): unknown => {
+  const fixture = conformance.cases.find((candidate) => schemaName(candidate.schema) === name);
+  if (fixture === undefined) throw new Error(`Missing ${name} conformance fixture`);
+  return structuredClone(fixture.value);
+};
+const commandFor = (operation: string): Record<string, any> => {
+  const fixture = conformance.cases.find(
+    (candidate) =>
+      schemaName(candidate.schema) === "Command" &&
+      (candidate.value as { action?: { operation?: string } }).action?.operation === operation,
+  );
+  if (fixture === undefined) throw new Error(`Missing ${operation} command fixture`);
+  return structuredClone(fixture.value) as Record<string, any>;
+};
 
 describe("frozen accepted Workstream v1 fixtures", () => {
   it("preserves all immutable source bytes", () => {
@@ -102,20 +145,9 @@ describe("frozen accepted Workstream v1 fixtures", () => {
       expect(() => decode(fixture.value), fixture.name).not.toThrow();
       exercised.add(name);
     }
-    for (const required of [
-      "Command",
-      "Workstream",
-      "NativeIdentity",
-      "MembershipEpisode",
-      "DeclarationRevision",
-      "LifecycleDeclaration",
-      "PrObservation",
-      "Receipt",
-      "WorkstreamPage",
-      "ReferenceDetail",
-      "Capabilities",
-    ])
-      expect(exercised.has(required), required).toBe(true);
+    expect(exercised).toEqual(
+      new Set(conformance.cases.map((fixture) => schemaName(fixture.schema))),
+    );
   });
 
   it("rejects every relevant negative fixture", () => {
@@ -126,6 +158,154 @@ describe("frozen accepted Workstream v1 fixtures", () => {
       expect(() => decode(fixture.value), fixture.name).toThrow();
       exercised += 1;
     }
-    expect(exercised).toBeGreaterThanOrEqual(10);
+    expect(exercised).toBe(negatives.cases.length);
+  });
+
+  it("rejects out-of-contract receipt effects and cardinality", () => {
+    const receipt = fixtureFor("CommittedReceipt") as Record<string, any>;
+    const mutations = [
+      (value: Record<string, any>) =>
+        value.effects.membership_ids.push("membership-two", "membership-three"),
+      (value: Record<string, any>) =>
+        value.effects.workstream_versions.push(
+          { workstream_id: "ws-two", version: 1 },
+          { workstream_id: "ws-three", version: 1 },
+        ),
+      (value: Record<string, any>) => (value.effects.workstream_versions[0].version = 0),
+      (value: Record<string, any>) => (value.effects.declaration_revision = 0),
+      (value: Record<string, any>) => (value.effects.coordination_disposition.disposition = "done"),
+      (value: Record<string, any>) =>
+        (value.effects.native_settlement = {
+          native_reference_id: "ref-t3-thread",
+          native_action: "archive",
+          outcome: "committed",
+        }),
+      (value: Record<string, any>) =>
+        (value.effects.registration = {
+          state: "quarantined",
+          attestation_version: 1,
+          attested_at: null,
+          expires_at: null,
+          evidence: null,
+        }),
+    ];
+    for (const mutate of mutations) {
+      const candidate = structuredClone(receipt);
+      mutate(candidate);
+      expect(() =>
+        Schema.decodeUnknownSync(WorkstreamCommittedReceipt)(candidate, options),
+      ).toThrow();
+    }
+  });
+
+  it("rejects malformed receipt envelopes, errors, observations, and audit history", () => {
+    const committed = fixtureFor("CommittedReceipt") as Record<string, any>;
+    for (const mutate of [
+      (value: Record<string, any>) => (value.request_sha256 = "not-a-digest"),
+      (value: Record<string, any>) => (value.server_generation = 0),
+      (value: Record<string, any>) => (value.accepted_at = "2026-09-12"),
+      (value: Record<string, any>) => (value.operation = "settle_everything"),
+    ]) {
+      const candidate = structuredClone(committed);
+      mutate(candidate);
+      expect(() =>
+        Schema.decodeUnknownSync(WorkstreamCommittedReceipt)(candidate, options),
+      ).toThrow();
+    }
+
+    const pending = fixtureFor("PendingReceipt") as Record<string, any>;
+    pending.retry_after_seconds = 3601;
+    expect(() => Schema.decodeUnknownSync(WorkstreamPendingReceipt)(pending, options)).toThrow();
+
+    const error = fixtureFor("Error") as Record<string, any>;
+    error.status = 500;
+    expect(() => Schema.decodeUnknownSync(WorkstreamError)(error, options)).toThrow();
+
+    const observation = fixtureFor("PrObservation") as Record<string, any>;
+    observation.last_success.observed_at = "yesterday";
+    expect(() => Schema.decodeUnknownSync(WorkstreamPrObservation)(observation, options)).toThrow();
+
+    const audit = fixtureFor("AuditEvent") as Record<string, any>;
+    for (const mutate of [
+      (value: Record<string, any>) => (value.command_id = "short"),
+      (value: Record<string, any>) => (value.occurred_at = "yesterday"),
+      (value: Record<string, any>) => (value.workstream_versions[0].version = 0),
+      (value: Record<string, any>) =>
+        value.membership_ids.push("membership-two", "membership-three"),
+      (value: Record<string, any>) => (value.declaration_revision = 0),
+    ]) {
+      const candidate = structuredClone(audit);
+      mutate(candidate);
+      expect(() => Schema.decodeUnknownSync(WorkstreamAuditEvent)(candidate, options)).toThrow();
+    }
+  });
+
+  it("enforces registration state conditionals in both directions", () => {
+    const quarantined = {
+      state: "quarantined",
+      attestation_version: 0,
+      attested_at: null,
+      expires_at: null,
+      evidence: null,
+    };
+    expect(() =>
+      Schema.decodeUnknownSync(WorkstreamRegistrationVerification)(quarantined, options),
+    ).not.toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(WorkstreamRegistrationVerification)(
+        { ...quarantined, attestation_version: 1 },
+        options,
+      ),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(WorkstreamRegistrationVerification)(
+        { ...quarantined, state: "attested" },
+        options,
+      ),
+    ).toThrow();
+  });
+
+  it("enforces conditional explanation fields and positive settlement fencing", () => {
+    const disposition = commandFor("set_coordination_disposition");
+    disposition.action.other_disposition = "unexpected explanation";
+    expect(() => Schema.decodeUnknownSync(WorkstreamCommand)(disposition, options)).toThrow();
+
+    const otherDisposition = commandFor("set_coordination_disposition");
+    otherDisposition.action.disposition = "other";
+    otherDisposition.action.other_disposition = null;
+    expect(() => Schema.decodeUnknownSync(WorkstreamCommand)(otherDisposition, options)).toThrow();
+
+    const settlement = commandFor("request_native_t3_settlement");
+    settlement.action.expected_attestation_version = 0;
+    expect(() => Schema.decodeUnknownSync(WorkstreamCommand)(settlement, options)).toThrow();
+
+    const membership = fixtureFor("MembershipEpisode") as Record<string, any>;
+    membership.closed = {
+      at: "2026-09-12T00:00:01.000Z",
+      actor: { principal_id: "principal-synthetic" },
+      command_id: "synthetic-cmd-close-membership",
+      registry_version: 2,
+      reason: "removed",
+      other_reason: "unexpected explanation",
+    };
+    expect(() => Schema.decodeUnknownSync(MembershipEpisode)(membership, options)).toThrow();
+  });
+
+  it("caps every decoded collection page at 100 items", () => {
+    const pages = [
+      [WorkstreamPage, fixtureFor("WorkstreamPage")],
+      [WorkstreamReferencePage, fixtureFor("ReferencePage")],
+      [WorkstreamMembershipPage, fixtureFor("MembershipPage")],
+      [WorkstreamDeclarationPage, fixtureFor("DeclarationPage")],
+      [WorkstreamEdgePage, fixtureFor("EdgePage")],
+    ] as const;
+    for (const [schema, source] of pages) {
+      const page = source as Record<string, any>;
+      page.items = Array.from({ length: 101 }, () => structuredClone(page.items[0]));
+      expect(() => Schema.decodeUnknownSync(schema)(page, options)).toThrow();
+    }
+    const history = fixtureFor("HistoryPage") as Record<string, any>;
+    history.items = Array.from({ length: 101 }, () => fixtureFor("AuditEvent"));
+    expect(() => Schema.decodeUnknownSync(WorkstreamHistoryPage)(history, options)).toThrow();
   });
 });
