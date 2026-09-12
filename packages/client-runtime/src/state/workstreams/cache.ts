@@ -56,11 +56,13 @@ function minimize(state: WorkstreamState): WorkstreamMetadataSnapshot {
 /** In-memory, metadata-only cache. Authorization loss makes every read unavailable. */
 export class WorkstreamMetadataCache {
   readonly #entries = new Map<string, WorkstreamMetadataSnapshot>();
+  readonly maxEntries: number;
 
-  constructor(readonly maxEntries = 4) {
+  constructor(maxEntries = 4) {
     if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
       throw new RangeError("maxEntries must be a positive safe integer");
     }
+    this.maxEntries = maxEntries;
   }
 
   read(context: WorkstreamReadContext, authorized: boolean): WorkstreamMetadataSnapshot | null {

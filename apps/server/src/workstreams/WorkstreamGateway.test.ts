@@ -156,7 +156,15 @@ it.effect("binds the accepted contract and exact idempotency bytes", () =>
     const conflict = yield* gateway
       .submit(
         updateCommand({
-          action: { ...command.action, name: "Different bytes" },
+          action: {
+            operation: "update_workstream",
+            workstream_id: "ws-core-v1",
+            expected_version: 3,
+            name: "Different bytes",
+            lifecycle: "active",
+            progress: { state: "progressing" },
+            sort_order: 10,
+          },
         }),
       )
       .pipe(Effect.flip);
@@ -221,7 +229,7 @@ it.effect("reconciles pending and unresolved commands only through the exact GET
   Effect.gen(function* () {
     const fixture = makeSyntheticWorkstreamTransport();
     const command = updateCommand({ command_id: "command-pending-0001" });
-    const body = JSON.stringify(command);
+    const body = "fixture-request-body";
     const terminal = yield* fixture.submitCommand({
       body,
       command,

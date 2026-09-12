@@ -15,16 +15,23 @@ import {
   MoreHorizontalIcon,
   PencilIcon,
 } from "lucide-react";
+import * as Crypto from "effect/Crypto";
+import * as Effect from "effect/Effect";
 import { useEffect, useMemo, useState } from "react";
 
+import { runtime } from "../../lib/runtime";
 import { useWorkstreams } from "../../state/workstreams";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 
-function commandId(): string {
-  return `t3-workstream-${crypto.randomUUID()}`;
-}
+const commandId = () =>
+  runtime.runPromise(
+    Crypto.Crypto.pipe(
+      Effect.flatMap((crypto) => crypto.randomUUIDv4),
+      Effect.map((uuid) => `t3-workstream-${uuid}`),
+    ),
+  );
 
 export function WorkstreamSidebarSection() {
   const { data, submit, loadDetail } = useWorkstreams();
@@ -60,29 +67,33 @@ export function WorkstreamSidebarSection() {
     changes: { readonly name?: string; readonly sortOrder?: number },
   ) => {
     if (!data) return;
-    const command: WorkstreamCommand = {
-      command_id: commandId(),
-      expected_server_generation: data.binding.serverGeneration,
-      expected_registry_version: data.binding.registryVersion,
-      action: {
-        operation: "update_workstream",
-        workstream_id: item.workstreamId,
-        expected_version: item.version,
-        name: changes.name ?? item.name,
-        lifecycle: item.lifecycle,
-        progress: item.progress,
-        sort_order: changes.sortOrder ?? item.sortOrder,
-      },
-    };
-    void submit(command).then(
-      (value) => {
-        setReceipt(value);
-        setCommandError(null);
-      },
-      (cause: unknown) => {
-        setCommandError(cause instanceof Error ? cause.message : "Workstream update failed.");
-      },
-    );
+    void commandId()
+      .then((id) => {
+        const command: WorkstreamCommand = {
+          command_id: id,
+          expected_server_generation: data.binding.serverGeneration,
+          expected_registry_version: data.binding.registryVersion,
+          action: {
+            operation: "update_workstream",
+            workstream_id: item.workstreamId,
+            expected_version: item.version,
+            name: changes.name ?? item.name,
+            lifecycle: item.lifecycle,
+            progress: item.progress,
+            sort_order: changes.sortOrder ?? item.sortOrder,
+          },
+        };
+        return submit(command);
+      })
+      .then(
+        (value) => {
+          setReceipt(value);
+          setCommandError(null);
+        },
+        (cause: unknown) => {
+          setCommandError(cause instanceof Error ? cause.message : "Workstream update failed.");
+        },
+      );
   };
   const move = (item: T3WorkstreamMetadata, direction: "up" | "down") => {
     const index = items.findIndex((candidate) => candidate.workstreamId === item.workstreamId);

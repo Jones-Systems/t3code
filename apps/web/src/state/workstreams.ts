@@ -16,7 +16,7 @@ import { runPrimaryHttp } from "../lib/runtime";
 
 type PrimaryClient = Effect.Success<typeof PrimaryEnvironmentHttpClient>;
 
-const request = <A>(run: (client: PrimaryClient) => Effect.Effect<A, unknown>) =>
+const request = <A, E>(run: (client: PrimaryClient) => Effect.Effect<A, E>) =>
   runPrimaryHttp(PrimaryEnvironmentHttpClient.pipe(Effect.flatMap(run)));
 
 export interface WorkstreamListView {
@@ -71,15 +71,12 @@ export function useWorkstreams(): WorkstreamListView {
         client.workstreams.submit({ headers: {}, payload: { command } }),
       );
       // Pending effects reconcile through the exact GET route; commands are never resubmitted.
-      for (
-        let attempts = 0;
-        (receipt.state === "pending" || receipt.state === "unresolved") && attempts < 30;
-        attempts += 1
-      ) {
+      while (receipt.state === "pending" || receipt.state === "unresolved") {
+        const retryAfterSeconds = receipt.retry_after_seconds;
         await new Promise<void>((resolve) => {
           const timer = window.setTimeout(
             resolve,
-            Math.min(30_000, Math.max(250, receipt.retry_after_seconds * 1_000)),
+            Math.min(30_000, Math.max(250, retryAfterSeconds * 1_000)),
           );
           void timer;
         });

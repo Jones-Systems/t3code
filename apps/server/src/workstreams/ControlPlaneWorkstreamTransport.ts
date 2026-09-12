@@ -17,6 +17,7 @@ import {
   type T3WorkstreamBinding,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 import { WorkstreamTransportError, type WorkstreamTransport } from "./WorkstreamGateway.ts";
@@ -36,6 +37,26 @@ export interface ControlPlaneWorkstreamActivation {
 export type WorkstreamActivation =
   | { readonly state: "disabled" }
   | { readonly state: "enabled"; readonly value: ControlPlaneWorkstreamActivation };
+
+export type WorkstreamFetch = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
+
+function hasCanonicalActivation(config: ControlPlaneWorkstreamActivation): boolean {
+  const headerValues = [config.ownerId, config.principalId, config.keyId, config.signingSecret];
+  return (
+    config.baseUrl.protocol === "https:" &&
+    !config.baseUrl.username &&
+    !config.baseUrl.password &&
+    !config.baseUrl.hash &&
+    !config.baseUrl.search &&
+    (config.baseUrl.pathname === "/" || config.baseUrl.pathname === "") &&
+    Number.isSafeInteger(config.authorizationRevision) &&
+    config.authorizationRevision > 0 &&
+    headerValues.every((value) => value.length > 0 && !/[\r\n]/.test(value))
+  );
+}
 
 function activationFromEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
@@ -60,15 +81,7 @@ function activationFromEnvironment(
   }
   try {
     const baseUrl = new URL(raw);
-    if (
-      baseUrl.protocol !== "https:" ||
-      baseUrl.username ||
-      baseUrl.password ||
-      baseUrl.hash ||
-      (baseUrl.pathname !== "/" && baseUrl.pathname !== "")
-    )
-      return { state: "disabled" };
-    return {
+    const activation = {
       state: "enabled",
       value: {
         baseUrl,
@@ -78,7 +91,8 @@ function activationFromEnvironment(
         keyId,
         signingSecret,
       },
-    };
+    } as const;
+    return hasCanonicalActivation(activation.value) ? activation : { state: "disabled" };
   } catch {
     return { state: "disabled" };
   }
@@ -114,8 +128,75 @@ function query(input: { readonly limit: number; readonly cursor?: string }): str
   return value.toString();
 }
 
+async function performRequest(input: {
+  readonly fetch: WorkstreamFetch;
+  readonly config: ControlPlaneWorkstreamActivation;
+  readonly method: "GET" | "POST";
+  readonly target: string;
+  readonly body: string;
+  readonly sentAt: string;
+  readonly idempotencyKey?: string;
+  readonly signal: AbortSignal;
+}): Promise<string> {
+  if (
+    !input.target.startsWith("/workstreams/v1/") ||
+    input.target.includes("#") ||
+    /[\r\n]/.test(input.target)
+  )
+    throw new Error("invalid_target");
+  const requestId = randomUUID();
+  const nonce = randomBytes(24).toString("base64url");
+  const contentSha256 =
+    input.body === "" ? EMPTY_SHA256 : createHash("sha256").update(input.body).digest("hex");
+  const canonical = [
+    "hmac-sha256-v1",
+    WORKSTREAM_CONTRACT_VERSION,
+    requestId,
+    input.idempotencyKey ?? "",
+    input.sentAt,
+    nonce,
+    input.config.principalId,
+    input.config.keyId,
+    input.method,
+    input.target,
+    contentSha256,
+  ].join("\n");
+  const signature = createHmac("sha256", input.config.signingSecret)
+    .update(canonical)
+    .digest("base64url");
+  const response = await input.fetch(new URL(input.target, input.config.baseUrl), {
+    method: input.method,
+    redirect: "error",
+    signal: input.signal,
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json; charset=utf-8",
+      "x-control-algorithm": "hmac-sha256-v1",
+      "x-control-contract-version": `workstreams/${WORKSTREAM_CONTRACT_VERSION}`,
+      "x-control-contract-manifest": WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      "x-control-request-id": requestId,
+      "x-control-timestamp": input.sentAt,
+      "x-control-nonce": nonce,
+      "x-control-principal-id": input.config.principalId,
+      "x-control-key-id": input.config.keyId,
+      "x-control-content-sha256": contentSha256,
+      "x-control-signature": signature,
+      ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
+    },
+    ...(input.body === "" ? {} : { body: input.body }),
+  });
+  const declared = response.headers.get("content-length");
+  if (declared !== null && Number(declared) > WORKSTREAM_MAX_RESPONSE_BYTES)
+    throw new Error("response_too_large");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > WORKSTREAM_MAX_RESPONSE_BYTES) throw new Error("response_too_large");
+  if (!response.ok) throw new Error(`http_${response.status}`);
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
 export function makeControlPlaneWorkstreamTransport(
   activation: WorkstreamActivation = activationFromEnvironment(),
+  fetchPort: WorkstreamFetch = globalThis.fetch.bind(globalThis),
 ): {
   readonly transport: WorkstreamTransport;
   readonly binding: Pick<
@@ -123,7 +204,7 @@ export function makeControlPlaneWorkstreamTransport(
     "registryId" | "ownerId" | "principalId" | "authorizationRevision"
   >;
 } {
-  if (activation.state === "disabled") {
+  if (activation.state === "disabled" || !hasCanonicalActivation(activation.value)) {
     return {
       transport: disabled(),
       binding: {
@@ -135,86 +216,59 @@ export function makeControlPlaneWorkstreamTransport(
     };
   }
   const config = activation.value;
-  const request = <A>(
+  const request = <S extends Schema.Top>(
     operation: string,
     method: "GET" | "POST",
     target: string,
-    schema: Schema.Schema<A>,
+    schema: S,
     body = "",
     idempotencyKey?: string,
-  ) =>
-    Effect.tryPromise({
-      try: async (signal) => {
-        if (!target.startsWith("/workstreams/v1/") || target.includes("#") || /[\r\n]/.test(target))
-          throw new Error("invalid_target");
-        const sentAt = new Date().toISOString();
-        const requestId = randomUUID();
-        const nonce = randomBytes(24).toString("base64url");
-        const contentSha256 =
-          body === "" ? EMPTY_SHA256 : createHash("sha256").update(body).digest("hex");
-        const canonical = [
-          "hmac-sha256-v1",
-          WORKSTREAM_CONTRACT_VERSION,
-          requestId,
-          idempotencyKey ?? "",
-          sentAt,
-          nonce,
-          config.principalId,
-          config.keyId,
-          method,
-          target,
-          contentSha256,
-        ].join("\n");
-        const signature = createHmac("sha256", config.signingSecret)
-          .update(canonical)
-          .digest("base64url");
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-        signal.addEventListener("abort", () => controller.abort(), { once: true });
-        try {
-          const response = await fetch(new URL(target, config.baseUrl), {
+  ): Effect.Effect<S["Type"], WorkstreamTransportError, S["DecodingServices"]> =>
+    Effect.gen(function* () {
+      const sentAt = DateTime.formatIso(yield* DateTime.now);
+      const responseBody = yield* Effect.tryPromise({
+        try: (signal) =>
+          performRequest({
+            fetch: fetchPort,
+            config,
             method,
-            redirect: "error",
-            signal: controller.signal,
-            headers: {
-              accept: "application/json",
-              "content-type": "application/json; charset=utf-8",
-              "x-control-algorithm": "hmac-sha256-v1",
-              "x-control-contract-version": `workstreams/${WORKSTREAM_CONTRACT_VERSION}`,
-              "x-control-contract-manifest": WORKSTREAM_CONTRACT_MANIFEST_SHA256,
-              "x-control-request-id": requestId,
-              "x-control-timestamp": sentAt,
-              "x-control-nonce": nonce,
-              "x-control-principal-id": config.principalId,
-              "x-control-key-id": config.keyId,
-              "x-control-content-sha256": contentSha256,
-              "x-control-signature": signature,
-              ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
-            },
-            ...(body === "" ? {} : { body }),
-          });
-          const declared = response.headers.get("content-length");
-          if (declared !== null && Number(declared) > WORKSTREAM_MAX_RESPONSE_BYTES)
-            throw new Error("response_too_large");
-          const bytes = new Uint8Array(await response.arrayBuffer());
-          if (bytes.byteLength > WORKSTREAM_MAX_RESPONSE_BYTES)
-            throw new Error("response_too_large");
-          const value = JSON.parse(
-            new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-          ) as unknown;
-          if (!response.ok) throw new Error(`http_${response.status}`);
-          return Schema.decodeUnknownSync(schema)(value);
-        } finally {
-          clearTimeout(timeout);
-        }
-      },
-      catch: (cause) =>
-        new WorkstreamTransportError({
-          operation,
-          effect: method === "POST" ? "unknown-effect" : "no-effect",
-          detail: cause instanceof Error ? cause.message : "Control-plane request failed.",
-          cause,
+            target,
+            body,
+            sentAt,
+            ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+            signal,
+          }),
+        catch: (cause) =>
+          new WorkstreamTransportError({
+            operation,
+            effect: method === "POST" ? "unknown-effect" : "no-effect",
+            detail: cause instanceof Error ? cause.message : "Control-plane request failed.",
+            cause,
+          }),
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: TIMEOUT_MS,
+          orElse: () =>
+            Effect.fail(
+              new WorkstreamTransportError({
+                operation,
+                effect: method === "POST" ? "unknown-effect" : "no-effect",
+                detail: "Control-plane request timed out.",
+              }),
+            ),
         }),
+      );
+      return yield* Schema.decodeEffect(Schema.fromJsonString(schema))(responseBody).pipe(
+        Effect.mapError(
+          (cause) =>
+            new WorkstreamTransportError({
+              operation,
+              effect: method === "POST" ? "unknown-effect" : "no-effect",
+              detail: "Control-plane returned invalid JSON for the accepted contract.",
+              cause,
+            }),
+        ),
+      );
     });
   return {
     binding: {

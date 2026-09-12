@@ -2,11 +2,11 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
-  WorkstreamDeclarationPage,
-  WorkstreamDetail,
-  WorkstreamEdgePage,
-  WorkstreamHistoryPage,
-  WorkstreamMembershipPage,
+  type WorkstreamDeclarationPage,
+  type WorkstreamDetail,
+  type WorkstreamEdgePage,
+  type WorkstreamHistoryPage,
+  type WorkstreamMembershipPage,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -18,7 +18,7 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
-import { WorkstreamGateway, make } from "./WorkstreamGateway.ts";
+import { WorkstreamGateway, make, type WorkstreamGatewayError } from "./WorkstreamGateway.ts";
 
 const configured = makeControlPlaneWorkstreamTransport();
 export const workstreamGatewayLayerLive = Layer.effect(
@@ -26,10 +26,20 @@ export const workstreamGatewayLayerLive = Layer.effect(
   make(configured.transport, { binding: configured.binding }),
 );
 
-const internal = <A>(operation: string, effect: Effect.Effect<A, unknown>) =>
+const internal = <A>(operation: string, effect: Effect.Effect<A, WorkstreamGatewayError>) =>
   effect.pipe(
     Effect.catch((cause) => failEnvironmentInternal("internal_error", { operation, cause })),
   );
+
+const pageInput = (payload: {
+  readonly limit?: number | undefined;
+  readonly cursor?: string | undefined;
+}): { readonly limit?: number; readonly cursor?: string } => {
+  const input: { limit?: number; cursor?: string } = {};
+  if (payload.limit !== undefined) input.limit = payload.limit;
+  if (payload.cursor !== undefined) input.cursor = payload.cursor;
+  return input;
+};
 
 export const workstreamHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -44,14 +54,14 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
     return handlers
       .handle("list", (args) =>
         read(args.endpoint.name).pipe(
-          Effect.andThen(internal("list", gateway.readMetadata(args.payload))),
+          Effect.andThen(internal("list", gateway.readMetadata(pageInput(args.payload)))),
         ),
       )
       .handle("detail", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
             internal("detail", gateway.readDetail(args.params.workstreamId)).pipe(
-              Effect.map((value) => value as typeof WorkstreamDetail.Type),
+              Effect.map((value) => value as WorkstreamDetail),
             ),
           ),
         ),
@@ -61,8 +71,8 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
           Effect.andThen(
             internal(
               "memberships",
-              gateway.readMemberships(args.params.workstreamId, args.payload),
-            ).pipe(Effect.map((value) => value as typeof WorkstreamMembershipPage.Type)),
+              gateway.readMemberships(args.params.workstreamId, pageInput(args.payload)),
+            ).pipe(Effect.map((value) => value as WorkstreamMembershipPage)),
           ),
         ),
       )
@@ -71,26 +81,28 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
           Effect.andThen(
             internal(
               "declarations",
-              gateway.readDeclarations(args.params.workstreamId, args.payload),
-            ).pipe(Effect.map((value) => value as typeof WorkstreamDeclarationPage.Type)),
+              gateway.readDeclarations(args.params.workstreamId, pageInput(args.payload)),
+            ).pipe(Effect.map((value) => value as WorkstreamDeclarationPage)),
           ),
         ),
       )
       .handle("edges", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal("edges", gateway.readEdges(args.params.workstreamId, args.payload)).pipe(
-              Effect.map((value) => value as typeof WorkstreamEdgePage.Type),
-            ),
+            internal(
+              "edges",
+              gateway.readEdges(args.params.workstreamId, pageInput(args.payload)),
+            ).pipe(Effect.map((value) => value as WorkstreamEdgePage)),
           ),
         ),
       )
       .handle("history", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal("history", gateway.readHistory(args.params.workstreamId, args.payload)).pipe(
-              Effect.map((value) => value as typeof WorkstreamHistoryPage.Type),
-            ),
+            internal(
+              "history",
+              gateway.readHistory(args.params.workstreamId, pageInput(args.payload)),
+            ).pipe(Effect.map((value) => value as WorkstreamHistoryPage)),
           ),
         ),
       )

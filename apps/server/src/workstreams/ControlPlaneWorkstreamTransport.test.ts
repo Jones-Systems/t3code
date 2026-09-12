@@ -6,7 +6,10 @@ import {
   WORKSTREAM_CONTRACT_MANIFEST_SHA256,
   WORKSTREAM_CONTRACT_VERSION,
 } from "@t3tools/contracts";
-import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
+import {
+  makeControlPlaneWorkstreamTransport,
+  type WorkstreamFetch,
+} from "./ControlPlaneWorkstreamTransport.ts";
 
 const activation = {
   state: "enabled",
@@ -22,10 +25,9 @@ const activation = {
 
 it.effect("sends bounded signed HTTPS requests and runtime-decodes responses", () =>
   Effect.gen(function* () {
-    const original = globalThis.fetch;
-    let observed: { readonly url: string; readonly headers: Headers } | null = null;
-    globalThis.fetch = async (input, init) => {
-      observed = { url: String(input), headers: new Headers(init?.headers) };
+    const observed: Array<{ readonly url: string; readonly headers: Headers }> = [];
+    const fetchPort: WorkstreamFetch = async (input, init) => {
+      observed.push({ url: String(input), headers: new Headers(init?.headers) });
       return new Response(
         JSON.stringify({
           contract_family: WORKSTREAM_CONTRACT_FAMILY,
@@ -38,49 +40,73 @@ it.effect("sends bounded signed HTTPS requests and runtime-decodes responses", (
         { status: 200, headers: { "content-type": "application/json" } },
       );
     };
-    try {
-      const configured = makeControlPlaneWorkstreamTransport(activation);
-      const capabilities = yield* configured.transport.getCapabilities({
-        contractVersion: "workstreams/1.0.0",
-        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
-      });
-      expect(capabilities.context.owner_id).toBe("owner-fixture");
-      expect(observed?.url).toBe("https://control-plane.example/workstreams/v1/capabilities");
-      expect(observed?.headers.get("x-control-signature")).toMatch(/^[A-Za-z0-9_-]{43}$/);
-      expect(observed?.headers.get("x-control-content-sha256")).toMatch(/^[0-9a-f]{64}$/);
-    } finally {
-      globalThis.fetch = original;
-    }
+    const configured = makeControlPlaneWorkstreamTransport(activation, fetchPort);
+    const capabilities = yield* configured.transport.getCapabilities({
+      contractVersion: "workstreams/1.0.0",
+      contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+    });
+    expect(capabilities.context.owner_id).toBe("owner-fixture");
+    const captured = observed[0];
+    expect(captured).toBeDefined();
+    expect(captured?.url).toBe("https://control-plane.example/workstreams/v1/capabilities");
+    expect(captured?.headers.get("x-control-signature")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(captured?.headers.get("x-control-content-sha256")).toMatch(/^[0-9a-f]{64}$/);
   }),
 );
 
 it.effect("rejects malformed and over-bound control-plane responses", () =>
   Effect.gen(function* () {
-    const original = globalThis.fetch;
-    try {
-      globalThis.fetch = async () => new Response(JSON.stringify({ owner_id: "wrong-shape" }));
-      const configured = makeControlPlaneWorkstreamTransport(activation);
-      const malformed = yield* configured.transport
-        .getCapabilities({
-          contractVersion: "workstreams/1.0.0",
-          contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
-        })
-        .pipe(Effect.flip);
-      expect(malformed.effect).toBe("no-effect");
+    const malformedFetch: WorkstreamFetch = async () =>
+      new Response(JSON.stringify({ owner_id: "wrong-shape" }));
+    const malformedConfigured = makeControlPlaneWorkstreamTransport(activation, malformedFetch);
+    const malformed = yield* malformedConfigured.transport
+      .getCapabilities({
+        contractVersion: "workstreams/1.0.0",
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      })
+      .pipe(Effect.flip);
+    expect(malformed.effect).toBe("no-effect");
 
-      globalThis.fetch = async () =>
-        new Response("x".repeat(1_048_577), {
-          headers: { "content-length": "1048577" },
-        });
-      const overBound = yield* configured.transport
-        .getCapabilities({
-          contractVersion: "workstreams/1.0.0",
-          contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
-        })
-        .pipe(Effect.flip);
-      expect(overBound.detail).toBe("response_too_large");
-    } finally {
-      globalThis.fetch = original;
-    }
+    const overBoundFetch: WorkstreamFetch = async () =>
+      new Response("x".repeat(1_048_577), {
+        headers: { "content-length": "1048577" },
+      });
+    const overBoundConfigured = makeControlPlaneWorkstreamTransport(activation, overBoundFetch);
+    const overBound = yield* overBoundConfigured.transport
+      .getCapabilities({
+        contractVersion: "workstreams/1.0.0",
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      })
+      .pipe(Effect.flip);
+    expect(overBound.detail).toBe("response_too_large");
+  }),
+);
+
+it.effect("disables non-HTTPS and header-unsafe activation before transport", () =>
+  Effect.gen(function* () {
+    let requests = 0;
+    const fetchPort: WorkstreamFetch = async () => {
+      requests += 1;
+      return new Response("{}");
+    };
+    const unsafeActivation = {
+      ...activation,
+      value: {
+        ...activation.value,
+        baseUrl: new URL("http://control-plane.example/"),
+        principalId: "principal-fixture\r\ninjected: value",
+      },
+    } as const;
+    const configured = makeControlPlaneWorkstreamTransport(unsafeActivation, fetchPort);
+    const unavailable = yield* configured.transport
+      .getCapabilities({
+        contractVersion: "workstreams/1.0.0",
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      })
+      .pipe(Effect.flip);
+
+    expect(unavailable.effect).toBe("no-effect");
+    expect(configured.binding.authorizationRevision).toBe(0);
+    expect(requests).toBe(0);
   }),
 );
