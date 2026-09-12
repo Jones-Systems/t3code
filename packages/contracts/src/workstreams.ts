@@ -17,9 +17,32 @@ const CommandId = Schema.String.check(
   Schema.isMaxLength(128),
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/),
 );
+const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?Z$/;
 const Timestamp = Schema.String.check(
   Schema.isMaxLength(27),
-  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/),
+  Schema.isPattern(TIMESTAMP_PATTERN),
+  Schema.makeFilter((value) => {
+    const match = TIMESTAMP_PATTERN.exec(value);
+    if (match === null) return false;
+    const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText);
+    const second = Number(secondText);
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return (
+      month >= 1 &&
+      month <= 12 &&
+      day >= 1 &&
+      day <= (daysInMonth[month - 1] ?? 0) &&
+      hour <= 23 &&
+      minute <= 59 &&
+      second <= 59
+    );
+  }),
 );
 const Version = Schema.Number.check(
   Schema.isInt(),
@@ -50,6 +73,17 @@ const Cursor = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9_-]{1,512}$/),
 );
 const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
+const CanonicalHttpsOrigin = Schema.String.check(
+  Schema.isMaxLength(512),
+  Schema.makeFilter((value) => {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "https:" && parsed.origin === value;
+    } catch {
+      return false;
+    }
+  }),
+);
 
 export const WorkstreamLifecycle = Schema.Literals([
   "planned",
@@ -263,7 +297,7 @@ export const DeclarationRevision = Schema.Struct({
   recorded_at: Timestamp,
   actor: WorkstreamActor,
   command_id: CommandId,
-  registry_version: Version,
+  registry_version: PositiveVersion,
 });
 export type DeclarationRevision = typeof DeclarationRevision.Type;
 
@@ -708,7 +742,7 @@ export const WorkstreamSession = Schema.Struct({
 });
 
 export const T3WorkstreamBinding = Schema.Struct({
-  registryId: Id,
+  registryId: CanonicalHttpsOrigin,
   ownerId: Id,
   principalId: Id,
   authorizationRevision: PositiveVersion,

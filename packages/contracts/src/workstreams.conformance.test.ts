@@ -43,6 +43,12 @@ import {
 const options = { onExcessProperty: "error" as const };
 const conformance = JSON.parse(conformanceRaw) as FixtureCorpus;
 const negatives = JSON.parse(negativesRaw) as FixtureCorpus;
+const semantic = JSON.parse(semanticRaw) as {
+  readonly cases: ReadonlyArray<{
+    readonly name: string;
+    readonly when?: { readonly timestamp?: string };
+  }>;
+};
 interface FixtureCorpus {
   readonly cases: ReadonlyArray<{
     readonly name: string;
@@ -289,6 +295,37 @@ describe("frozen accepted Workstream v1 fixtures", () => {
       other_reason: "unexpected explanation",
     };
     expect(() => Schema.decodeUnknownSync(MembershipEpisode)(membership, options)).toThrow();
+  });
+
+  it("accepts reattaching a primary membership through the shared attach shape", () => {
+    const command = commandFor("attach_primary");
+    command.action.operation = "reattach_primary";
+    expect(() => Schema.decodeUnknownSync(WorkstreamCommand)(command, options)).not.toThrow();
+  });
+
+  it("rejects impossible UTC calendar and clock timestamps from the frozen semantics", () => {
+    const semanticTimestamp = semantic.cases.find(
+      (candidate) => candidate.name === "schema-valid invalid calendar timestamp rejected",
+    )?.when?.timestamp;
+    expect(semanticTimestamp).toBe("2026-02-30T00:00:00Z");
+
+    const workstream = fixtureFor("Workstream") as Record<string, any>;
+    for (const invalidTimestamp of [
+      semanticTimestamp,
+      "2026-09-12T24:00:00Z",
+      "2026-09-12T00:60:00Z",
+      "2026-09-12T00:00:60Z",
+    ]) {
+      const candidate = structuredClone(workstream);
+      candidate.updated_at = invalidTimestamp;
+      expect(() => Schema.decodeUnknownSync(Workstream)(candidate, options)).toThrow();
+    }
+  });
+
+  it("requires a positive declaration registry version", () => {
+    const declaration = fixtureFor("DeclarationRevision") as Record<string, any>;
+    declaration.registry_version = 0;
+    expect(() => Schema.decodeUnknownSync(DeclarationRevision)(declaration, options)).toThrow();
   });
 
   it("caps every decoded collection page at 100 items", () => {

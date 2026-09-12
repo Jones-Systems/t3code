@@ -15,7 +15,7 @@ describe("Workstream wire contract", () => {
     for (const lifecycle of lifecycles) {
       const result = Schema.decodeUnknownSync(T3WorkstreamListResult)({
         binding: {
-          registryId: "registry",
+          registryId: "https://control-plane.example.test:8443",
           ownerId: "owner",
           principalId: "principal",
           authorizationRevision: 3,
@@ -43,6 +43,41 @@ describe("Workstream wire contract", () => {
         stale: false,
       });
       expect(result.items[0]?.lifecycle).toBe(lifecycle);
+    }
+  });
+
+  it("preserves the enabled producer's canonical HTTPS registry origin", () => {
+    const registryId = "https://control-plane.example.test:8443";
+    const decoded = Schema.decodeUnknownSync(T3WorkstreamListResult)({
+      binding: {
+        registryId,
+        ownerId: "owner",
+        principalId: "principal",
+        authorizationRevision: 3,
+        serverGeneration: 7,
+        registryVersion: 11,
+        permissions: ["workstreams:read"],
+        contractVersion: WORKSTREAM_CONTRACT_HEADER_VERSION,
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      },
+      items: [],
+      nextCursor: null,
+      source: "live",
+      stale: false,
+    });
+    expect(decoded.binding.registryId).toBe(registryId);
+    for (const invalidOrigin of [
+      "http://control-plane.example.test:8443",
+      `${registryId}/`,
+      `${registryId}/path`,
+      "https://user@control-plane.example.test:8443",
+    ]) {
+      expect(() =>
+        Schema.decodeUnknownSync(T3WorkstreamListResult)({
+          ...decoded,
+          binding: { ...decoded.binding, registryId: invalidOrigin },
+        }),
+      ).toThrow();
     }
   });
 
