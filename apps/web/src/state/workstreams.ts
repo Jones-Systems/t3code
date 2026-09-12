@@ -1,5 +1,6 @@
 import type {
   T3WorkstreamListResult,
+  T3PlacementIdentity,
   WorkstreamDeclarationPage,
   WorkstreamDetail,
   WorkstreamEdgePage,
@@ -11,6 +12,7 @@ import type {
   WorkstreamCommand,
   WorkstreamReceipt,
 } from "@t3tools/contracts";
+import { T3_PLACEMENT_MAX_IDENTITIES } from "@t3tools/contracts";
 import {
   appendWorkstreamDtoPage,
   appendWorkstreamListResult,
@@ -21,7 +23,7 @@ import {
   type LiveT3Placements,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Effect from "effect/Effect";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "../environments/primary/httpClient";
 import { runPrimaryHttp } from "../lib/runtime";
@@ -77,7 +79,33 @@ export interface WorkstreamListView {
   readonly loadReference: (nativeReferenceId: string) => Promise<WorkstreamReferenceDetail>;
 }
 
-export function useWorkstreams(placementsEnabled = true): WorkstreamListView {
+export function nativePlacementInventoryJson(
+  nativeThreads: readonly { readonly environmentId: string; readonly id: string }[],
+): string {
+  const identities = new Map<string, T3PlacementIdentity>();
+  for (const thread of nativeThreads) {
+    identities.set(JSON.stringify([thread.environmentId, thread.id]), {
+      source_instance_id: thread.environmentId,
+      native_thread_id: thread.id,
+    });
+    if (identities.size > T3_PLACEMENT_MAX_IDENTITIES) break;
+  }
+  return JSON.stringify(
+    [...identities.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, value]) => value),
+  );
+}
+
+export function useWorkstreams(
+  placementsEnabled = true,
+  nativeThreads: readonly { readonly environmentId: string; readonly id: string }[] = [],
+): WorkstreamListView {
+  const inventoryJson = nativePlacementInventoryJson(placementsEnabled ? nativeThreads : []);
+  const identities = useMemo(
+    () => JSON.parse(inventoryJson) as readonly T3PlacementIdentity[],
+    [inventoryJson],
+  );
   const [placements, setPlacements] = useState<LiveT3Placements | null>(null);
   const [data, setData] = useState<T3WorkstreamListResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -110,11 +138,11 @@ export function useWorkstreams(placementsEnabled = true): WorkstreamListView {
         setError(null);
         if (placementsEnabled) {
           try {
-            const projection = await loadLiveT3Placements(normalized, (cursor) =>
+            const projection = await loadLiveT3Placements(normalized, identities, () =>
               request((client) =>
                 client.workstreams.threadPlacements({
                   headers: {},
-                  payload: { limit: 100, ...(cursor === undefined ? {} : { cursor }) },
+                  payload: { identities },
                 }),
               ),
             );
@@ -137,7 +165,7 @@ export function useWorkstreams(placementsEnabled = true): WorkstreamListView {
     return () => {
       generation.current += 1;
     };
-  }, [revision, placementsEnabled]);
+  }, [revision, placementsEnabled, identities]);
 
   useEffect(() => {
     if (!placements || placements.items.length === 0) return;

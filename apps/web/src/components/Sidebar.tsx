@@ -1809,7 +1809,6 @@ export default function Sidebar() {
   const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
-  const workstreamController = useWorkstreams(!isMobile);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
@@ -2246,6 +2245,7 @@ export default function Sidebar() {
     };
   }, [nowMinute, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
 
+  const workstreamController = useWorkstreams(!isMobile, activeThreads);
   const workstreamThreadGrouping = useMemo(
     () =>
       groupNativeThreadsByWorkstream({

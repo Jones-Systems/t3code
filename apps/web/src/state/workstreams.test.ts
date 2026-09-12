@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { loadCompleteWorkstreamList } from "./workstreams";
+import { loadCompleteWorkstreamList, nativePlacementInventoryJson } from "./workstreams";
 
 const binding = {
   registryId: "registry",
@@ -15,6 +15,27 @@ const binding = {
 };
 
 describe("complete Workstream list loading", () => {
+  it("projects only stable native identity pairs, preserves colon IDs and caps excess inventory", () => {
+    const threads = [
+      { environmentId: "a:b", id: "c", title: "private" },
+      { environmentId: "a", id: "b:c", title: "private" },
+    ];
+    const inventory = nativePlacementInventoryJson([...threads, threads[0]!]);
+    expect(JSON.parse(inventory)).toHaveLength(2);
+    expect(inventory).not.toContain("private");
+    expect(
+      nativePlacementInventoryJson(
+        [...threads].reverse().map((value) => ({ ...value, title: "changed" })),
+      ),
+    ).toBe(inventory);
+    expect(
+      JSON.parse(
+        nativePlacementInventoryJson(
+          Array.from({ length: 20_000 }, (_, i) => ({ environmentId: "env", id: String(i) })),
+        ),
+      ),
+    ).toHaveLength(1001);
+  });
   it("loads across page boundaries before exposing an owner list", async () => {
     const cursors: Array<string | undefined> = [];
     const result = await loadCompleteWorkstreamList(async (cursor) => {

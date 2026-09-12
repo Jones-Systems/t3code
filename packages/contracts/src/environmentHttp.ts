@@ -70,7 +70,7 @@ import {
   WorkstreamReferencePage,
   WorkstreamReceipt,
 } from "./workstreams.ts";
-import { T3PlacementQuery, T3PlacementResult } from "./workstreamPlacements.ts";
+import { T3PlacementLoadRequest, T3PlacementResult } from "./workstreamPlacements.ts";
 
 const OptionalBearerHeaders = Schema.Struct({
   authorization: Schema.optionalKey(Schema.String),
@@ -573,9 +573,9 @@ export class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullReque
 
 export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstreams")
   .add(
-    HttpApiEndpoint.get("threadPlacements", "/api/workstreams/thread-placements", {
+    HttpApiEndpoint.post("threadPlacements", "/api/workstreams/thread-placements", {
       headers: OptionalBearerHeaders,
-      payload: T3PlacementQuery,
+      payload: T3PlacementLoadRequest,
       success: T3PlacementResult,
       error: EnvironmentOrchestrationSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),

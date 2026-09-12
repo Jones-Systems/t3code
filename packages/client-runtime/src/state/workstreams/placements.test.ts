@@ -39,8 +39,13 @@ const item = (index: number): T3ThreadPlacement => ({
   authority_namespace: "t3:store",
   store_generation: 9,
 });
-const page = (index: number, cursor: string | null = null): T3PlacementResult => ({
+const identities = [0, 1].map((index) => ({
+  source_instance_id: "environment:1",
+  native_thread_id: `thread:${index}`,
+}));
+const page = (index: number): T3PlacementResult => ({
   page: {
+    inventory_sha256: "572b250634831167046e991dee3563bc2e35b9325033ac71dcd332940484b85d",
     context: {
       owner_id: "owner",
       principal_id: "principal",
@@ -49,33 +54,30 @@ const page = (index: number, cursor: string | null = null): T3PlacementResult =>
       registry_version: 8,
     },
     items: [item(index)],
-    next_cursor: cursor,
+    next_cursor: null,
   },
   trustedEnvironments: [],
   readiness: "trust-provider-required",
 });
 
-describe("live placement page assembly", () => {
-  it("continues empty pages when excluded references advance a distinct cursor", async () => {
-    const first = { ...page(0, "next"), page: { ...page(0, "next").page, items: [] } };
+describe("live complete placement assembly", () => {
+  it("loads one complete result and never derives native trust from registry evidence", async () => {
+    let calls = 0;
     const result = await loadLiveT3Placements(
       metadata,
-      async (cursor) => (cursor ? page(1) : first),
-      () => now,
-    );
-    expect(result.items).toEqual([item(1)]);
-  });
-  it("loads all pages once without deriving native trust from registry evidence", async () => {
-    const result = await loadLiveT3Placements(
-      metadata,
-      async (cursor) => (cursor ? page(1) : page(0, "next")),
+      identities,
+      async () => {
+        calls++;
+        return { ...page(0), page: { ...page(0).page, items: [item(0), item(1)] } };
+      },
       () => now,
     );
     expect(result.items).toHaveLength(2);
     expect(result.trustedEnvironments).toEqual([]);
     expect(result.readiness).toBe("trust-provider-required");
+    expect(calls).toBe(1);
   });
-  it("rejects each changed binding field on a later page", async () => {
+  it("rejects every changed binding field and wrong inventory digest", async () => {
     for (const field of [
       "owner_id",
       "principal_id",
@@ -83,78 +85,113 @@ describe("live placement page assembly", () => {
       "server_generation",
       "registry_version",
     ] as const) {
+      const value = page(0);
       await expect(
         loadLiveT3Placements(
           metadata,
-          async (cursor) => {
-            const value = page(cursor ? 1 : 0, cursor ? null : "next");
-            return cursor
-              ? {
-                  ...value,
-                  page: {
-                    ...value.page,
-                    context: {
-                      ...value.page.context,
-                      [field]: typeof value.page.context[field] === "string" ? "foreign" : 99,
-                    },
-                  },
-                }
-              : value;
-          },
+          identities,
+          async () => ({
+            ...value,
+            page: {
+              ...value.page,
+              context: {
+                ...value.page.context,
+                [field]: typeof value.page.context[field] === "string" ? "foreign" : 99,
+              },
+            },
+          }),
           () => now,
         ),
       ).rejects.toThrow("revision changed");
     }
-  });
-  it("rejects repeated cursor/membership, reversed order, expiry, excess data, or trust changes", async () => {
-    const variants: T3PlacementResult[] = [
-      page(0),
-      { ...page(1), page: { ...page(1).page, next_cursor: "next" } },
-      {
-        ...page(1),
-        page: { ...page(1).page, items: [{ ...item(1), expires_at: "2026-09-12T12:00:00Z" }] },
-      },
-      {
-        ...page(1),
-        readiness: "ready",
-        trustedEnvironments: [
-          { environmentId: "environment:1", authorityNamespace: "t3:store", storeGeneration: 9 },
-        ],
-      },
-    ];
-    for (const value of variants) {
-      await expect(
-        loadLiveT3Placements(
-          metadata,
-          async (cursor) => (cursor ? value : page(0, "next")),
-          () => now,
-        ),
-      ).rejects.toThrow();
-    }
     await expect(
       loadLiveT3Placements(
         metadata,
-        async () => ({ ...page(1), content: "private" }),
+        identities,
+        async () => ({
+          ...page(0),
+          page: { ...page(0).page, inventory_sha256: "b".repeat(64) },
+        }),
         () => now,
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow("revision changed");
+  });
+  it("rejects incomplete, repeated, unordered, expired, unrelated, or excess results", async () => {
+    for (const value of [
+      { ...page(0), page: { ...page(0).page, next_cursor: "next" } },
+      { ...page(0), page: { ...page(0).page, items: [item(0), item(0)] } },
+      { ...page(0), page: { ...page(0).page, items: [item(1), item(0)] } },
+      {
+        ...page(0),
+        page: { ...page(0).page, items: [{ ...item(0), expires_at: "2026-09-12T12:00:00Z" }] },
+      },
+      { ...page(0), page: { ...page(0).page, items: [item(2)] } },
+      { ...page(0), page: { ...page(0).page, items: [{ ...item(0), content: "private" }] } },
+      { ...page(0), content: "private" },
+    ]) {
+      let calls = 0;
+      await expect(
+        loadLiveT3Placements(
+          metadata,
+          identities,
+          async () => {
+            calls++;
+            return value as T3PlacementResult;
+          },
+          () => now,
+        ),
+      ).rejects.toThrow();
+      expect(calls).toBe(1);
+    }
+  });
+  it("rejects invalid trust snapshots and stale metadata without loading", async () => {
+    const trust = {
+      environmentId: "environment:1",
+      authorityNamespace: "store",
+      storeGeneration: 1,
+    };
+    for (const value of [
+      { ...page(0), trustedEnvironments: [trust] },
+      { ...page(0), readiness: "ready" as const, trustedEnvironments: [trust, trust] },
+    ])
+      await expect(
+        loadLiveT3Placements(
+          metadata,
+          identities,
+          async () => value,
+          () => now,
+        ),
+      ).rejects.toThrow();
+    let calls = 0;
     await expect(
       loadLiveT3Placements(
         { ...metadata, source: "cache" },
-        async () => page(0),
+        identities,
+        async () => {
+          calls++;
+          return page(0);
+        },
         () => now,
       ),
     ).rejects.toThrow();
+    expect(calls).toBe(0);
   });
-  it("bounds total page work at 100 and rejects partial success", async () => {
+  it("rejects an over-bound inventory before calling the server", async () => {
     let calls = 0;
     await expect(
       loadLiveT3Placements(
         metadata,
-        async () => page(calls++, `next-${calls}`),
+        Array.from({ length: 1001 }, (_, i) => ({
+          source_instance_id: "env",
+          native_thread_id: String(i),
+        })),
+        async () => {
+          calls++;
+          return page(0);
+        },
         () => now,
       ),
-    ).rejects.toThrow("workload exceeded");
-    expect(calls).toBe(100);
+    ).rejects.toThrow();
+    expect(calls).toBe(0);
   });
 });

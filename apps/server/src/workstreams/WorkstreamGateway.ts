@@ -15,6 +15,13 @@ import {
   type WorkstreamReceipt,
   T3PlacementPage,
   T3PlacementResult,
+  T3PlacementLoadRequest,
+  type T3PlacementRequest,
+  type T3ThreadPlacement,
+  T3_PLACEMENT_MAX_PAGES,
+  WORKSTREAM_MAX_RESPONSE_BYTES,
+  t3PlacementIdentityKey,
+  t3PlacementInventoryJson,
   type TrustedT3PlacementEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -75,7 +82,7 @@ interface ContractInput {
 
 export interface WorkstreamTransport {
   readonly listThreadPlacements?: (
-    input: PageInput,
+    input: T3PlacementRequest,
   ) => Effect.Effect<T3PlacementPage, WorkstreamTransportError>;
   readonly getCapabilities: (
     input: ContractInput,
@@ -135,10 +142,9 @@ export interface T3PlacementTrustProvider {
 export class WorkstreamGateway extends Context.Service<
   WorkstreamGateway,
   {
-    readonly readThreadPlacements: (input?: {
-      readonly limit?: number;
-      readonly cursor?: string;
-    }) => Effect.Effect<T3PlacementResult, WorkstreamGatewayError>;
+    readonly readThreadPlacements: (
+      input: T3PlacementLoadRequest,
+    ) => Effect.Effect<T3PlacementResult, WorkstreamGatewayError>;
     readonly readSession: () => Effect.Effect<T3WorkstreamBinding, WorkstreamGatewayError>;
     readonly readMetadata: (input?: {
       readonly limit?: number;
@@ -361,51 +367,112 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
     const readSession = () =>
       authorize("workstreams:read").pipe(Effect.map(({ binding }) => binding));
     const readThreadPlacements = Effect.fn("WorkstreamGateway.readThreadPlacements")(function* (
-      input: { readonly limit?: number; readonly cursor?: string } = {},
+      input: T3PlacementLoadRequest,
     ) {
+      const invalid = (detail: string) =>
+        new WorkstreamGatewayError({ reason: "invalid-response", detail });
+      const request = yield* Schema.decodeUnknownEffect(T3PlacementLoadRequest)(input, {
+        onExcessProperty: "error",
+      }).pipe(Effect.mapError(() => invalid("Invalid placement inventory.")));
       const authorized = yield* authorize("workstreams:read");
-      const request = yield* Effect.try({
-        try: () => pageInput(input),
-        catch: (cause) => cause as WorkstreamGatewayError,
-      });
       if (!transport.listThreadPlacements)
         return yield* new WorkstreamGatewayError({
           reason: "offline",
           detail: "Thread placements are unavailable.",
         });
-      const raw = yield* transport
-        .listThreadPlacements(request)
-        .pipe(Effect.mapError(transportFailure));
-      const page = yield* Schema.decodeUnknownEffect(T3PlacementPage)(raw, {
-        onExcessProperty: "error",
-      }).pipe(
-        Effect.mapError(
-          () =>
-            new WorkstreamGatewayError({
-              reason: "invalid-response",
-              detail: "Invalid thread placement page.",
-            }),
-        ),
-      );
-      yield* validateContext(page, authorized.binding);
-      if (
-        page.context.principal_id !== options.binding.principalId ||
-        page.context.authorization_revision !== options.binding.authorizationRevision ||
-        page.items.length > request.limit ||
-        page.items.some(
-          (item) =>
-            !Number.isFinite(Date.parse(item.attested_at)) ||
-            !Number.isFinite(Date.parse(item.expires_at)) ||
-            Date.parse(item.attested_at) > now() ||
-            Date.parse(item.expires_at) <= now() ||
-            Date.parse(item.expires_at) <= Date.parse(item.attested_at),
+      const inventory_sha256 = createHash("sha256")
+        .update(t3PlacementInventoryJson(request.identities))
+        .digest("hex");
+      const requested = new Set(request.identities.map(t3PlacementIdentityKey));
+      const items: T3ThreadPlacement[] = [];
+      const memberships = new Set<string>();
+      const references = new Map<string, string>();
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
+      let previous: readonly [string, string] | undefined;
+      let finalPage: T3PlacementPage | undefined;
+      let responseBytes = 0;
+      for (let pageIndex = 0; pageIndex < T3_PLACEMENT_MAX_PAGES; pageIndex++) {
+        const raw = yield* transport
+          .listThreadPlacements({
+            identities: request.identities,
+            limit: 100,
+            ...(cursor === undefined ? {} : { cursor }),
+          })
+          .pipe(Effect.mapError(transportFailure));
+        const page = yield* Schema.decodeUnknownEffect(T3PlacementPage)(raw, {
+          onExcessProperty: "error",
+        }).pipe(
+          Effect.mapError(
+            () =>
+              new WorkstreamGatewayError({
+                reason: "invalid-response",
+                detail: "Invalid thread placement page.",
+              }),
+          ),
+        );
+        yield* validateContext(page, authorized.binding);
+        if (
+          page.context.principal_id !== options.binding.principalId ||
+          page.context.authorization_revision !== options.binding.authorizationRevision ||
+          page.inventory_sha256 !== inventory_sha256 ||
+          page.items.some(
+            (item) =>
+              !Number.isFinite(Date.parse(item.attested_at)) ||
+              !Number.isFinite(Date.parse(item.expires_at)) ||
+              Date.parse(item.attested_at) > now() ||
+              Date.parse(item.expires_at) <= now() ||
+              Date.parse(item.expires_at) <= Date.parse(item.attested_at),
+          )
         )
-      )
-        return yield* new WorkstreamGatewayError({
-          reason: "stale",
-          detail:
-            "Thread placements do not match the current principal, grant, or attestation lifetime.",
-        });
+          return yield* new WorkstreamGatewayError({
+            reason: "stale",
+            detail:
+              "Thread placements do not match the current principal, grant, or attestation lifetime.",
+          });
+        responseBytes += Buffer.byteLength(canonicalJson(page));
+        if (responseBytes > WORKSTREAM_MAX_RESPONSE_BYTES)
+          return yield* invalid("Placement response workload exceeded.");
+        for (const item of page.items) {
+          const tuple = [item.native_reference_id, item.membership_id] as const;
+          if (
+            !requested.has(
+              t3PlacementIdentityKey({
+                source_instance_id: item.source_instance_id,
+                native_thread_id: item.native_thread_id,
+              }),
+            ) ||
+            memberships.has(item.membership_id) ||
+            (previous &&
+              (tuple[0] < previous[0] || (tuple[0] === previous[0] && tuple[1] <= previous[1])))
+          )
+            return yield* invalid("Repeated, unordered, or unrelated placement.");
+          const {
+            membership_id: _membership,
+            workstream_id: _workstream,
+            kind: _kind,
+            ...routing
+          } = item;
+          const serialized = canonicalJson(routing);
+          const prior = references.get(item.native_reference_id);
+          if (prior !== undefined && prior !== serialized)
+            return yield* invalid("Placement reference changed.");
+          references.set(item.native_reference_id, serialized);
+          previous = tuple;
+          memberships.add(item.membership_id);
+          items.push(item);
+        }
+        if (page.next_cursor === null) {
+          finalPage = page;
+          break;
+        }
+        if (cursors.has(page.next_cursor)) return yield* invalid("Placement cursor repeated.");
+        cursors.add(page.next_cursor);
+        cursor = page.next_cursor;
+      }
+      if (!finalPage) return yield* invalid("Placement page workload exceeded.");
+      if (items.some((item) => Date.parse(item.expires_at) <= now()))
+        return yield* invalid("Placement expired while loading.");
       const trustedEnvironments = yield* Effect.try({
         try: () => options.placementTrustProvider?.readTrustedEnvironments() ?? [],
         catch: () =>
@@ -423,14 +490,18 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
           detail: "Duplicate native trust environment.",
         });
       }
-      return yield* Schema.decodeUnknownEffect(T3PlacementResult)(
-        {
-          page,
-          trustedEnvironments,
-          readiness: options.placementTrustProvider ? "ready" : "trust-provider-required",
-        },
-        { onExcessProperty: "error" },
-      ).pipe(
+      const result = {
+        page: { ...finalPage, items, next_cursor: null },
+        trustedEnvironments,
+        readiness: options.placementTrustProvider
+          ? ("ready" as const)
+          : ("trust-provider-required" as const),
+      };
+      if (Buffer.byteLength(canonicalJson(result)) > WORKSTREAM_MAX_RESPONSE_BYTES)
+        return yield* invalid("Placement response workload exceeded.");
+      return yield* Schema.decodeUnknownEffect(T3PlacementResult)(result, {
+        onExcessProperty: "error",
+      }).pipe(
         Effect.mapError(
           () =>
             new WorkstreamGatewayError({

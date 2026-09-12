@@ -20,6 +20,8 @@ import {
   T3_PLACEMENT_MANIFEST_SHA256,
   T3_PLACEMENT_ROUTE,
   T3PlacementPage,
+  T3PlacementRequest,
+  T3_PLACEMENT_MAX_REQUEST_BYTES,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -228,7 +230,10 @@ async function performRequest(input: {
     input.target === T3_PLACEMENT_ROUTE || input.target.startsWith(`${T3_PLACEMENT_ROUTE}?`);
   if (
     (!input.target.startsWith("/workstreams/v1/") && !placement) ||
-    (placement && input.method !== "GET") ||
+    (placement &&
+      (input.method !== "POST" ||
+        input.target !== T3_PLACEMENT_ROUTE ||
+        Buffer.byteLength(input.body) > T3_PLACEMENT_MAX_REQUEST_BYTES)) ||
     input.target.includes("#") ||
     /[\r\n]/.test(input.target)
   )
@@ -333,7 +338,10 @@ export function makeControlPlaneWorkstreamTransport(
         catch: (cause) =>
           new WorkstreamTransportError({
             operation,
-            effect: method === "POST" ? "unknown-effect" : "no-effect",
+            effect:
+              method === "POST" && operation !== "thread_placements"
+                ? "unknown-effect"
+                : "no-effect",
             detail:
               cause instanceof BoundedTransportFailure ? cause.reason : "transport_unavailable",
           }),
@@ -344,7 +352,10 @@ export function makeControlPlaneWorkstreamTransport(
             Effect.fail(
               new WorkstreamTransportError({
                 operation,
-                effect: method === "POST" ? "unknown-effect" : "no-effect",
+                effect:
+                  method === "POST" && operation !== "thread_placements"
+                    ? "unknown-effect"
+                    : "no-effect",
                 detail: "Control-plane request timed out.",
               }),
             ),
@@ -357,7 +368,10 @@ export function makeControlPlaneWorkstreamTransport(
           (cause) =>
             new WorkstreamTransportError({
               operation,
-              effect: method === "POST" ? "unknown-effect" : "no-effect",
+              effect:
+                method === "POST" && operation !== "thread_placements"
+                  ? "unknown-effect"
+                  : "no-effect",
               detail: "Control-plane returned invalid JSON for the accepted contract.",
             }),
         ),
@@ -372,11 +386,27 @@ export function makeControlPlaneWorkstreamTransport(
     },
     transport: {
       listThreadPlacements: (input) =>
-        request(
-          "thread_placements",
-          "GET",
-          `${T3_PLACEMENT_ROUTE}?${query(input)}`,
-          T3PlacementPage,
+        Schema.encodeEffect(Schema.fromJsonString(T3PlacementRequest))(input, {
+          onExcessProperty: "error",
+        }).pipe(
+          Effect.mapError(
+            () =>
+              new WorkstreamTransportError({
+                operation: "thread_placements",
+                effect: "no-effect",
+                detail: "Invalid placement inventory.",
+              }),
+          ),
+          Effect.flatMap((body) =>
+            request(
+              "thread_placements",
+              "POST",
+              T3_PLACEMENT_ROUTE,
+              T3PlacementPage,
+              body,
+              randomUUID(),
+            ),
+          ),
         ),
       getCapabilities: () =>
         request("capabilities", "GET", "/workstreams/v1/capabilities", WorkstreamCapabilities),

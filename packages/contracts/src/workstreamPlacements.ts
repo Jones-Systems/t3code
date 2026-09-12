@@ -4,7 +4,11 @@ import * as DateTime from "effect/DateTime";
 export const T3_PLACEMENT_ROUTE = "/workstreams/internal/v1/t3-thread-placements";
 export const T3_PLACEMENT_CONTRACT = "workstreams-t3-placement/1.0.0";
 export const T3_PLACEMENT_MANIFEST_SHA256 =
-  "dde160d40e17ee0ad206f242a4eeac4b714fd801236f45fdc2ee824256ab89ca";
+  "1529444d1b8bb2fc4e3691844adb59b32a845fd8957efb54c4ef4d39bbec76ac";
+export const T3_PLACEMENT_MAX_REQUEST_BYTES = 262_144;
+export const T3_PLACEMENT_MAX_IDENTITIES = 1_000;
+export const T3_PLACEMENT_MAX_PAGES = 10;
+export const T3_PLACEMENT_MAX_LOAD_ITEMS = 1_000;
 const Id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
 const NativeId = Schema.String.check(
   Schema.isMinLength(1),
@@ -24,6 +28,40 @@ const Timestamp = Schema.String.check(
   ),
 );
 const Cursor = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,2048}$/));
+const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
+export const T3PlacementIdentity = Schema.Struct({
+  source_instance_id: Id,
+  native_thread_id: NativeId,
+});
+export type T3PlacementIdentity = typeof T3PlacementIdentity.Type;
+export const t3PlacementIdentityKey = (value: T3PlacementIdentity): string =>
+  JSON.stringify([value.source_instance_id, value.native_thread_id]);
+export const t3PlacementInventoryJson = (identities: readonly T3PlacementIdentity[]): string =>
+  JSON.stringify(
+    identities
+      .map((value) => [value.source_instance_id, value.native_thread_id])
+      .sort((a, b) =>
+        a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : a[1]! < b[1]! ? -1 : a[1]! > b[1]! ? 1 : 0,
+      ),
+  );
+const Inventory = Schema.Array(T3PlacementIdentity).check(
+  Schema.isMaxLength(T3_PLACEMENT_MAX_IDENTITIES),
+  Schema.makeFilter((values) => new Set(values.map(t3PlacementIdentityKey)).size === values.length),
+);
+const boundedRequest = Schema.makeFilter(
+  (value: unknown) =>
+    new TextEncoder().encode(JSON.stringify(value)).length <= T3_PLACEMENT_MAX_REQUEST_BYTES,
+);
+export const T3PlacementLoadRequest = Schema.Struct({ identities: Inventory }).check(
+  boundedRequest,
+);
+export type T3PlacementLoadRequest = typeof T3PlacementLoadRequest.Type;
+export const T3PlacementRequest = Schema.Struct({
+  identities: Inventory,
+  limit: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 100 })),
+  cursor: Schema.optional(Cursor),
+}).check(boundedRequest);
+export type T3PlacementRequest = typeof T3PlacementRequest.Type;
 
 export const T3PlacementContext = Schema.Struct({
   owner_id: Id,
@@ -53,6 +91,7 @@ export const T3ThreadPlacement = Schema.Struct({
 });
 export type T3ThreadPlacement = typeof T3ThreadPlacement.Type;
 export const T3PlacementPage = Schema.Struct({
+  inventory_sha256: Digest,
   context: T3PlacementContext,
   items: Schema.Array(T3ThreadPlacement).check(Schema.isMaxLength(100)),
   next_cursor: Schema.NullOr(Cursor),
@@ -65,14 +104,13 @@ export const TrustedT3PlacementEnvironment = Schema.Struct({
 });
 export type TrustedT3PlacementEnvironment = typeof TrustedT3PlacementEnvironment.Type;
 export const T3PlacementResult = Schema.Struct({
-  page: T3PlacementPage,
+  page: Schema.Struct({
+    inventory_sha256: Digest,
+    context: T3PlacementContext,
+    items: Schema.Array(T3ThreadPlacement).check(Schema.isMaxLength(T3_PLACEMENT_MAX_LOAD_ITEMS)),
+    next_cursor: Schema.Null,
+  }),
   trustedEnvironments: Schema.Array(TrustedT3PlacementEnvironment).check(Schema.isMaxLength(100)),
   readiness: Schema.Literals(["ready", "trust-provider-required"]),
 });
 export type T3PlacementResult = typeof T3PlacementResult.Type;
-export const T3PlacementQuery = {
-  limit: Schema.optional(
-    Schema.FiniteFromString.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 100 })),
-  ),
-  cursor: Schema.optional(Cursor),
-};

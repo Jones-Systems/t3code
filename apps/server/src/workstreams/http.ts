@@ -2,6 +2,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  T3_PLACEMENT_MAX_REQUEST_BYTES,
   type WorkstreamDeclarationPage,
   type WorkstreamDetail,
   type WorkstreamEdgePage,
@@ -12,8 +13,14 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import {
+  HttpIncomingMessage,
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/unstable/http";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import {
@@ -43,12 +50,26 @@ const appendWorkstreamResponseHeaders = HttpEffect.appendPreResponseHandler((_re
   Effect.succeed(HttpServerResponse.setHeaders(response, WORKSTREAM_RESPONSE_HEADERS)),
 );
 
+export const withWorkstreamBodyLimit = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  request: { readonly originalUrl: string; readonly method: string },
+): Effect.Effect<A, E, R> =>
+  request.method === "POST" &&
+  request.originalUrl.split(/[?#]/, 1)[0] === "/api/workstreams/thread-placements"
+    ? effect.pipe(
+        Effect.provideService(
+          HttpIncomingMessage.MaxBodySize,
+          FileSystem.Size(T3_PLACEMENT_MAX_REQUEST_BYTES),
+        ),
+      )
+    : effect;
+
 export const workstreamResponseHeadersLayer = HttpRouter.middleware(
   (httpEffect) =>
     Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
       if (isWorkstreamHttpTarget(request.originalUrl)) yield* appendWorkstreamResponseHeaders;
-      return yield* httpEffect;
+      return yield* withWorkstreamBodyLimit(httpEffect, request);
     }),
   { global: true },
 );
@@ -94,9 +115,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
     return handlers
       .handle("threadPlacements", (args) =>
         read(args.endpoint.name).pipe(
-          Effect.andThen(
-            internal("threadPlacements", gateway.readThreadPlacements(pageInput(args.payload))),
-          ),
+          Effect.andThen(internal("threadPlacements", gateway.readThreadPlacements(args.payload))),
         ),
       )
       .handle("list", (args) =>
