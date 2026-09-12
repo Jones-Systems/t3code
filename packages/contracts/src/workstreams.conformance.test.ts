@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
+import { createHash } from "node:crypto";
 
-import conformance from "./workstreams-fixtures/conformance.json" with { type: "json" };
-import negatives from "./workstreams-fixtures/negative-cases.json" with { type: "json" };
+import conformanceRaw from "./workstreams-fixtures/conformance.json.fixture?raw";
+import negativesRaw from "./workstreams-fixtures/negative-cases.json.fixture?raw";
+import semanticRaw from "./workstreams-fixtures/semantic-cases.json.fixture?raw";
 import {
   Workstream,
   WorkstreamCapabilities,
@@ -29,6 +31,15 @@ import {
 } from "./workstreams.ts";
 
 const options = { onExcessProperty: "error" as const };
+const conformance = JSON.parse(conformanceRaw) as FixtureCorpus;
+const negatives = JSON.parse(negativesRaw) as FixtureCorpus;
+interface FixtureCorpus {
+  readonly cases: ReadonlyArray<{
+    readonly name: string;
+    readonly schema: string;
+    readonly value: unknown;
+  }>;
+}
 const supported = new Map<string, (value: unknown) => unknown>([
   ["Command", (value) => Schema.decodeUnknownSync(WorkstreamCommand)(value, options)],
   ["Workstream", (value) => Schema.decodeUnknownSync(Workstream)(value, options)],
@@ -69,6 +80,19 @@ const supported = new Map<string, (value: unknown) => unknown>([
 const schemaName = (reference: string) => reference.slice(reference.lastIndexOf("/") + 1);
 
 describe("frozen accepted Workstream v1 fixtures", () => {
+  it("preserves all immutable source bytes", () => {
+    const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+    expect(sha256(conformanceRaw)).toBe(
+      "a907dfa46f18a1930d0bd176571743d4932ae6dd13fc96421d5dec8e63bd6aa1",
+    );
+    expect(sha256(negativesRaw)).toBe(
+      "d4893333b797c53249f37cd9cc04c605ca54eeed542dcab0c62f6a6c91093d50",
+    );
+    expect(sha256(semanticRaw)).toBe(
+      "1d939c25a2f9b9aca0191b390ba8739fcd8f6d2e40bb0f1e6ae389c2eb05a6fa",
+    );
+  });
+
   it("accepts every fixture for a T3-supported DTO decoder", () => {
     const exercised = new Set<string>();
     for (const fixture of conformance.cases) {

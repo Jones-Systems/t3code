@@ -19,14 +19,42 @@ export interface NativeWorkstreamThreadGrouping<Thread extends WorkstreamThreadL
   readonly conflictingKeys: ReadonlySet<string>;
 }
 
-const keyOf = (environmentId: string, threadId: string) => `${environmentId}:${threadId}`;
+export const nativeWorkstreamThreadKey = (environmentId: string, threadId: string) =>
+  JSON.stringify([environmentId, threadId]);
 
 // This is the sole T3 activation convention. Other provider/resource identities remain unassigned.
-function nativeThreadKey(reference: NativeReference): string | null {
+export interface TrustedT3EnvironmentAttestation {
+  readonly authorityNamespace: string;
+  readonly storeGeneration: number;
+}
+
+function nativeThreadKey(
+  reference: NativeReference,
+  trustedNowMs: number,
+  trustedEnvironments: ReadonlyMap<string, TrustedT3EnvironmentAttestation>,
+): string | null {
   const identity = reference.identity;
-  return identity.provider === "t3" && identity.resource_kind === "thread"
-    ? keyOf(identity.source_instance_id, identity.native_id)
-    : null;
+  const registration = reference.registration;
+  const evidence = registration.evidence;
+  const trustedEnvironment = trustedEnvironments.get(identity.source_instance_id);
+  if (
+    identity.provider !== "t3" ||
+    identity.resource_kind !== "thread" ||
+    identity.id_kind !== "internal" ||
+    identity.account_provenance.kind !== "not_account_scoped" ||
+    registration.state !== "attested" ||
+    registration.expires_at === null ||
+    Date.parse(registration.expires_at) <= trustedNowMs ||
+    evidence === null ||
+    trustedEnvironment === undefined ||
+    evidence.provider !== identity.provider ||
+    evidence.source_instance_id !== identity.source_instance_id ||
+    evidence.authority_namespace !== trustedEnvironment.authorityNamespace ||
+    evidence.native_id !== identity.native_id ||
+    evidence.store_generation !== trustedEnvironment.storeGeneration
+  )
+    return null;
+  return nativeWorkstreamThreadKey(identity.source_instance_id, identity.native_id);
 }
 
 export function groupNativeThreadsByWorkstream<Thread extends WorkstreamThreadLike>(input: {
@@ -34,10 +62,15 @@ export function groupNativeThreadsByWorkstream<Thread extends WorkstreamThreadLi
   readonly memberships: readonly MembershipEpisode[];
   readonly references: readonly NativeReference[];
   readonly threads: readonly Thread[];
+  readonly trustedNow: string;
+  readonly trustedEnvironments: ReadonlyMap<string, TrustedT3EnvironmentAttestation>;
 }): NativeWorkstreamThreadGrouping<Thread> {
+  const trustedNowMs = Date.parse(input.trustedNow);
   const referenceKeys = new Map<string, string>();
   for (const reference of input.references) {
-    const key = nativeThreadKey(reference);
+    const key = Number.isFinite(trustedNowMs)
+      ? nativeThreadKey(reference, trustedNowMs, input.trustedEnvironments)
+      : null;
     if (key !== null) referenceKeys.set(reference.native_reference_id, key);
   }
 
@@ -67,7 +100,7 @@ export function groupNativeThreadsByWorkstream<Thread extends WorkstreamThreadLi
   const groupedKeys = new Set<string>();
   const ungrouped: Thread[] = [];
   for (const thread of input.threads) {
-    const key = keyOf(thread.environmentId, thread.id);
+    const key = nativeWorkstreamThreadKey(thread.environmentId, thread.id);
     const workstreamId = primaryByKey.get(key);
     if (workstreamId === undefined || conflictingKeys.has(key)) {
       ungrouped.push(thread);

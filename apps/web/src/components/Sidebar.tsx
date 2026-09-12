@@ -32,8 +32,6 @@ import {
 import {
   resolveEnvironmentMachineKind,
   type EnvironmentMachineKind,
-  type MembershipEpisode,
-  type NativeReference,
   type ProjectIconOverride,
   type ScopedThreadRef,
   type ThreadId,
@@ -178,7 +176,10 @@ import {
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { WorkstreamSidebarSection } from "./workstreams/WorkstreamSidebarSection";
-import { groupNativeThreadsByWorkstream } from "./workstreams/nativeThreadGrouping";
+import {
+  groupNativeThreadsByWorkstream,
+  nativeWorkstreamThreadKey,
+} from "./workstreams/nativeThreadGrouping";
 import { useWorkstreams } from "../state/workstreams";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
@@ -2244,41 +2245,18 @@ export default function Sidebar() {
     };
   }, [nowMinute, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
 
-  const [workstreamThreadIndex, setWorkstreamThreadIndex] = useState<{
-    readonly memberships: readonly MembershipEpisode[];
-    readonly references: readonly NativeReference[];
-  } | null>(null);
-  useEffect(() => {
-    if (isMobile || workstreamController.data === null) {
-      setWorkstreamThreadIndex(null);
-      return;
-    }
-    let current = true;
-    void workstreamController.loadThreadMembershipIndex().then(
-      (value) => {
-        if (!current) return;
-        setWorkstreamThreadIndex({
-          memberships: value.memberships.flat(),
-          references: value.references.items,
-        });
-      },
-      () => {
-        if (current) setWorkstreamThreadIndex(null);
-      },
-    );
-    return () => {
-      current = false;
-    };
-  }, [isMobile, workstreamController.data, workstreamController.loadThreadMembershipIndex]);
   const workstreamThreadGrouping = useMemo(
     () =>
       groupNativeThreadsByWorkstream({
         workstreams: workstreamController.data?.items ?? [],
-        memberships: workstreamThreadIndex?.memberships ?? [],
-        references: workstreamThreadIndex?.references ?? [],
+        // The accepted API has no bounded active-membership projection. Fail closed until it does.
+        memberships: [],
+        references: [],
         threads: activeThreads,
+        trustedNow: snoozeNow,
+        trustedEnvironments: new Map(),
       }),
-    [activeThreads, workstreamController.data?.items, workstreamThreadIndex],
+    [activeThreads, snoozeNow, workstreamController.data?.items],
   );
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
@@ -3907,9 +3885,7 @@ export default function Sidebar() {
                     section: "pinned" | "active" | "snoozed" | "settled",
                     sortable?: SortablePinnedRowBag,
                   ) => {
-                    const threadKey = scopedThreadKey(
-                      scopeThreadRef(thread.environmentId, thread.id),
-                    );
+                    const threadKey = nativeWorkstreamThreadKey(thread.environmentId, thread.id);
                     // Settled and snoozed are the ONLY things that collapse a
                     // row: every other thread is a full card. Density comes
                     // from users (or the auto rules) actually parking work,

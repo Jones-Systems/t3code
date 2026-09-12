@@ -72,10 +72,6 @@ export interface WorkstreamListView {
     readonly references: WorkstreamReferencePage;
   }>;
   readonly loadReference: (nativeReferenceId: string) => Promise<WorkstreamReferenceDetail>;
-  readonly loadThreadMembershipIndex: () => Promise<{
-    readonly memberships: ReadonlyArray<WorkstreamMembershipPage["items"]>;
-    readonly references: WorkstreamReferencePage;
-  }>;
 }
 
 export function useWorkstreams(): WorkstreamListView {
@@ -239,46 +235,6 @@ export function useWorkstreams(): WorkstreamListView {
     }
   }, []);
 
-  const loadThreadMembershipIndex = useCallback(async () => {
-    if (!data) throw new Error("Workstream metadata is not loaded.");
-    try {
-      const references = await loadAllPages((cursor) =>
-        request((client) =>
-          client.workstreams.references({
-            headers: {},
-            payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-          }),
-        ),
-      );
-      const memberships: WorkstreamMembershipPage["items"][] = [];
-      // Sequential reads bound concurrency while still resolving cross-page owner ordering.
-      for (const workstream of data.items) {
-        const page = await loadAllPages((cursor) =>
-          request((client) =>
-            client.workstreams.memberships({
-              headers: {},
-              params: { workstreamId: workstream.workstreamId },
-              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-            }),
-          ),
-        );
-        if (
-          page.context.owner_id !== references.context.owner_id ||
-          page.context.server_generation !== references.context.server_generation ||
-          page.context.registry_version !== references.context.registry_version
-        ) {
-          throw new Error("Workstream memberships changed while grouping threads; reload them.");
-        }
-        memberships.push(page.items);
-      }
-      return { memberships, references };
-    } catch (cause) {
-      metadataCache.purgeAuthorization();
-      setData(null);
-      throw cause;
-    }
-  }, [data]);
-
   return {
     data,
     error,
@@ -287,6 +243,5 @@ export function useWorkstreams(): WorkstreamListView {
     submit,
     loadDetail,
     loadReference,
-    loadThreadMembershipIndex,
   };
 }

@@ -6,7 +6,10 @@
     {
       "name": "account grant union is not owner authority",
       "given": {
-        "account_permissions": ["dashboard:read", "projects:write"],
+        "account_permissions": [
+          "dashboard:read",
+          "projects:write"
+        ],
         "owner_permissions": []
       },
       "when": {
@@ -20,7 +23,9 @@
     {
       "name": "owner read is not owner write",
       "given": {
-        "owner_permissions": ["workstreams:read"]
+        "owner_permissions": [
+          "workstreams:read"
+        ]
       },
       "when": {
         "action": "create_workstream"
@@ -33,7 +38,9 @@
     {
       "name": "owner write is not source content authority",
       "given": {
-        "owner_permissions": ["workstreams:write"],
+        "owner_permissions": [
+          "workstreams:write"
+        ],
         "account_permissions": []
       },
       "when": {
@@ -48,7 +55,10 @@
       "name": "same native ID different account is distinct",
       "given": {
         "native_id": "native-synthetic",
-        "account_ids": ["account-alpha", "account-beta"]
+        "account_ids": [
+          "account-alpha",
+          "account-beta"
+        ]
       },
       "expect": {
         "distinct_references": 2
@@ -131,7 +141,10 @@
       },
       "when": {
         "action": "reattach_primary",
-        "pair": ["ws-alpha", "ref-pr"]
+        "pair": [
+          "ws-alpha",
+          "ref-pr"
+        ]
       },
       "expect": {
         "new_episode_required": true,
@@ -181,12 +194,24 @@
       "name": "cross-relation cycles fail",
       "given": {
         "active_edges": [
-          ["ws-alpha", "ws-beta", "continues_as"],
-          ["ws-beta", "ws-gamma", "superseded_by"]
+          [
+            "ws-alpha",
+            "ws-beta",
+            "continues_as"
+          ],
+          [
+            "ws-beta",
+            "ws-gamma",
+            "superseded_by"
+          ]
         ]
       },
       "when": {
-        "edge": ["ws-gamma", "ws-alpha", "continues_as"]
+        "edge": [
+          "ws-gamma",
+          "ws-alpha",
+          "continues_as"
+        ]
       },
       "expect": {
         "error": "cycle_conflict",
@@ -200,8 +225,16 @@
       },
       "when": {
         "concurrent_edges": [
-          ["ws-alpha", "ws-beta", "continues_as"],
-          ["ws-beta", "ws-alpha", "superseded_by"]
+          [
+            "ws-alpha",
+            "ws-beta",
+            "continues_as"
+          ],
+          [
+            "ws-beta",
+            "ws-alpha",
+            "superseded_by"
+          ]
         ]
       },
       "expect": {
@@ -212,7 +245,11 @@
     {
       "name": "self edge fails",
       "when": {
-        "edge": ["ws-alpha", "ws-alpha", "continues_as"]
+        "edge": [
+          "ws-alpha",
+          "ws-alpha",
+          "continues_as"
+        ]
       },
       "expect": {
         "error": "relationship_conflict"
@@ -508,7 +545,10 @@
     {
       "name": "name is metadata not inferred identity",
       "given": {
-        "workstream_names": ["Same synthetic name", "Same synthetic name"]
+        "workstream_names": [
+          "Same synthetic name",
+          "Same synthetic name"
+        ]
       },
       "expect": {
         "distinct_ids_allowed": true,
@@ -519,7 +559,9 @@
       "name": "account grants cannot bootstrap owner CSRF",
       "given": {
         "trusted_identity": true,
-        "account_permissions": ["dashboard:read"],
+        "account_permissions": [
+          "dashboard:read"
+        ],
         "owner_permissions": []
       },
       "when": {
@@ -577,7 +619,11 @@
         }
       ],
       "expect": {
-        "terminal_response_bytes_identical_across_steps": [4, 5, 6],
+        "terminal_response_bytes_identical_across_steps": [
+          4,
+          5,
+          6
+        ],
         "new_business_effects_from_poll_or_replay": 0,
         "fresh_command_id_created": false
       }
@@ -602,11 +648,7 @@
       "name": "attestation gates exact verified identity",
       "given": {
         "registration_state": "verification-pending",
-        "claimed_identity": [
-          "github",
-          "github-public-synthetic",
-          "synthetic-owner/fixture-repository#42"
-        ]
+        "claimed_identity": ["github", "github-public-synthetic", "synthetic-owner/fixture-repository#42"]
       },
       "when": {
         "action": "verify_reference",
@@ -739,36 +781,9 @@
         "lifecycle": ["planned", "active", "paused", "completed", "deferred", "abandoned"],
         "progress": ["progressing", "waiting", "blocked", "unknown", "stale"],
         "membership": ["active-primary", "active-secondary", "ended"],
-        "ended_reasons": [
-          "removed",
-          "completed",
-          "completed-and-delivery-verified",
-          "superseded",
-          "continued-elsewhere",
-          "deferred",
-          "abandoned",
-          "other"
-        ],
-        "delivery": [
-          "none-observed",
-          "branch-open",
-          "pr-open",
-          "merged",
-          "released",
-          "deployed",
-          "deployment-verified",
-          "failed",
-          "unknown",
-          "stale"
-        ],
-        "freshness": [
-          "current",
-          "stale",
-          "inaccessible",
-          "partial-coverage",
-          "conflicting",
-          "unknown"
-        ]
+        "ended_reasons": ["removed", "completed", "completed-and-delivery-verified", "superseded", "continued-elsewhere", "deferred", "abandoned", "other"],
+        "delivery": ["none-observed", "branch-open", "pr-open", "merged", "released", "deployed", "deployment-verified", "failed", "unknown", "stale"],
+        "freshness": ["current", "stale", "inaccessible", "partial-coverage", "conflicting", "unknown"]
       },
       "expect": {
         "dimensions_independent": true,

@@ -592,7 +592,9 @@
           }
         ],
         "native_reference_id": "ref-pr",
-        "membership_ids": ["membership-alpha"],
+        "membership_ids": [
+          "membership-alpha"
+        ],
         "declaration_id": null,
         "declaration_revision": null,
         "edge_id": null,
@@ -896,7 +898,10 @@
         "principal_id": "principal-synthetic",
         "grant_id": "grant-synthetic",
         "grant_version": 1,
-        "permissions": ["workstreams:read", "workstreams:write"],
+        "permissions": [
+          "workstreams:read",
+          "workstreams:write"
+        ],
         "state": "active"
       }
     },
@@ -912,7 +917,10 @@
           "server_generation": 1,
           "registry_version": 7
         },
-        "permissions": ["workstreams:read", "workstreams:write"],
+        "permissions": [
+          "workstreams:read",
+          "workstreams:write"
+        ],
         "max_request_bytes": 32768,
         "max_response_bytes": 1048576,
         "max_json_depth": 10,
@@ -1132,7 +1140,10 @@
           "server_generation": 1,
           "registry_version": 7
         },
-        "permissions": ["workstreams:read", "workstreams:write"],
+        "permissions": [
+          "workstreams:read",
+          "workstreams:write"
+        ],
         "csrf_token": "v1.1789171200.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         "csrf_ttl_seconds": 900
       }
