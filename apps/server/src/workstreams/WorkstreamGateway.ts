@@ -475,7 +475,7 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
             reason: "idempotency-conflict",
             detail: "This command ID was already used with different business bytes.",
           });
-        commandDigests.set(commandKey, bodySha256);
+        remember(commandDigests, commandKey, bodySha256);
         const replayKey = [authorized.key, command.command_id, bodySha256].join("\u0000");
         const prior = terminalReceipts.get(replayKey);
         if (prior) return prior;

@@ -180,6 +180,63 @@ it.effect("binds the accepted contract and exact idempotency bytes", () =>
   }),
 );
 
+it.effect("bounds failed-command digests and evicts the oldest command without false replay", () =>
+  Effect.gen(function* () {
+    const fixture = makeSyntheticWorkstreamTransport();
+    const submitted: string[] = [];
+    const transport: WorkstreamTransport = {
+      ...fixture,
+      submitCommand: (input) => {
+        submitted.push(input.command.command_id);
+        return Effect.fail(
+          new WorkstreamTransportError({
+            operation: "submit_command",
+            effect: "no-effect",
+            detail: "fixture_offline",
+          }),
+        );
+      },
+    };
+    const gateway = yield* make(transport, { binding, cacheCapacity: 2 });
+
+    for (const commandId of [
+      "command-capacity-0001",
+      "command-capacity-0002",
+      "command-capacity-0003",
+    ]) {
+      const failure = yield* gateway
+        .submit(updateCommand({ command_id: commandId }))
+        .pipe(Effect.flip);
+      expect(failure.reason).toBe("offline");
+    }
+
+    const evictedRetry = yield* gateway
+      .submit(
+        updateCommand({
+          command_id: "command-capacity-0001",
+          action: {
+            operation: "update_workstream",
+            workstream_id: "ws-core-v1",
+            expected_version: 3,
+            name: "Changed after bounded eviction",
+            lifecycle: "active",
+            progress: { state: "progressing" },
+            sort_order: 10,
+          },
+        }),
+      )
+      .pipe(Effect.flip);
+
+    expect(evictedRetry.reason).toBe("offline");
+    expect(submitted).toEqual([
+      "command-capacity-0001",
+      "command-capacity-0002",
+      "command-capacity-0003",
+      "command-capacity-0001",
+    ]);
+  }),
+);
+
 it.effect("keeps coordination disposition and native T3 settlement as distinct receipts", () =>
   Effect.gen(function* () {
     const gateway = yield* make(makeSyntheticWorkstreamTransport(), { binding });
