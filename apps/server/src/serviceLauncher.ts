@@ -64,6 +64,17 @@ const databaseBackupDir = (baseDir: string, updateId: string) =>
 const databaseBackupFile = (backupDir: string, suffix: (typeof DB_FILE_SUFFIXES)[number]) =>
   NodePath.join(backupDir, suffix === "" ? "database" : `database${suffix}`);
 
+export const configuredDatabasePathForBaseDir = (baseDir: string): string =>
+  NodePath.resolve(baseDir, "userdata", "state.sqlite");
+
+export const validateDatabasePathForBaseDir = (baseDir: string, databasePath: string): string => {
+  const configuredPath = configuredDatabasePathForBaseDir(baseDir);
+  if (NodePath.resolve(databasePath) !== configuredPath) {
+    throw new Error("Service update database path must be the configured userdata/state.sqlite.");
+  }
+  return configuredPath;
+};
+
 async function pathExists(target: string): Promise<boolean> {
   try {
     await NodeFSP.access(target);
@@ -98,6 +109,7 @@ async function syncDirectory(directory: string): Promise<void> {
  * database writes from an earlier attempt by the same trial.
  */
 async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate): Promise<void> {
+  validateDatabasePathForBaseDir(baseDir, pending.dbPath);
   const backupDir = databaseBackupDir(baseDir, pending.id);
   if (await pathExists(backupDir)) return;
 
@@ -145,13 +157,19 @@ async function restoreDatabaseBackup(
   baseDir: string,
   pending: PendingServiceUpdate,
 ): Promise<void> {
+  validateDatabasePathForBaseDir(baseDir, pending.dbPath);
   const backupDir = databaseBackupDir(baseDir, pending.id);
-  if (!(await pathExists(backupDir))) return;
 
   // A trusted native placement must be fenced before any database restore.
   // Older installations without the follow-on authority have no trusted
   // placement state and retain the existing rollback behavior.
-  fenceNativeStoreAuthorityForBaseDir(baseDir);
+  const fencedAuthority = fenceNativeStoreAuthorityForBaseDir(baseDir);
+  if (!(await pathExists(backupDir))) {
+    if (fencedAuthority !== null) {
+      throw new Error("Cannot rollback while the native database backup is missing.");
+    }
+    return;
+  }
   await markDatabaseRestorePending(backupDir);
   for (const suffix of DB_FILE_SUFFIXES) {
     const target = `${pending.dbPath}${suffix}`;
@@ -380,6 +398,9 @@ export class Launcher {
       await this.#returnToPrevious(update, "failed", "target-runtime-missing");
       return;
     }
+    // The pending record is written before backup creation. Until the trial
+    // child starts, a missing backup is therefore known no-effect state;
+    // #startTrial creates the complete backup before spawning that child.
     await this.#startTrial(update);
   }
 
@@ -487,6 +508,12 @@ export class Launcher {
     }
     if (!NodePath.isAbsolute(message.dbPath)) {
       await reject("The requested database path is not absolute.");
+      return;
+    }
+    try {
+      validateDatabasePathForBaseDir(this.#baseDir, message.dbPath);
+    } catch {
+      await reject("The requested database path is not the configured userdata/state.sqlite.");
       return;
     }
     if (!(await runtimeExists(this.#baseDir, message.targetVersion))) {

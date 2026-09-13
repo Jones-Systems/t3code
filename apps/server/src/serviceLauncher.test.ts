@@ -4,7 +4,13 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { Launcher, readServiceState, writeServiceState } from "./serviceLauncher.ts";
+import {
+  configuredDatabasePathForBaseDir,
+  Launcher,
+  readServiceState,
+  validateDatabasePathForBaseDir,
+  writeServiceState,
+} from "./serviceLauncher.ts";
 import {
   compareExactServiceVersions,
   decodeServiceState,
@@ -76,6 +82,16 @@ it("rejects contradictory service state", () => {
         status: "pending",
       },
     }),
+  );
+});
+
+it("binds service updates to the configured database path", () => {
+  const baseDir = "/tmp/t3-service-path-test";
+  const configuredPath = configuredDatabasePathForBaseDir(baseDir);
+  assert.equal(validateDatabasePathForBaseDir(baseDir, configuredPath), configuredPath);
+  assert.throws(
+    () => validateDatabasePathForBaseDir(baseDir, "/tmp/alternate-state.sqlite"),
+    /configured userdata\/state.sqlite/,
   );
 });
 
@@ -300,6 +316,74 @@ if (context.update?.status === "pending") {
       const updateId = state.update?.id;
       assert.isDefined(updateId);
       assert.isFalse(yield* fs.exists(path.join(root, "runtime", "db-backup", updateId)));
+    }),
+  );
+
+  it.effect("fences authority and refuses to start a child when rollback backup is missing", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-service-launcher-missing-backup-",
+      });
+      const statePath = path.join(root, "runtime", "service-state.json");
+      const databasePath = path.join(root, "userdata", "state.sqlite");
+      yield* fs.makeDirectory(path.join(root, "userdata"), { recursive: true });
+      yield* fs.writeFileString(
+        path.join(root, "userdata", "environment-id"),
+        "environment-missing-backup\n",
+      );
+      initializeNativeStoreAuthority(
+        path.join(root, "native-store-authority"),
+        "environment-missing-backup",
+      );
+      const targetEntry = path.join(
+        root,
+        "runtime",
+        "versions",
+        "1.1.0",
+        "node_modules",
+        "t3",
+        "dist",
+        "bin.mjs",
+      );
+      yield* fs.makeDirectory(path.dirname(targetEntry), { recursive: true });
+      yield* fs.writeFileString(targetEntry, "process.exit(0);\n");
+      yield* fs.writeFileString(
+        path.join(root, "runtime", "versions", "1.1.0", ".install-complete"),
+        "1.1.0\n",
+      );
+      yield* Effect.promise(() =>
+        writeServiceState(statePath, {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.0.0",
+          update: {
+            id: "missing-backup-update",
+            fromVersion: "1.0.0",
+            targetVersion: "1.1.0",
+            dbPath: databasePath,
+            status: "pending",
+          },
+        }),
+      );
+
+      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      yield* Effect.promise(() =>
+        launcher.run().then(
+          () => Promise.reject(new Error("launcher unexpectedly completed")),
+          () => Promise.resolve(),
+        ),
+      );
+
+      const authority = readNativeStoreAuthorityState(path.join(root, "native-store-authority"));
+      assert.equal(authority.state, "fenced");
+      assert.equal(
+        (yield* Effect.promise(() => readServiceState(statePath))).update?.status,
+        "pending",
+      );
+      assert.isFalse(
+        yield* fs.exists(path.join(root, "runtime", "db-backup", "missing-backup-update")),
+      );
     }),
   );
 });
