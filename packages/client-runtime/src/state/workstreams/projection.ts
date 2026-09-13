@@ -88,8 +88,7 @@ export function projectWorkstreamDetail(
       ),
     relationships: Object.values(state.edges)
       .filter(
-        (edge) =>
-          edge.fromWorkstreamId === workstreamId || edge.toWorkstreamId === workstreamId,
+        (edge) => edge.fromWorkstreamId === workstreamId || edge.toWorkstreamId === workstreamId,
       )
       .sort((left, right) => compareText(left.edgeId, right.edgeId)),
     coordinationDispositionReceipts: Object.values(state.receipts)
