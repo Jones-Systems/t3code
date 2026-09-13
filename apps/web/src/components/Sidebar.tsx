@@ -175,6 +175,13 @@ import {
 } from "./Sidebar.snooze";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
+import { WorkstreamSidebarSection } from "./workstreams/WorkstreamSidebarSection";
+import {
+  groupNativeThreadsByWorkstream,
+  nativeWorkstreamThreadKey,
+  secondaryNativeWorkstreamLabels,
+} from "./workstreams/nativeThreadGrouping";
+import { useWorkstreams } from "../state/workstreams";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
   deriveProviderEntriesByEnvironment,
@@ -2238,6 +2245,30 @@ export default function Sidebar() {
     };
   }, [nowMinute, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
 
+  const workstreamController = useWorkstreams(!isMobile, activeThreads);
+  const workstreamThreadGrouping = useMemo(
+    () =>
+      groupNativeThreadsByWorkstream({
+        workstreams: workstreamController.data?.items ?? [],
+        placements: isMobile ? [] : (workstreamController.placements?.items ?? []),
+        threads: activeThreads,
+        trustedNow: snoozeNow,
+        trustedEnvironments: new Map(
+          (workstreamController.placements?.trustedEnvironments ?? []).map((value) => [
+            value.environmentId,
+            value,
+          ]),
+        ),
+      }),
+    [
+      activeThreads,
+      snoozeNow,
+      isMobile,
+      workstreamController.data?.items,
+      workstreamController.placements,
+    ],
+  );
+
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
@@ -2362,8 +2393,20 @@ export default function Sidebar() {
   }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
 
   const orderedThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
-    [pinnedThreads, activeThreads, visibleSnoozedThreads, renderedSettledThreads],
+    () => [
+      ...pinnedThreads,
+      ...(isMobile ? activeThreads : workstreamThreadGrouping.ordered),
+      ...visibleSnoozedThreads,
+      ...renderedSettledThreads,
+    ],
+    [
+      pinnedThreads,
+      activeThreads,
+      isMobile,
+      workstreamThreadGrouping.ordered,
+      visibleSnoozedThreads,
+      renderedSettledThreads,
+    ],
   );
   const orderedThreadKeys = useMemo(
     () =>
@@ -3764,6 +3807,9 @@ export default function Sidebar() {
           </SidebarGroup>
         }
       >
+        {!isSearchingThreads && !isMobile ? (
+          <WorkstreamSidebarSection controller={workstreamController} />
+        ) : null}
         <SidebarGroup className="ps-[calc(var(--sidebar-content-inset)+1px)] pe-[var(--sidebar-content-inset)] pb-1 pt-0">
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
@@ -3849,9 +3895,7 @@ export default function Sidebar() {
                     section: "pinned" | "active" | "snoozed" | "settled",
                     sortable?: SortablePinnedRowBag,
                   ) => {
-                    const threadKey = scopedThreadKey(
-                      scopeThreadRef(thread.environmentId, thread.id),
-                    );
+                    const threadKey = nativeWorkstreamThreadKey(thread.environmentId, thread.id);
                     // Settled and snoozed are the ONLY things that collapse a
                     // row: every other thread is a full card. Density comes
                     // from users (or the auto rules) actually parking work,
@@ -3959,6 +4003,24 @@ export default function Sidebar() {
                       />
                     );
                   };
+                  const renderSecondaryAssociations = (thread: EnvironmentThreadShell) => {
+                    const threadKey = nativeWorkstreamThreadKey(thread.environmentId, thread.id);
+                    const labels = secondaryNativeWorkstreamLabels(
+                      workstreamThreadGrouping,
+                      thread,
+                    );
+                    if (labels.length === 0) return null;
+                    return (
+                      <li
+                        key={`${threadKey}:secondary-workstreams`}
+                        data-thread-selection-safe
+                        aria-label={`Secondary Workstreams for thread: ${labels.join(", ")}`}
+                        className="list-none px-3 pb-1 text-[10px] text-sidebar-muted-foreground"
+                      >
+                        Linked: {labels.join(", ")}
+                      </li>
+                    );
+                  };
                   // Draft block above everything, then the pinned block:
                   // full cards above the inbox, closed by a thin divider (the
                   // pin glyphs carry the meaning, so no header text). Both
@@ -4028,8 +4090,45 @@ export default function Sidebar() {
                       />,
                     );
                   }
-                  for (const thread of activeThreads) {
+                  if (!isMobile) {
+                    for (const group of workstreamThreadGrouping.groups) {
+                      items.push(
+                        <li
+                          key={`workstream-header:${group.workstream.workstreamId}`}
+                          data-thread-selection-safe
+                          className="mt-2 list-none px-2.5 text-xs font-medium text-sidebar-muted-foreground"
+                        >
+                          {group.workstream.name}
+                          <span className="ml-1 font-normal">
+                            · {group.workstream.lifecycle} · {group.workstream.freshness}
+                          </span>
+                        </li>,
+                      );
+                      for (const thread of group.threads) {
+                        items.push(renderThreadRow(thread, "active"));
+                        const associations = renderSecondaryAssociations(thread);
+                        if (associations !== null) items.push(associations);
+                      }
+                    }
+                  }
+                  for (const thread of isMobile
+                    ? activeThreads
+                    : workstreamThreadGrouping.ungrouped) {
                     items.push(renderThreadRow(thread, "active"));
+                    const associations = renderSecondaryAssociations(thread);
+                    if (associations !== null) items.push(associations);
+                  }
+                  if (!isMobile && workstreamThreadGrouping.conflictingKeys.size > 0) {
+                    items.push(
+                      <li
+                        key="workstream-membership-conflicts"
+                        role="status"
+                        data-thread-selection-safe
+                        className="list-none px-2.5 py-1 text-xs text-destructive"
+                      >
+                        Some Workstream memberships conflict; affected threads remain ungrouped.
+                      </li>,
+                    );
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the
                   // way, never gone. The header always renders while anything
