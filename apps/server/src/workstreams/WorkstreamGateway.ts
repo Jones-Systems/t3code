@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import {
   WORKSTREAM_CONTRACT_FAMILY,
@@ -380,7 +380,7 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
           reason: "offline",
           detail: "Thread placements are unavailable.",
         });
-      const inventory_sha256 = createHash("sha256")
+      const inventory_sha256 = NodeCrypto.createHash("sha256")
         .update(t3PlacementInventoryJson(request.identities))
         .digest("hex");
       const requested = new Set(request.identities.map(t3PlacementIdentityKey));
@@ -634,7 +634,7 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
             detail: "Command generation or registry revision is not current.",
           });
         const body = canonicalJson(command);
-        const bodySha256 = createHash("sha256").update(body).digest("hex");
+        const bodySha256 = NodeCrypto.createHash("sha256").update(body).digest("hex");
         const commandKey = [authorized.key, command.command_id].join("\u0000");
         const seenDigest = commandDigests.get(commandKey);
         if (seenDigest !== undefined && seenDigest !== bodySha256)

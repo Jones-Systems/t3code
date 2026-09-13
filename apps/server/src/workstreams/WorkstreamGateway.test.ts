@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -306,7 +306,7 @@ it.effect("reconciles pending and unresolved commands only through the exact GET
           owner_id: binding.ownerId,
           actor: { principal_id: binding.principalId },
           operation: input.command.action.operation,
-          request_sha256: createHash("sha256").update(input.body).digest("hex"),
+          request_sha256: NodeCrypto.createHash("sha256").update(input.body).digest("hex"),
           server_generation: 7,
           accepted_at: terminal.accepted_at,
           state: "pending",

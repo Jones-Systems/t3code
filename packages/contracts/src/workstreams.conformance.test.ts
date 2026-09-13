@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import conformanceRaw from "./workstreams-fixtures/conformance.json.fixture?raw";
 import negativesRaw from "./workstreams-fixtures/negative-cases.json.fixture?raw";
@@ -130,7 +130,7 @@ const commandFor = (operation: string): Record<string, any> => {
 
 describe("frozen accepted Workstream v1 fixtures", () => {
   it("preserves all immutable source bytes", () => {
-    const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+    const sha256 = (value: string) => NodeCrypto.createHash("sha256").update(value).digest("hex");
     expect(sha256(conformanceRaw)).toBe(
       "a907dfa46f18a1930d0bd176571743d4932ae6dd13fc96421d5dec8e63bd6aa1",
     );

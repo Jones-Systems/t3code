@@ -1,5 +1,5 @@
 import { expect, it } from "@effect/vitest";
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
@@ -23,7 +23,7 @@ const now = Date.parse("2026-09-12T12:00:00Z");
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const identities = [{ source_instance_id: "environment:1", native_thread_id: "thread:1" }];
 const digest = (values: readonly T3PlacementIdentity[]) =>
-  createHash("sha256").update(t3PlacementInventoryJson(values)).digest("hex");
+  NodeCrypto.createHash("sha256").update(t3PlacementInventoryJson(values)).digest("hex");
 const request = { identities, limit: 100 };
 const page: T3PlacementPage = {
   inventory_sha256: digest(identities),

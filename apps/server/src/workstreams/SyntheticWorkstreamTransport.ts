@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import * as Effect from "effect/Effect";
 
@@ -160,7 +160,7 @@ const makeSyntheticReceipt = (
     owner_id: "owner-fixture",
     actor: { principal_id: "principal-fixture" },
     operation: command.action.operation,
-    request_sha256: createHash("sha256").update(body).digest("hex"),
+    request_sha256: NodeCrypto.createHash("sha256").update(body).digest("hex"),
     server_generation: 7,
     accepted_at: "2026-09-12T12:10:00Z",
     state: "committed",

@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import {
   WORKSTREAM_CONTRACT_MANIFEST_SHA256,
@@ -29,7 +29,7 @@ import * as Schema from "effect/Schema";
 
 import { WorkstreamTransportError, type WorkstreamTransport } from "./WorkstreamGateway.ts";
 
-const EMPTY_SHA256 = createHash("sha256").update("").digest("hex");
+const EMPTY_SHA256 = NodeCrypto.createHash("sha256").update("").digest("hex");
 const TIMEOUT_MS = 15_000;
 
 class BoundedTransportFailure extends Error {
@@ -181,7 +181,7 @@ export function signWorkstreamRequest(input: {
     input.target,
     input.contentSha256,
   ].join("\n");
-  return createHmac("sha256", key).update(canonical).digest("base64url");
+  return NodeCrypto.createHmac("sha256", key).update(canonical).digest("base64url");
 }
 
 async function readBoundedResponse(response: Response): Promise<string> {
@@ -238,10 +238,12 @@ async function performRequest(input: {
     /[\r\n]/.test(input.target)
   )
     throw new BoundedTransportFailure("invalid_target");
-  const requestId = randomUUID();
-  const nonce = randomBytes(24).toString("base64url");
+  const requestId = NodeCrypto.randomUUID();
+  const nonce = NodeCrypto.randomBytes(24).toString("base64url");
   const contentSha256 =
-    input.body === "" ? EMPTY_SHA256 : createHash("sha256").update(input.body).digest("hex");
+    input.body === ""
+      ? EMPTY_SHA256
+      : NodeCrypto.createHash("sha256").update(input.body).digest("hex");
   const signature = signWorkstreamRequest({
     contractVersion: placement ? T3_PLACEMENT_CONTRACT : WORKSTREAM_CONTRACT_HEADER_VERSION,
     requestId,
@@ -404,7 +406,7 @@ export function makeControlPlaneWorkstreamTransport(
               T3_PLACEMENT_ROUTE,
               T3PlacementPage,
               body,
-              randomUUID(),
+              NodeCrypto.randomUUID(),
             ),
           ),
         ),
