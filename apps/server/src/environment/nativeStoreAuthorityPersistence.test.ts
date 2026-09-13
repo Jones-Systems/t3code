@@ -1,0 +1,90 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
+import { describe, expect, it } from "vite-plus/test";
+
+import {
+  advanceNativeStoreAuthority,
+  decodeNativeStoreAuthorityState,
+  fenceNativeStoreAuthority,
+  initializeNativeStoreAuthority,
+  nativeStoreAuthorityPaths,
+  readNativeStoreAuthorityState,
+} from "./nativeStoreAuthorityPersistence.ts";
+
+const withDirectory = (run: (directory: string) => void): void => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-authority-test-"));
+  try {
+    run(NodePath.join(root, "authority"));
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+};
+
+describe("native store authority persistence", () => {
+  it("creates one private authority and advances only after a durable fence", () => {
+    withDirectory((authorityStateDir) => {
+      const environmentId = "environment-native-authority";
+      const initial = initializeNativeStoreAuthority(authorityStateDir, environmentId);
+      expect(initial.authority_namespace).toMatch(/^t3-native:[0-9a-f-]{36}$/);
+      expect(initial.store_generation).toBe(1);
+      expect(initial.state).toBe("active");
+      expect(NodeFS.statSync(authorityStateDir).mode & 0o777).toBe(0o700);
+      expect(
+        NodeFS.statSync(nativeStoreAuthorityPaths(authorityStateDir).statePath).mode & 0o777,
+      ).toBe(0o600);
+
+      const restarted = initializeNativeStoreAuthority(authorityStateDir, environmentId);
+      expect(restarted).toEqual(initial);
+
+      const fenced = fenceNativeStoreAuthority(authorityStateDir, environmentId);
+      expect(fenced.state).toBe("fenced");
+      expect(fenced.transition_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(() => readNativeStoreAuthorityState(authorityStateDir)).not.toThrow();
+
+      const databasePath = NodePath.join(NodePath.dirname(authorityStateDir), "state.sqlite");
+      NodeFS.writeFileSync(databasePath, "SQLite format 3\0");
+      const active = advanceNativeStoreAuthority(authorityStateDir, environmentId, databasePath);
+      expect(active.state).toBe("active");
+      expect(active.transition_id).toBeNull();
+      expect(active.store_generation).toBe(2);
+      expect(readNativeStoreAuthorityState(authorityStateDir)).toEqual(active);
+    });
+  });
+
+  it("fails closed for malformed, fenced, mismatched, and unreviewable transitions", () => {
+    expect(() =>
+      decodeNativeStoreAuthorityState({
+        record_version: "t3-native-store-authority/1.0.0",
+        environment_id: "env",
+        authority_namespace: "t3-native:00000000-0000-4000-8000-000000000000",
+        store_generation: 1,
+        state: "active",
+        transition_id: "not-null",
+      }),
+    ).toThrow();
+
+    withDirectory((authorityStateDir) => {
+      initializeNativeStoreAuthority(authorityStateDir, "env-a");
+      expect(() => fenceNativeStoreAuthority(authorityStateDir, "env-b")).toThrow(
+        "Native authority environment changed",
+      );
+      const fenced = fenceNativeStoreAuthority(authorityStateDir, "env-a");
+      expect(fenceNativeStoreAuthority(authorityStateDir, "env-a")).toEqual(fenced);
+      expect(() =>
+        advanceNativeStoreAuthority(
+          authorityStateDir,
+          "env-a",
+          NodePath.join(authorityStateDir, "missing.sqlite"),
+        ),
+      ).toThrow();
+      const invalidDatabasePath = NodePath.join(authorityStateDir, "invalid.sqlite");
+      NodeFS.writeFileSync(invalidDatabasePath, "not sqlite");
+      expect(() =>
+        advanceNativeStoreAuthority(authorityStateDir, "env-a", invalidDatabasePath),
+      ).toThrow("not a SQLite database");
+    });
+  });
+});

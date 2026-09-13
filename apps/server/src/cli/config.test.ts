@@ -134,6 +134,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServePort: 443,
       });
       assert.equal(resolved.stateDir, join(baseDir, "userdata"));
+      assert.equal(resolved.authorityStateDir, join(baseDir, "native-store-authority"));
     }),
   );
 
@@ -204,6 +205,21 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServePort: 8443,
       });
       assert.equal(resolved.dbPath, join(baseDir, "userdata", "state.sqlite"));
+      assert.equal(resolved.authorityStateDir, join(baseDir, "native-store-authority"));
+    }),
+  );
+
+  it.effect("keeps an explicitly configured native authority directory outside userdata", () =>
+    Effect.gen(function* () {
+      const { join } = yield* Path.Path;
+      const baseDir = join(NodeOS.tmpdir(), "t3-cli-config-authority-base");
+      const authorityStateDir = join(NodeOS.tmpdir(), "t3-cli-config-authority-state");
+      const paths = yield* deriveServerPaths(baseDir, undefined, {
+        authorityStateDir,
+      });
+      expect(paths.authorityStateDir).toBe(authorityStateDir);
+      expect(paths.authorityStateDir).not.toBe(paths.stateDir);
+      expect(paths.authorityStateDir).not.toContain(`${paths.stateDir}/`);
     }),
   );
 
@@ -396,6 +412,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       for (const directory of [
         customCwd,
         resolved.stateDir,
+        resolved.authorityStateDir,
         resolved.logsDir,
         resolved.providerLogsDir,
         resolved.terminalLogsDir,

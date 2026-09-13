@@ -26,6 +26,10 @@ import {
   SERVICE_STATE_FILE,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
+import {
+  advanceNativeStoreAuthorityForBaseDir,
+  fenceNativeStoreAuthorityForBaseDir,
+} from "./environment/nativeStoreAuthorityPersistence.ts";
 import { isEntrypoint } from "./entrypoint.ts";
 
 const HANDOFF_DELAY_MS = 2_000;
@@ -144,6 +148,10 @@ async function restoreDatabaseBackup(
   const backupDir = databaseBackupDir(baseDir, pending.id);
   if (!(await pathExists(backupDir))) return;
 
+  // A trusted native placement must be fenced before any database restore.
+  // Older installations without the follow-on authority have no trusted
+  // placement state and retain the existing rollback behavior.
+  fenceNativeStoreAuthorityForBaseDir(baseDir);
   await markDatabaseRestorePending(backupDir);
   for (const suffix of DB_FILE_SUFFIXES) {
     const target = `${pending.dbPath}${suffix}`;
@@ -156,6 +164,7 @@ async function restoreDatabaseBackup(
     }
   }
   await syncDirectory(NodePath.dirname(pending.dbPath));
+  advanceNativeStoreAuthorityForBaseDir(baseDir, pending.dbPath);
 }
 
 async function discardDatabaseBackup(baseDir: string, updateId: string): Promise<void> {

@@ -30,6 +30,8 @@ export type StartupPresentation = typeof StartupPresentation.Type;
  */
 export interface ServerDerivedPaths {
   readonly stateDir: string;
+  /** Native placement trust state; deliberately outside application/SQLite state. */
+  readonly authorityStateDir: string;
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
@@ -52,6 +54,7 @@ export interface ServerDerivedPaths {
 
 export interface DeriveServerPathsOptions {
   readonly baseDirIsExplicit?: boolean;
+  readonly authorityStateDir?: string;
 }
 
 /**
@@ -118,6 +121,7 @@ export const deriveServerPaths = Effect.fn(function* (
   const providerStatusCacheDir = join(baseDir, "caches");
   return {
     stateDir,
+    authorityStateDir: options.authorityStateDir ?? join(baseDir, "native-store-authority"),
     dbPath,
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),
@@ -145,6 +149,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   yield* Effect.all(
     [
       fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
+      fs.makeDirectory(derivedPaths.authorityStateDir, { recursive: true, mode: 0o700 }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),

@@ -137,6 +137,8 @@ export interface WorkstreamGatewayOptions {
 // Only an independently supplied T3 authority may provide native store trust; the registry response cannot.
 export interface T3PlacementTrustProvider {
   readonly readTrustedEnvironments: () => readonly TrustedT3PlacementEnvironment[];
+  /** False keeps placement fail-closed when the native authority is missing or fenced. */
+  readonly isReady?: () => boolean;
 }
 
 export class WorkstreamGateway extends Context.Service<
@@ -493,9 +495,10 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
       const result = {
         page: { ...finalPage, items, next_cursor: null },
         trustedEnvironments,
-        readiness: options.placementTrustProvider
-          ? ("ready" as const)
-          : ("trust-provider-required" as const),
+        readiness:
+          (options.placementTrustProvider?.isReady?.() ?? Boolean(options.placementTrustProvider))
+            ? ("ready" as const)
+            : ("trust-provider-required" as const),
       };
       if (Buffer.byteLength(canonicalJson(result)) > WORKSTREAM_MAX_RESPONSE_BYTES)
         return yield* invalid("Placement response workload exceeded.");

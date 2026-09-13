@@ -12,6 +12,10 @@ import {
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
+import {
+  initializeNativeStoreAuthority,
+  readNativeStoreAuthorityState,
+} from "./environment/nativeStoreAuthorityPersistence.ts";
 
 it("accepts only exact semantic versions", () => {
   for (const version of ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-0", "1.2.3+001"]) {
@@ -236,9 +240,15 @@ if (context.update?.status === "pending") {
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-db-" });
       const statePath = path.join(root, "runtime", "service-state.json");
       const databasePath = path.join(root, "userdata", "state.sqlite");
-      const original = "database before migration";
+      const authorityStateDir = path.join(root, "native-store-authority");
+      const original = "SQLite format 3\0database before migration";
       yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
       yield* fs.writeFileString(databasePath, original);
+      yield* fs.writeFileString(
+        path.join(root, "userdata", "environment-id"),
+        "environment-launcher\n",
+      );
+      initializeNativeStoreAuthority(authorityStateDir, "environment-launcher");
       // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in fake child source.
       const encodedDatabasePath = JSON.stringify(databasePath);
       const childSource = `
@@ -282,6 +292,9 @@ if (context.update?.status === "pending") {
       assert.equal(state.activeVersion, "1.0.0");
       assert.equal(state.update?.status, "rolled-back");
       assert.equal(yield* fs.readFileString(databasePath), original);
+      const authority = readNativeStoreAuthorityState(authorityStateDir);
+      assert.equal(authority.state, "active");
+      assert.equal(authority.store_generation, 2);
       assert.isFalse(yield* fs.exists(`${databasePath}-wal`));
       assert.isFalse(yield* fs.exists(`${databasePath}-shm`));
       const updateId = state.update?.id;

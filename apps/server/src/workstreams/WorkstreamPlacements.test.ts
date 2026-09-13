@@ -142,6 +142,26 @@ it.effect("defaults to empty native trust and permits independent server injecti
   }),
 );
 
+it.effect("keeps placement fail-closed when the independent native authority is fenced", () =>
+  Effect.gen(function* () {
+    const transport = {
+      ...makeSyntheticWorkstreamTransport(),
+      listThreadPlacements: () => Effect.succeed(page),
+    };
+    const gateway = yield* make(transport, {
+      binding,
+      now: () => now,
+      placementTrustProvider: {
+        readTrustedEnvironments: () => [],
+        isReady: () => false,
+      },
+    });
+    const result = yield* gateway.readThreadPlacements({ identities });
+    expect(result.trustedEnvironments).toEqual([]);
+    expect(result.readiness).toBe("trust-provider-required");
+  }),
+);
+
 it.effect("fences actual principal/grant and generation/revision values", () =>
   Effect.gen(function* () {
     for (const context of [

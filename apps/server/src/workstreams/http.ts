@@ -35,6 +35,7 @@ import {
   type WorkstreamGatewayError,
   type T3PlacementTrustProvider,
 } from "./WorkstreamGateway.ts";
+import * as NativeStoreAuthority from "../environment/NativeStoreAuthority.ts";
 
 export const WORKSTREAM_RESPONSE_HEADERS = {
   "cache-control": "private, no-store",
@@ -78,12 +79,24 @@ const configured = makeControlPlaneWorkstreamTransport();
 export const makeWorkstreamGatewayLayerLive = (placementTrustProvider?: T3PlacementTrustProvider) =>
   Layer.effect(
     WorkstreamGateway,
-    make(configured.transport, {
-      binding: configured.binding,
-      ...(placementTrustProvider ? { placementTrustProvider } : {}),
+    Effect.gen(function* () {
+      const nativeAuthority =
+        placementTrustProvider === undefined
+          ? yield* NativeStoreAuthority.NativeStoreAuthority
+          : undefined;
+      const resolvedPlacementTrustProvider =
+        placementTrustProvider ?? nativeAuthority?.trustProvider;
+      return yield* make(configured.transport, {
+        binding: configured.binding,
+        ...(resolvedPlacementTrustProvider === undefined
+          ? {}
+          : { placementTrustProvider: resolvedPlacementTrustProvider }),
+      });
     }),
   );
-export const workstreamGatewayLayerLive = makeWorkstreamGatewayLayerLive();
+export const workstreamGatewayLayerLive = makeWorkstreamGatewayLayerLive().pipe(
+  Layer.provide(NativeStoreAuthority.layer),
+);
 
 const internal = <A>(operation: string, effect: Effect.Effect<A, WorkstreamGatewayError>) =>
   effect.pipe(
