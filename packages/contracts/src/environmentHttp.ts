@@ -345,6 +345,11 @@ const EnvironmentOrchestrationSnapshotErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentWorkstreamSnapshotErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
 const EnvironmentOrchestrationThreadSnapshotErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentResourceNotFoundError,
@@ -577,7 +582,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       payload: T3PlacementLoadRequest,
       success: T3PlacementResult,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -585,7 +590,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       payload: T3WorkstreamListQuery,
       success: T3WorkstreamListResult,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -593,7 +598,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamReferencePage,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -601,7 +606,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       params: T3WorkstreamReferenceParams,
       success: WorkstreamReferenceDetail,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -609,7 +614,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       params: T3WorkstreamDetailParams,
       success: WorkstreamDetail,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -618,7 +623,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamMembershipPage,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -627,7 +632,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamDeclarationPage,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -636,7 +641,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamEdgePage,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -645,7 +650,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamHistoryPage,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -653,7 +658,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       params: T3WorkstreamCommandPollParams,
       success: WorkstreamReceipt,
-      error: EnvironmentOrchestrationSnapshotErrors,
+      error: EnvironmentWorkstreamSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

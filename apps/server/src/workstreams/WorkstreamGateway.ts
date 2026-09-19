@@ -61,6 +61,7 @@ export class WorkstreamGatewayError extends Schema.TaggedErrorClass<WorkstreamGa
       "contract-mismatch",
       "permission-denied",
       "version-conflict",
+      "cursor-stale",
       "idempotency-conflict",
       "invalid-response",
       "unknown-effect",
@@ -203,7 +204,12 @@ const canonicalJson = (value: unknown): string => {
 
 const transportFailure = (error: WorkstreamTransportError) =>
   new WorkstreamGatewayError({
-    reason: error.effect === "unknown-effect" ? "unknown-effect" : "offline",
+    reason:
+      error.detail === "cursor_stale"
+        ? "cursor-stale"
+        : error.effect === "unknown-effect"
+          ? "unknown-effect"
+          : "offline",
     detail: error.detail,
   });
 

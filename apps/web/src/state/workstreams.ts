@@ -12,7 +12,7 @@ import type {
   WorkstreamCommand,
   WorkstreamReceipt,
 } from "@t3tools/contracts";
-import { T3_PLACEMENT_MAX_IDENTITIES } from "@t3tools/contracts";
+import { EnvironmentHttpConflictError, T3_PLACEMENT_MAX_IDENTITIES } from "@t3tools/contracts";
 import {
   appendWorkstreamDtoPage,
   appendWorkstreamListResult,
@@ -23,6 +23,7 @@ import {
   type LiveT3Placements,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "../environments/primary/httpClient";
@@ -34,31 +35,70 @@ const request = <A, E>(run: (client: PrimaryClient) => Effect.Effect<A, E>) =>
   runPrimaryHttp(PrimaryEnvironmentHttpClient.pipe(Effect.flatMap(run)));
 
 const metadataCache = new LiveWorkstreamMetadataCache();
+const isCursorStale = Schema.is(EnvironmentHttpConflictError);
+const CURSOR_RESTART_ATTEMPTS = 3;
+
+interface CursorRestartOptions {
+  readonly wait?: (delayMs: number) => Promise<void>;
+}
+
+async function withCursorRestart<A>(
+  load: () => Promise<A>,
+  options: CursorRestartOptions = {},
+): Promise<A> {
+  const wait =
+    options.wait ??
+    ((delayMs: number) =>
+      new Promise<void>((resolve) => {
+        globalThis.setTimeout(resolve, delayMs);
+      }));
+  for (let attempt = 0; attempt < CURSOR_RESTART_ATTEMPTS; attempt += 1) {
+    try {
+      return await load();
+    } catch (cause) {
+      if (
+        !isCursorStale(cause) ||
+        cause.message !== "workstream_cursor_stale" ||
+        attempt + 1 === CURSOR_RESTART_ATTEMPTS
+      )
+        throw cause;
+      await wait(50 * 2 ** attempt);
+    }
+  }
+  throw new Error("Workstream cursor restart policy is invalid.");
+}
 
 async function loadAllPages<Item>(
   load: (cursor?: string) => Promise<WorkstreamDtoPage<Item>>,
+  options: CursorRestartOptions = {},
 ): Promise<WorkstreamDtoPage<Item>> {
-  let result = await load();
-  const cursors = new Set<string>();
-  while (result.next_cursor !== null) {
-    if (cursors.has(result.next_cursor)) throw new Error("Workstream pagination cursor repeated.");
-    cursors.add(result.next_cursor);
-    result = appendWorkstreamDtoPage(result, await load(result.next_cursor));
-  }
-  return result;
+  return withCursorRestart(async () => {
+    let result = await load();
+    const cursors = new Set<string>();
+    while (result.next_cursor !== null) {
+      if (cursors.has(result.next_cursor))
+        throw new Error("Workstream pagination cursor repeated.");
+      cursors.add(result.next_cursor);
+      result = appendWorkstreamDtoPage(result, await load(result.next_cursor));
+    }
+    return result;
+  }, options);
 }
 
 export async function loadCompleteWorkstreamList(
   load: (cursor?: string) => Promise<T3WorkstreamListResult>,
+  options: CursorRestartOptions = {},
 ): Promise<T3WorkstreamListResult> {
-  let result = await load();
-  const cursors = new Set<string>();
-  while (result.nextCursor !== null) {
-    if (cursors.has(result.nextCursor)) throw new Error("Workstream list cursor repeated.");
-    cursors.add(result.nextCursor);
-    result = appendWorkstreamListResult(result, await load(result.nextCursor));
-  }
-  return result;
+  return withCursorRestart(async () => {
+    let result = await load();
+    const cursors = new Set<string>();
+    while (result.nextCursor !== null) {
+      if (cursors.has(result.nextCursor)) throw new Error("Workstream list cursor repeated.");
+      cursors.add(result.nextCursor);
+      result = appendWorkstreamListResult(result, await load(result.nextCursor));
+    }
+    return result;
+  }, options);
 }
 
 export interface WorkstreamListView {

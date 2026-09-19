@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vite-plus/test";
+import { EnvironmentHttpConflictError } from "@t3tools/contracts";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { loadCompleteWorkstreamList, nativePlacementInventoryJson } from "./workstreams";
 
@@ -65,5 +66,57 @@ describe("complete Workstream list loading", () => {
         };
       }),
     ).rejects.toThrow("later-page-conflict");
+  });
+
+  it("restarts a stale page sequence with bounded backoff before exposing data", async () => {
+    const cursors: Array<string | undefined> = [];
+    const wait = vi.fn(async () => undefined);
+    let attempt = 0;
+    const result = await loadCompleteWorkstreamList(
+      async (cursor) => {
+        cursors.push(cursor);
+        if (cursor === undefined) {
+          attempt += 1;
+          return {
+            binding,
+            items: [],
+            nextCursor: attempt === 1 ? "stale" : "fresh",
+            source: "live" as const,
+            stale: false,
+          };
+        }
+        if (cursor === "stale")
+          throw new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" });
+        return { binding, items: [], nextCursor: null, source: "live" as const, stale: false };
+      },
+      { wait },
+    );
+    expect(cursors).toEqual([undefined, "stale", undefined, "fresh"]);
+    expect(wait).toHaveBeenCalledWith(50);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("fails closed after three stale page sequences", async () => {
+    const wait = vi.fn(async () => undefined);
+    let firstPages = 0;
+    await expect(
+      loadCompleteWorkstreamList(
+        async (cursor) => {
+          if (cursor !== undefined)
+            throw new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" });
+          firstPages += 1;
+          return {
+            binding,
+            items: [],
+            nextCursor: `stale-${firstPages}`,
+            source: "live" as const,
+            stale: false,
+          };
+        },
+        { wait },
+      ),
+    ).rejects.toMatchObject({ message: "workstream_cursor_stale" });
+    expect(firstPages).toBe(3);
+    expect(wait.mock.calls).toEqual([[50], [100]]);
   });
 });
