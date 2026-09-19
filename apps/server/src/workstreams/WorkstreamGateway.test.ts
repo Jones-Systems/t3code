@@ -115,6 +115,18 @@ it.effect("rejects a receipt attributed to another principal", () =>
   }),
 );
 
+it.effect("returns schema-valid typed detail and reference fixtures", () =>
+  Effect.gen(function* () {
+    const gateway = yield* make(makeSyntheticWorkstreamTransport(), { binding });
+    const detail = yield* gateway.readDetail("ws-core-v1");
+    const reference = yield* gateway.readReference("reference-fixture");
+
+    expect(detail.workstream.workstream_id).toBe("ws-core-v1");
+    expect(reference.reference.native_reference_id).toBe("reference-fixture");
+    expect(reference.reference.registration.state).toBe("verification-pending");
+  }),
+);
+
 it.effect("refuses mutations while offline or against stale generation and revision", () =>
   Effect.gen(function* () {
     const offlineGateway = yield* make(makeSyntheticWorkstreamTransport({ offline: true }), {

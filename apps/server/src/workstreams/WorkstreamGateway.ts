@@ -11,8 +11,15 @@ import {
   type Workstream,
   type WorkstreamCapabilities,
   type WorkstreamCommand,
+  type WorkstreamDeclarationPage,
+  type WorkstreamDetail,
+  type WorkstreamEdgePage,
+  type WorkstreamHistoryPage,
+  type WorkstreamMembershipPage,
   type WorkstreamPage,
   type WorkstreamReceipt,
+  type WorkstreamReferenceDetail,
+  type WorkstreamReferencePage,
   T3PlacementPage,
   T3PlacementResult,
   T3PlacementLoadRequest,
@@ -93,25 +100,25 @@ export interface WorkstreamTransport {
   ) => Effect.Effect<WorkstreamPage, WorkstreamTransportError>;
   readonly getWorkstream: (
     input: { readonly workstreamId: string } & ContractInput,
-  ) => Effect.Effect<unknown, WorkstreamTransportError>;
+  ) => Effect.Effect<WorkstreamDetail, WorkstreamTransportError>;
   readonly listReferences: (
     input: PageInput & ContractInput,
-  ) => Effect.Effect<unknown, WorkstreamTransportError>;
+  ) => Effect.Effect<WorkstreamReferencePage, WorkstreamTransportError>;
   readonly getReference: (
     input: { readonly nativeReferenceId: string } & ContractInput,
-  ) => Effect.Effect<unknown, WorkstreamTransportError>;
+  ) => Effect.Effect<WorkstreamReferenceDetail, WorkstreamTransportError>;
   readonly listMemberships: (
     input: { readonly workstreamId: string } & PageInput & ContractInput,
-  ) => Effect.Effect<unknown, WorkstreamTransportError>;
+  ) => Effect.Effect<WorkstreamMembershipPage, WorkstreamTransportError>;
   readonly listDeclarations: (
     input: { readonly workstreamId: string } & PageInput & ContractInput,
-  ) => Effect.Effect<unknown, WorkstreamTransportError>;
+  ) => Effect.Effect<WorkstreamDeclarationPage, WorkstreamTransportError>;
   readonly listEdges: (
     input: { readonly workstreamId: string } & PageInput & ContractInput,
-  ) => Effect.Effect<unknown, WorkstreamTransportError>;
+  ) => Effect.Effect<WorkstreamEdgePage, WorkstreamTransportError>;
   readonly listHistory: (
     input: { readonly workstreamId?: string } & PageInput & ContractInput,
-  ) => Effect.Effect<unknown, WorkstreamTransportError>;
+  ) => Effect.Effect<WorkstreamHistoryPage, WorkstreamTransportError>;
   readonly getCommand: (
     input: { readonly commandId: string } & ContractInput,
   ) => Effect.Effect<WorkstreamReceipt, WorkstreamTransportError>;
@@ -154,30 +161,32 @@ export class WorkstreamGateway extends Context.Service<
       readonly limit?: number;
       readonly cursor?: string;
     }) => Effect.Effect<T3WorkstreamListResult, WorkstreamGatewayError>;
-    readonly readDetail: (workstreamId: string) => Effect.Effect<unknown, WorkstreamGatewayError>;
+    readonly readDetail: (
+      workstreamId: string,
+    ) => Effect.Effect<WorkstreamDetail, WorkstreamGatewayError>;
     readonly readReferences: (input?: {
       readonly limit?: number;
       readonly cursor?: string;
-    }) => Effect.Effect<unknown, WorkstreamGatewayError>;
+    }) => Effect.Effect<WorkstreamReferencePage, WorkstreamGatewayError>;
     readonly readReference: (
       nativeReferenceId: string,
-    ) => Effect.Effect<unknown, WorkstreamGatewayError>;
+    ) => Effect.Effect<WorkstreamReferenceDetail, WorkstreamGatewayError>;
     readonly readMemberships: (
       workstreamId: string,
       input?: { readonly limit?: number; readonly cursor?: string },
-    ) => Effect.Effect<unknown, WorkstreamGatewayError>;
+    ) => Effect.Effect<WorkstreamMembershipPage, WorkstreamGatewayError>;
     readonly readDeclarations: (
       workstreamId: string,
       input?: { readonly limit?: number; readonly cursor?: string },
-    ) => Effect.Effect<unknown, WorkstreamGatewayError>;
+    ) => Effect.Effect<WorkstreamDeclarationPage, WorkstreamGatewayError>;
     readonly readEdges: (
       workstreamId: string,
       input?: { readonly limit?: number; readonly cursor?: string },
-    ) => Effect.Effect<unknown, WorkstreamGatewayError>;
+    ) => Effect.Effect<WorkstreamEdgePage, WorkstreamGatewayError>;
     readonly readHistory: (
       workstreamId: string | undefined,
       input?: { readonly limit?: number; readonly cursor?: string },
-    ) => Effect.Effect<unknown, WorkstreamGatewayError>;
+    ) => Effect.Effect<WorkstreamHistoryPage, WorkstreamGatewayError>;
     readonly pollCommand: (
       commandId: string,
     ) => Effect.Effect<WorkstreamReceipt, WorkstreamGatewayError>;
@@ -321,10 +330,10 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
         }),
       );
 
-    const validateContext = (
-      value: unknown,
+    const validateContext = <A>(
+      value: A,
       binding: T3WorkstreamBinding,
-    ): Effect.Effect<unknown, WorkstreamGatewayError> => {
+    ): Effect.Effect<A, WorkstreamGatewayError> => {
       if (!value || typeof value !== "object" || !("context" in value))
         return Effect.fail(
           new WorkstreamGatewayError({
@@ -580,8 +589,8 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
         return result;
       });
 
-    const boundRead = (
-      run: (request: PageInput & ContractInput) => Effect.Effect<unknown, WorkstreamTransportError>,
+    const boundRead = <A>(
+      run: (request: PageInput & ContractInput) => Effect.Effect<A, WorkstreamTransportError>,
       input?: { readonly limit?: number; readonly cursor?: string },
     ) =>
       Effect.gen(function* () {
@@ -595,7 +604,7 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
         );
         return yield* validateContext(value, authorized.binding);
       });
-    const boundDetail = (run: () => Effect.Effect<unknown, WorkstreamTransportError>) =>
+    const boundDetail = <A>(run: () => Effect.Effect<A, WorkstreamTransportError>) =>
       Effect.gen(function* () {
         const authorized = yield* authorize("workstreams:read");
         const value = yield* run().pipe(Effect.mapError(transportFailure));
