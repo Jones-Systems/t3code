@@ -721,10 +721,10 @@ describe("CodexSessionRuntime collab integration", () => {
         { method: "thread/goal/get", params: { threadId: ROOT } },
         { method: "turn/interrupt", params: { threadId: ROOT, turnId: "goal-stop-restart" } },
       ]);
-      const decodeGoalState = Schema.decodeUnknownSync(
+      const decodeGoalState = Schema.decodeUnknownEffect(
         Schema.fromJsonString(Schema.Struct({ status: Schema.String })),
       );
-      assert.deepEqual(decodeGoalState(NodeFS.readFileSync(goalStatePath, "utf8")), {
+      assert.deepEqual(yield* decodeGoalState(NodeFS.readFileSync(goalStatePath, "utf8")), {
         status: "paused",
       });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
