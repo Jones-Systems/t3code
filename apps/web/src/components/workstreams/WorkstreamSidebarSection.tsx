@@ -11,7 +11,7 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { ChevronDownIcon, ChevronUpIcon, GripVerticalIcon, MoreHorizontalIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { runtime } from "../../lib/runtime";
 import type { WorkstreamListView } from "../../state/workstreams";
@@ -41,41 +41,52 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof loadDetail>> | null>(null);
   const detailRequest = useRef<AbortController | null>(null);
   const items = useMemo(() => orderWorkstreamMetadata(data?.items ?? []), [data]);
+  const bindingKey = data
+    ? JSON.stringify([
+        data.binding.ownerId,
+        data.binding.principalId,
+        data.binding.authorizationRevision,
+        data.binding.serverGeneration,
+        data.binding.registryVersion,
+      ])
+    : null;
+  const bindingKeyRef = useRef(bindingKey);
 
-  useEffect(() => {
-    if (!data) {
-      detailRequest.current?.abort();
-      detailRequest.current = null;
-      setDetail(null);
+  useLayoutEffect(() => {
+    bindingKeyRef.current = bindingKey;
+    detailRequest.current?.abort();
+    detailRequest.current = null;
+    setDetail(null);
+    setPullRequestStatus({});
+    if (bindingKey === null) {
       setReceipt(null);
       setSelected(null);
     }
-  }, [data]);
-  useEffect(
-    () => () => {
+    return () => {
       detailRequest.current?.abort();
       detailRequest.current = null;
-    },
-    [],
-  );
+    };
+  }, [bindingKey]);
   if (!data) return null;
 
   const showDetail = (workstreamId: string) => {
     detailRequest.current?.abort();
     const controller = new AbortController();
     detailRequest.current = controller;
+    const startedBindingKey = bindingKey;
     setSelected(workstreamId);
     setDetail(null);
+    setPullRequestStatus({});
     setTargetId(items.find((item) => item.workstreamId !== workstreamId)?.workstreamId ?? "");
     void loadDetail(workstreamId, { signal: controller.signal }).then(
       (value) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || bindingKeyRef.current !== startedBindingKey) return;
         setDetail(value);
         for (const reference of value.references.items) {
           if (!reference.pr_locator) continue;
           void loadReference(reference.native_reference_id, { signal: controller.signal }).then(
             (result) => {
-              if (controller.signal.aborted) return;
+              if (controller.signal.aborted || bindingKeyRef.current !== startedBindingKey) return;
               setPullRequestStatus((current) => ({
                 ...current,
                 [reference.native_reference_id]:
@@ -89,7 +100,8 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
         }
       },
       () => {
-        if (!controller.signal.aborted) setDetail(null);
+        if (!controller.signal.aborted && bindingKeyRef.current === startedBindingKey)
+          setDetail(null);
       },
     );
   };
