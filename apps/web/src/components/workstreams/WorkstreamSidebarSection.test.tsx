@@ -57,6 +57,8 @@ describe("mounted Workstream sidebar", () => {
     expect(html).toContain("Alpha");
     expect(html).toContain("Actions for Alpha");
     expect(html).toContain('draggable="true"');
-    expect(html).toContain("Thread placement coverage is partial (1,000 of 20,000 checked).");
+    expect(html).toContain(
+      "Thread placement lookup scope is partial (1,000 of 20,000 identities selected).",
+    );
   });
 });

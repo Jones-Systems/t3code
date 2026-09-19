@@ -146,9 +146,9 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
       </div>
       {placementInventory.coverage === "partial" ? (
         <p className="px-1 pb-1 text-xs text-sidebar-muted-foreground">
-          Thread placement coverage is partial (
+          Thread placement lookup scope is partial (
           {placementInventory.identities.length.toLocaleString()} of{" "}
-          {placementInventory.totalIdentities.toLocaleString()} checked).
+          {placementInventory.totalIdentities.toLocaleString()} identities selected).
         </p>
       ) : null}
       {commandError ? <p className="px-1 pb-1 text-xs text-destructive">{commandError}</p> : null}
