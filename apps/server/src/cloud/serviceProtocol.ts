@@ -67,10 +67,14 @@ const SEMVER_PRERELEASE = `(?:${SEMVER_NUMBER}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)`;
 const EXACT_SERVICE_VERSION = new RegExp(
   `^${SEMVER_NUMBER}\\.${SEMVER_NUMBER}\\.${SEMVER_NUMBER}(?:-${SEMVER_PRERELEASE}(?:\\.${SEMVER_PRERELEASE})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`,
 );
+const SERVICE_UPDATE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Accepts exact SemVer only: never dist-tags or ranges passed to npm or filesystem paths. */
 export const isExactServiceVersion = (version: string): boolean =>
   EXACT_SERVICE_VERSION.test(version);
+
+/** Launcher-owned update IDs are UUIDs, never path fragments or caller labels. */
+export const isServiceUpdateId = (id: string): boolean => SERVICE_UPDATE_ID.test(id);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -80,7 +84,7 @@ export function decodeServiceUpdate(value: unknown): ServiceUpdateRecord | undef
   const { id, fromVersion, targetVersion, status } = value;
   if (
     typeof id !== "string" ||
-    id.trim() === "" ||
+    !isServiceUpdateId(id) ||
     typeof fromVersion !== "string" ||
     !isExactServiceVersion(fromVersion) ||
     typeof targetVersion !== "string" ||

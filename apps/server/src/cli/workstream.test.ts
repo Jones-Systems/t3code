@@ -21,7 +21,9 @@ import { workstreamCommand } from "./workstream.ts";
 
 const runtimeLayer = Layer.mergeAll(
   NodeServices.layer,
-  NetService.layer,
+  Layer.succeed(NetService.NetService, {
+    findAvailablePort: () => Effect.succeed(3773),
+  } as unknown as NetService.NetService["Service"]),
   TestConsole.layer,
   ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
 );
