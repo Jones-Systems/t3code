@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { loadCompleteWorkstreamList, nativePlacementInventoryJson } from "./workstreams";
+import {
+  loadCompleteWorkstreamList,
+  nativePlacementInventory,
+  nativePlacementInventoryJson,
+} from "./workstreams";
 
 const binding = {
   registryId: "registry",
@@ -28,13 +32,16 @@ describe("complete Workstream list loading", () => {
         [...threads].reverse().map((value) => ({ ...value, title: "changed" })),
       ),
     ).toBe(inventory);
-    expect(
-      JSON.parse(
-        nativePlacementInventoryJson(
-          Array.from({ length: 20_000 }, (_, i) => ({ environmentId: "env", id: String(i) })),
-        ),
-      ),
-    ).toHaveLength(1001);
+    const excessThreads = Array.from({ length: 20_000 }, (_, i) => ({
+      environmentId: "env",
+      id: String(i),
+    }));
+    const excessInventory = nativePlacementInventory(excessThreads);
+    expect(excessInventory.identities).toHaveLength(1_000);
+    expect(excessInventory.totalIdentities).toBe(20_000);
+    expect(excessInventory.coverage).toBe("partial");
+    expect(nativePlacementInventory([...excessThreads].reverse())).toEqual(excessInventory);
+    expect(nativePlacementInventory(threads).coverage).toBe("complete");
   });
   it("loads across page boundaries before exposing an owner list", async () => {
     const cursors: Array<string | undefined> = [];

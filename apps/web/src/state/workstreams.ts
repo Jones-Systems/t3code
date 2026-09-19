@@ -62,6 +62,7 @@ export async function loadCompleteWorkstreamList(
 }
 
 export interface WorkstreamListView {
+  readonly placementInventory: NativePlacementInventory;
   readonly placements: LiveT3Placements | null;
   readonly data: T3WorkstreamListResult | null;
   readonly error: string | null;
@@ -79,32 +80,50 @@ export interface WorkstreamListView {
   readonly loadReference: (nativeReferenceId: string) => Promise<WorkstreamReferenceDetail>;
 }
 
-export function nativePlacementInventoryJson(
+export interface NativePlacementInventory {
+  readonly coverage: "complete" | "partial";
+  readonly identities: readonly T3PlacementIdentity[];
+  readonly json: string;
+  readonly totalIdentities: number;
+}
+
+export function nativePlacementInventory(
   nativeThreads: readonly { readonly environmentId: string; readonly id: string }[],
-): string {
+): NativePlacementInventory {
   const identities = new Map<string, T3PlacementIdentity>();
   for (const thread of nativeThreads) {
     identities.set(JSON.stringify([thread.environmentId, thread.id]), {
       source_instance_id: thread.environmentId,
       native_thread_id: thread.id,
     });
-    if (identities.size > T3_PLACEMENT_MAX_IDENTITIES) break;
   }
-  return JSON.stringify(
-    [...identities.entries()]
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([, value]) => value),
-  );
+  const totalIdentities = identities.size;
+  const selected = [...identities.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, T3_PLACEMENT_MAX_IDENTITIES)
+    .map(([, value]) => value);
+  return {
+    coverage: totalIdentities > selected.length ? "partial" : "complete",
+    identities: selected,
+    json: JSON.stringify(selected),
+    totalIdentities,
+  };
+}
+
+export function nativePlacementInventoryJson(
+  nativeThreads: readonly { readonly environmentId: string; readonly id: string }[],
+): string {
+  return nativePlacementInventory(nativeThreads).json;
 }
 
 export function useWorkstreams(
   placementsEnabled = true,
   nativeThreads: readonly { readonly environmentId: string; readonly id: string }[] = [],
 ): WorkstreamListView {
-  const inventoryJson = nativePlacementInventoryJson(placementsEnabled ? nativeThreads : []);
+  const inventory = nativePlacementInventory(placementsEnabled ? nativeThreads : []);
   const identities = useMemo(
-    () => JSON.parse(inventoryJson) as readonly T3PlacementIdentity[],
-    [inventoryJson],
+    () => JSON.parse(inventory.json) as readonly T3PlacementIdentity[],
+    [inventory.json],
   );
   const [placements, setPlacements] = useState<LiveT3Placements | null>(null);
   const [data, setData] = useState<T3WorkstreamListResult | null>(null);
@@ -304,6 +323,7 @@ export function useWorkstreams(
   }, []);
 
   return {
+    placementInventory: inventory,
     placements,
     data,
     error,
