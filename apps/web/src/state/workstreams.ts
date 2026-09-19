@@ -38,6 +38,9 @@ const metadataCache = new LiveWorkstreamMetadataCache();
 const isCursorStale = Schema.is(EnvironmentHttpConflictError);
 const CURSOR_RESTART_ATTEMPTS = 3;
 
+const isRestartableCursorStale = (cause: unknown): boolean =>
+  isCursorStale(cause) && cause.message === "workstream_cursor_stale";
+
 export interface CursorRestartOptions {
   readonly wait?: (delayMs: number) => Promise<void>;
 }
@@ -56,12 +59,7 @@ async function withCursorRestart<A>(
     try {
       return await load();
     } catch (cause) {
-      if (
-        !isCursorStale(cause) ||
-        cause.message !== "workstream_cursor_stale" ||
-        attempt + 1 === CURSOR_RESTART_ATTEMPTS
-      )
-        throw cause;
+      if (!isRestartableCursorStale(cause) || attempt + 1 === CURSOR_RESTART_ATTEMPTS) throw cause;
       await wait(50 * 2 ** attempt);
     }
   }
@@ -135,15 +133,20 @@ export async function loadCompleteWorkstreamDetail(
       loadAllPages(loaders.history),
       loadAllPages(loaders.references),
     ] as const);
-    const failure = [
+    const failures = [
       detailResult,
       membershipsResult,
       declarationsResult,
       edgesResult,
       historyResult,
       referencesResult,
-    ].find((result) => result.status === "rejected");
-    if (failure?.status === "rejected") throw failure.reason;
+    ].filter((result) => result.status === "rejected");
+    const nonRestartableFailure = failures.find(
+      (result) => result.status === "rejected" && !isRestartableCursorStale(result.reason),
+    );
+    if (nonRestartableFailure?.status === "rejected") throw nonRestartableFailure.reason;
+    const staleFailure = failures[0];
+    if (staleFailure?.status === "rejected") throw staleFailure.reason;
     if (
       detailResult.status !== "fulfilled" ||
       membershipsResult.status !== "fulfilled" ||

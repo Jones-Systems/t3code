@@ -215,4 +215,40 @@ describe("complete Workstream detail loading", () => {
       expect(calls[name]).toHaveLength(3);
     expect(wait.mock.calls).toEqual([[50], [100]]);
   });
+
+  it("does not retry or mask a non-stale failure from the same detail round", async () => {
+    const calls = detailCalls();
+    const wait = vi.fn(async () => undefined);
+    const permissionFailure = new Error("permission-revoked");
+    const loaders = detailLoaders(calls, async (cursor) => {
+      calls.memberships.push(cursor);
+      if (cursor === undefined)
+        throw new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" });
+      return emptyPage;
+    });
+
+    await expect(
+      loadCompleteWorkstreamDetail(
+        {
+          ...loaders,
+          declarations: async (cursor) => {
+            calls.declarations.push(cursor);
+            throw permissionFailure;
+          },
+        },
+        { wait },
+      ),
+    ).rejects.toBe(permissionFailure);
+
+    for (const name of [
+      "detail",
+      "memberships",
+      "declarations",
+      "edges",
+      "history",
+      "references",
+    ] as const)
+      expect(calls[name]).toHaveLength(1);
+    expect(wait).not.toHaveBeenCalled();
+  });
 });
