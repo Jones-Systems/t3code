@@ -469,7 +469,6 @@ export const prepareNativeStoreAuthorityAdvance = (
     if (readNativeStoreOrchestrationSequence(databasePath) !== expectedPreviousSequence) {
       throw error("sequence_mismatch", "Native database sequence changed concurrently.");
     }
-    if (current.orchestration_sequence === nextSequence) return current;
     if (current.orchestration_sequence !== expectedPreviousSequence) {
       throw error("sequence_mismatch", "Native authority sequence has an unexpected preimage.");
     }

@@ -15,6 +15,7 @@ import {
   initializeNativeStoreAuthority,
   nativeStoreAuthorityPaths,
   prepareNativeStoreAuthorityAdvance,
+  readNativeStoreOrchestrationSequence,
   readVerifiedNativeStoreAuthority,
 } from "./nativeStoreAuthorityPersistence.ts";
 
@@ -57,25 +58,31 @@ const enroll = (fixture: ReturnType<typeof makeFixture>) =>
 
 const appendPrepared = (fixture: ReturnType<typeof makeFixture>, commit: boolean): void => {
   const database = new NodeSqlite.DatabaseSync(fixture.databasePath);
-  const previous = Number(
-    (
-      database
-        .prepare("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM orchestration_events")
-        .get() as { readonly sequence: number }
-    ).sequence,
-  );
-  database.exec("BEGIN IMMEDIATE");
-  database.exec("INSERT INTO orchestration_events DEFAULT VALUES");
-  prepareNativeStoreAuthorityAdvance(
-    fixture.authorityStateDir,
-    fixture.databasePath,
-    fixture.environmentId,
-    fixture.fingerprint,
-    previous,
-    previous + 1,
-  );
-  database.exec(commit ? "COMMIT" : "ROLLBACK");
-  database.close();
+  try {
+    const previous = Number(
+      (
+        database
+          .prepare("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM orchestration_events")
+          .get() as { readonly sequence: number }
+      ).sequence,
+    );
+    database.exec("BEGIN IMMEDIATE");
+    database.exec("INSERT INTO orchestration_events DEFAULT VALUES");
+    prepareNativeStoreAuthorityAdvance(
+      fixture.authorityStateDir,
+      fixture.databasePath,
+      fixture.environmentId,
+      fixture.fingerprint,
+      previous,
+      previous + 1,
+    );
+    database.exec(commit ? "COMMIT" : "ROLLBACK");
+  } catch (cause) {
+    if (database.isTransaction) database.exec("ROLLBACK");
+    throw cause;
+  } finally {
+    database.close();
+  }
 };
 
 describe("native store authority persistence", () => {
@@ -102,6 +109,8 @@ describe("native store authority persistence", () => {
           fixture.fingerprint,
         ),
       ).toThrow("does not match");
+      expect(() => appendPrepared(fixture, true)).toThrow("unexpected preimage");
+      expect(readNativeStoreOrchestrationSequence(fixture.databasePath)).toBe(0);
     });
   });
 
