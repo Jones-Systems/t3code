@@ -11,7 +11,7 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { ChevronDownIcon, ChevronUpIcon, GripVerticalIcon, MoreHorizontalIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { runtime } from "../../lib/runtime";
 import type { WorkstreamListView } from "../../state/workstreams";
@@ -39,37 +39,58 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
   const [pullRequestStatus, setPullRequestStatus] = useState<Record<string, string>>({});
   const [commandError, setCommandError] = useState<string | null>(null);
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof loadDetail>> | null>(null);
+  const detailRequest = useRef<AbortController | null>(null);
   const items = useMemo(() => orderWorkstreamMetadata(data?.items ?? []), [data]);
 
   useEffect(() => {
     if (!data) {
+      detailRequest.current?.abort();
+      detailRequest.current = null;
       setDetail(null);
       setReceipt(null);
       setSelected(null);
     }
   }, [data]);
+  useEffect(
+    () => () => {
+      detailRequest.current?.abort();
+      detailRequest.current = null;
+    },
+    [],
+  );
   if (!data) return null;
 
   const showDetail = (workstreamId: string) => {
+    detailRequest.current?.abort();
+    const controller = new AbortController();
+    detailRequest.current = controller;
     setSelected(workstreamId);
+    setDetail(null);
     setTargetId(items.find((item) => item.workstreamId !== workstreamId)?.workstreamId ?? "");
-    void loadDetail(workstreamId).then(
+    void loadDetail(workstreamId, { signal: controller.signal }).then(
       (value) => {
+        if (controller.signal.aborted) return;
         setDetail(value);
         for (const reference of value.references.items) {
           if (!reference.pr_locator) continue;
-          void loadReference(reference.native_reference_id).then((result) => {
-            setPullRequestStatus((current) => ({
-              ...current,
-              [reference.native_reference_id]:
-                result.latest_observation?.last_success?.state ??
-                result.latest_observation?.outcome ??
-                "not refreshed",
-            }));
-          });
+          void loadReference(reference.native_reference_id, { signal: controller.signal }).then(
+            (result) => {
+              if (controller.signal.aborted) return;
+              setPullRequestStatus((current) => ({
+                ...current,
+                [reference.native_reference_id]:
+                  result.latest_observation?.last_success?.state ??
+                  result.latest_observation?.outcome ??
+                  "not refreshed",
+              }));
+            },
+            () => undefined,
+          );
         }
       },
-      () => setDetail(null),
+      () => {
+        if (!controller.signal.aborted) setDetail(null);
+      },
     );
   };
   const run = async (action: WorkstreamCommand["action"], registryVersion?: number) => {
@@ -81,7 +102,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
     });
     setReceipt(value);
     setCommandError(null);
-    if (selected) void loadDetail(selected).then(setDetail, () => setDetail(null));
+    if (selected) showDetail(selected);
     return value;
   };
   const invoke = (action: WorkstreamCommand["action"]) => {

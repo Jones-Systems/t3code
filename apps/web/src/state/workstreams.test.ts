@@ -148,6 +148,29 @@ describe("complete Workstream list loading", () => {
     ).rejects.toThrow("later-page-conflict");
   });
 
+  it("does not request another page after cancellation", async () => {
+    const controller = new AbortController();
+    const cancelled = new Error("list-cancelled");
+    const cursors: Array<string | undefined> = [];
+    await expect(
+      loadCompleteWorkstreamList(
+        async (cursor) => {
+          cursors.push(cursor);
+          controller.abort(cancelled);
+          return {
+            binding,
+            items: [],
+            nextCursor: "must-not-load",
+            source: "live" as const,
+            stale: false,
+          };
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(cancelled);
+    expect(cursors).toEqual([undefined]);
+  });
+
   it("restarts a stale page sequence with bounded backoff before exposing data", async () => {
     const cursors: Array<string | undefined> = [];
     const wait = vi.fn(async () => undefined);
@@ -199,9 +222,63 @@ describe("complete Workstream list loading", () => {
     expect(firstPages).toBe(3);
     expect(wait.mock.calls).toEqual([[50], [100]]);
   });
+
+  it("interrupts cursor backoff without starting another attempt", async () => {
+    const controller = new AbortController();
+    const cancelled = new Error("retry-cancelled");
+    const load = vi.fn(async () => {
+      throw new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" });
+    });
+    const wait = vi.fn(async (_delayMs: number, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      controller.abort(cancelled);
+    });
+
+    await expect(
+      loadCompleteWorkstreamList(load, { signal: controller.signal, wait }),
+    ).rejects.toBe(cancelled);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(wait).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("complete Workstream detail loading", () => {
+  it("interrupts every parallel detail branch", async () => {
+    const controller = new AbortController();
+    const cancelled = new Error("detail-cancelled");
+    const calls = detailCalls();
+    const pending = <A>(name: keyof WorkstreamDetailLoaders): Promise<A> => {
+      calls[name].push(undefined);
+      return new Promise<A>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), {
+          once: true,
+        });
+      });
+    };
+    const loaders: WorkstreamDetailLoaders = {
+      detail: () => pending("detail"),
+      memberships: () => pending("memberships"),
+      declarations: () => pending("declarations"),
+      edges: () => pending("edges"),
+      history: () => pending("history"),
+      references: () => pending("references"),
+    };
+    const result = loadCompleteWorkstreamDetail(loaders, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(cancelled);
+
+    await expect(result).rejects.toBe(cancelled);
+    for (const name of [
+      "detail",
+      "memberships",
+      "declarations",
+      "edges",
+      "history",
+      "references",
+    ] as const)
+      expect(calls[name]).toHaveLength(1);
+  });
+
   it("restarts every detail component when a later page becomes stale", async () => {
     const calls = detailCalls();
     const wait = vi.fn(async () => undefined);

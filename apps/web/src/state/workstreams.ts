@@ -35,8 +35,8 @@ import { runPrimaryHttp } from "../lib/runtime";
 
 type PrimaryClient = Effect.Success<typeof PrimaryEnvironmentHttpClient>;
 
-const request = <A, E>(run: (client: PrimaryClient) => Effect.Effect<A, E>) =>
-  runPrimaryHttp(PrimaryEnvironmentHttpClient.pipe(Effect.flatMap(run)));
+const request = <A, E>(run: (client: PrimaryClient) => Effect.Effect<A, E>, signal?: AbortSignal) =>
+  runPrimaryHttp(PrimaryEnvironmentHttpClient.pipe(Effect.flatMap(run)), { signal });
 
 const metadataCache = new LiveWorkstreamMetadataCache();
 const isCursorStale = Schema.is(EnvironmentHttpConflictError);
@@ -46,25 +46,43 @@ const isRestartableCursorStale = (cause: unknown): boolean =>
   isCursorStale(cause) && cause.message === "workstream_cursor_stale";
 
 export interface CursorRestartOptions {
-  readonly wait?: (delayMs: number) => Promise<void>;
+  readonly signal?: AbortSignal;
+  readonly wait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 }
+
+const throwIfAborted = (signal?: AbortSignal): void => signal?.throwIfAborted();
+
+const waitForRetry = (delayMs: number, signal?: AbortSignal): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    throwIfAborted(signal);
+    const abort = () => {
+      globalThis.clearTimeout(timer);
+      reject(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    };
+    const timer = globalThis.setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 
 async function withCursorRestart<A>(
   load: () => Promise<A>,
   options: CursorRestartOptions = {},
 ): Promise<A> {
-  const wait =
-    options.wait ??
-    ((delayMs: number) =>
-      new Promise<void>((resolve) => {
-        globalThis.setTimeout(resolve, delayMs);
-      }));
+  const wait = options.wait ?? waitForRetry;
   for (let attempt = 0; attempt < CURSOR_RESTART_ATTEMPTS; attempt += 1) {
+    throwIfAborted(options.signal);
     try {
-      return await load();
+      const result = await load();
+      throwIfAborted(options.signal);
+      return result;
     } catch (cause) {
+      throwIfAborted(options.signal);
       if (!isRestartableCursorStale(cause) || attempt + 1 === CURSOR_RESTART_ATTEMPTS) throw cause;
-      await wait(50 * 2 ** attempt);
+      const delayMs = 50 * 2 ** attempt;
+      if (options.signal === undefined) await wait(delayMs);
+      else await wait(delayMs, options.signal);
     }
   }
   throw new Error("Workstream cursor restart policy is invalid.");
@@ -72,13 +90,18 @@ async function withCursorRestart<A>(
 
 async function loadAllPages<Item>(
   load: (cursor?: string) => Promise<WorkstreamDtoPage<Item>>,
+  signal?: AbortSignal,
 ): Promise<WorkstreamDtoPage<Item>> {
+  throwIfAborted(signal);
   let result = await load();
+  throwIfAborted(signal);
   const cursors = new Set<string>();
   while (result.next_cursor !== null) {
+    throwIfAborted(signal);
     if (cursors.has(result.next_cursor)) throw new Error("Workstream pagination cursor repeated.");
     cursors.add(result.next_cursor);
     result = appendWorkstreamDtoPage(result, await load(result.next_cursor));
+    throwIfAborted(signal);
   }
   return result;
 }
@@ -88,12 +111,16 @@ export async function loadCompleteWorkstreamList(
   options: CursorRestartOptions = {},
 ): Promise<T3WorkstreamListResult> {
   return withCursorRestart(async () => {
+    throwIfAborted(options.signal);
     let result = await load();
+    throwIfAborted(options.signal);
     const cursors = new Set<string>();
     while (result.nextCursor !== null) {
+      throwIfAborted(options.signal);
       if (cursors.has(result.nextCursor)) throw new Error("Workstream list cursor repeated.");
       cursors.add(result.nextCursor);
       result = appendWorkstreamListResult(result, await load(result.nextCursor));
+      throwIfAborted(options.signal);
     }
     return result;
   }, options);
@@ -131,11 +158,11 @@ export async function loadCompleteWorkstreamDetail(
       referencesResult,
     ] = await Promise.allSettled([
       loaders.detail(),
-      loadAllPages(loaders.memberships),
-      loadAllPages(loaders.declarations),
-      loadAllPages(loaders.edges),
-      loadAllPages(loaders.history),
-      loadAllPages(loaders.references),
+      loadAllPages(loaders.memberships, options.signal),
+      loadAllPages(loaders.declarations, options.signal),
+      loadAllPages(loaders.edges, options.signal),
+      loadAllPages(loaders.history, options.signal),
+      loadAllPages(loaders.references, options.signal),
     ] as const);
     const failures = [
       detailResult,
@@ -195,8 +222,14 @@ export interface WorkstreamListView {
   readonly loading: boolean;
   readonly refresh: () => void;
   readonly submit: (command: WorkstreamCommand) => Promise<WorkstreamReceipt>;
-  readonly loadDetail: (workstreamId: string) => Promise<WorkstreamDetailView>;
-  readonly loadReference: (nativeReferenceId: string) => Promise<WorkstreamReferenceDetail>;
+  readonly loadDetail: (
+    workstreamId: string,
+    options?: { readonly signal?: AbortSignal },
+  ) => Promise<WorkstreamDetailView>;
+  readonly loadReference: (
+    nativeReferenceId: string,
+    options?: { readonly signal?: AbortSignal },
+  ) => Promise<WorkstreamReferenceDetail>;
 }
 
 export interface NativePlacementInventory {
@@ -261,23 +294,32 @@ export function useWorkstreams(
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
   const generation = useRef(0);
+  const listRequest = useRef<AbortController | null>(null);
   const refresh = useCallback(() => {
+    listRequest.current?.abort();
     generation.current += 1;
     setPlacements(null);
     setRevision((value) => value + 1);
   }, []);
 
   useEffect(() => {
+    listRequest.current?.abort();
+    const controller = new AbortController();
+    listRequest.current = controller;
     const current = ++generation.current;
     setPlacements(null);
     setLoading(true);
-    void loadCompleteWorkstreamList((cursor) =>
-      request((client) =>
-        client.workstreams.list({
-          headers: {},
-          payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-        }),
-      ),
+    void loadCompleteWorkstreamList(
+      (cursor) =>
+        request(
+          (client) =>
+            client.workstreams.list({
+              headers: {},
+              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+            }),
+          controller.signal,
+        ),
+      { signal: controller.signal },
     )
       .then(async (value) => {
         if (generation.current !== current) return;
@@ -288,11 +330,13 @@ export function useWorkstreams(
         if (placementsEnabled) {
           try {
             const projection = await loadLiveT3Placements(normalized, identities, () =>
-              request((client) =>
-                client.workstreams.threadPlacements({
-                  headers: {},
-                  payload: { identities },
-                }),
+              request(
+                (client) =>
+                  client.workstreams.threadPlacements({
+                    headers: {},
+                    payload: { identities },
+                  }),
+                controller.signal,
               ),
             );
             if (generation.current === current) setPlacements(projection);
@@ -302,16 +346,19 @@ export function useWorkstreams(
         }
       })
       .catch((cause: unknown) => {
-        if (generation.current !== current) return;
+        if (generation.current !== current || controller.signal.aborted) return;
         // Authorization/session lifecycle failures must hide previously authorized content.
         metadataCache.purgeAuthorization();
         setData(null);
         setError(cause instanceof Error ? cause.message : "Workstreams are unavailable.");
       })
       .finally(() => {
+        if (listRequest.current === controller) listRequest.current = null;
         if (generation.current === current) setLoading(false);
       });
     return () => {
+      controller.abort();
+      if (listRequest.current === controller) listRequest.current = null;
       generation.current += 1;
     };
   }, [revision, placementsEnabled, identities]);
@@ -359,73 +406,89 @@ export function useWorkstreams(
     [refresh],
   );
 
-  const loadDetail = useCallback(async (workstreamId: string) => {
-    try {
-      return await loadCompleteWorkstreamDetail({
-        detail: () =>
-          request((client) => client.workstreams.detail({ headers: {}, params: { workstreamId } })),
-        memberships: (cursor) =>
-          request((client) =>
-            client.workstreams.memberships({
-              headers: {},
-              params: { workstreamId },
-              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-            }),
-          ),
-        declarations: (cursor) =>
-          request((client) =>
-            client.workstreams.declarations({
-              headers: {},
-              params: { workstreamId },
-              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-            }),
-          ),
-        edges: (cursor) =>
-          request((client) =>
-            client.workstreams.edges({
-              headers: {},
-              params: { workstreamId },
-              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-            }),
-          ),
-        history: (cursor) =>
-          request((client) =>
-            client.workstreams.history({
-              headers: {},
-              params: { workstreamId },
-              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-            }),
-          ),
-        references: (cursor) =>
-          request((client) =>
-            client.workstreams.references({
-              headers: {},
-              payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
-            }),
-          ),
-      });
-    } catch (cause) {
-      generation.current += 1;
-      setPlacements(null);
-      metadataCache.purgeAuthorization();
-      setData(null);
-      throw cause;
-    }
-  }, []);
+  const loadDetail = useCallback(
+    async (workstreamId: string, options: { readonly signal?: AbortSignal } = {}) => {
+      try {
+        const load = <A, E>(run: (client: PrimaryClient) => Effect.Effect<A, E>) =>
+          request(run, options.signal);
+        return await loadCompleteWorkstreamDetail(
+          {
+            detail: () =>
+              load((client) =>
+                client.workstreams.detail({ headers: {}, params: { workstreamId } }),
+              ),
+            memberships: (cursor) =>
+              load((client) =>
+                client.workstreams.memberships({
+                  headers: {},
+                  params: { workstreamId },
+                  payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+                }),
+              ),
+            declarations: (cursor) =>
+              load((client) =>
+                client.workstreams.declarations({
+                  headers: {},
+                  params: { workstreamId },
+                  payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+                }),
+              ),
+            edges: (cursor) =>
+              load((client) =>
+                client.workstreams.edges({
+                  headers: {},
+                  params: { workstreamId },
+                  payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+                }),
+              ),
+            history: (cursor) =>
+              load((client) =>
+                client.workstreams.history({
+                  headers: {},
+                  params: { workstreamId },
+                  payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+                }),
+              ),
+            references: (cursor) =>
+              load((client) =>
+                client.workstreams.references({
+                  headers: {},
+                  payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
+                }),
+              ),
+          },
+          options,
+        );
+      } catch (cause) {
+        if (options.signal?.aborted) throw cause;
+        generation.current += 1;
+        setPlacements(null);
+        metadataCache.purgeAuthorization();
+        setData(null);
+        throw cause;
+      }
+    },
+    [],
+  );
 
-  const loadReference = useCallback(async (nativeReferenceId: string) => {
-    try {
-      return await request((client) =>
-        client.workstreams.reference({ headers: {}, params: { nativeReferenceId } }),
-      );
-    } catch (cause) {
-      generation.current += 1;
-      setPlacements(null);
-      metadataCache.purgeAuthorization();
-      setData(null);
-      throw cause;
-    }
-  }, []);
+  const loadReference = useCallback(
+    async (nativeReferenceId: string, options: { readonly signal?: AbortSignal } = {}) => {
+      try {
+        return await request(
+          (client) => client.workstreams.reference({ headers: {}, params: { nativeReferenceId } }),
+          options.signal,
+        );
+      } catch (cause) {
+        if (options.signal?.aborted) throw cause;
+        generation.current += 1;
+        setPlacements(null);
+        metadataCache.purgeAuthorization();
+        setData(null);
+        throw cause;
+      }
+    },
+    [],
+  );
 
   return {
     placementInventory: inventory,
