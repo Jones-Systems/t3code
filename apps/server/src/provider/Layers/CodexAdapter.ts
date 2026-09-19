@@ -3111,7 +3111,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           );
           if (!shouldInterrupt) {
             // Recovery owns the pending root's exact late-start containment,
-            // but existing children must stop immediately in either phase.
+            // but existing children need a bounded best-effort interrupt now.
             yield* session.runtime.interruptChildTurns;
           } else {
             if (!effectiveTurnId) {
