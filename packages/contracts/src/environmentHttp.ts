@@ -347,8 +347,11 @@ const EnvironmentOrchestrationSnapshotErrors = [
 ] as const;
 const EnvironmentWorkstreamSnapshotErrors = [
   EnvironmentScopeRequiredError,
-  EnvironmentHttpConflictError,
   EnvironmentInternalError,
+] as const;
+const EnvironmentWorkstreamPagedSnapshotErrors = [
+  ...EnvironmentWorkstreamSnapshotErrors,
+  EnvironmentHttpConflictError,
 ] as const;
 const EnvironmentOrchestrationThreadSnapshotErrors = [
   EnvironmentScopeRequiredError,
@@ -590,7 +593,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       payload: T3WorkstreamListQuery,
       success: T3WorkstreamListResult,
-      error: EnvironmentWorkstreamSnapshotErrors,
+      error: EnvironmentWorkstreamPagedSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -598,7 +601,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       headers: OptionalBearerHeaders,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamReferencePage,
-      error: EnvironmentWorkstreamSnapshotErrors,
+      error: EnvironmentWorkstreamPagedSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -623,7 +626,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamMembershipPage,
-      error: EnvironmentWorkstreamSnapshotErrors,
+      error: EnvironmentWorkstreamPagedSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -632,7 +635,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamDeclarationPage,
-      error: EnvironmentWorkstreamSnapshotErrors,
+      error: EnvironmentWorkstreamPagedSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -641,7 +644,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamEdgePage,
-      error: EnvironmentWorkstreamSnapshotErrors,
+      error: EnvironmentWorkstreamPagedSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -650,7 +653,7 @@ export class EnvironmentWorkstreamsHttpApi extends HttpApiGroup.make("workstream
       params: T3WorkstreamDetailParams,
       payload: T3WorkstreamPageQuery,
       success: WorkstreamHistoryPage,
-      error: EnvironmentWorkstreamSnapshotErrors,
+      error: EnvironmentWorkstreamPagedSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

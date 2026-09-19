@@ -1,7 +1,16 @@
-import { EnvironmentHttpConflictError } from "@t3tools/contracts";
+import {
+  EnvironmentHttpConflictError,
+  type WorkstreamDetail,
+  type WorkstreamReadContext,
+} from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { loadCompleteWorkstreamList, nativePlacementInventoryJson } from "./workstreams";
+import {
+  loadCompleteWorkstreamDetail,
+  loadCompleteWorkstreamList,
+  nativePlacementInventoryJson,
+  type WorkstreamDetailLoaders,
+} from "./workstreams";
 
 const binding = {
   registryId: "registry",
@@ -14,6 +23,50 @@ const binding = {
   contractVersion: "workstreams/1.0.0" as const,
   contractManifest: "a03e34613ea1293b579316a21f98d4edd69a19221f9907cf0449e3b4933420dd" as const,
 };
+
+const context: WorkstreamReadContext = {
+  owner_id: "owner",
+  server_generation: 7,
+  registry_version: 11,
+};
+const detail = { context, workstream: {} } as WorkstreamDetail;
+const emptyPage = { context, items: [], next_cursor: null } as const;
+
+const detailLoaders = (
+  calls: Record<keyof WorkstreamDetailLoaders, Array<string | undefined>>,
+  memberships: WorkstreamDetailLoaders["memberships"],
+): WorkstreamDetailLoaders => ({
+  detail: async () => {
+    calls.detail.push(undefined);
+    return detail;
+  },
+  memberships,
+  declarations: async (cursor) => {
+    calls.declarations.push(cursor);
+    return emptyPage;
+  },
+  edges: async (cursor) => {
+    calls.edges.push(cursor);
+    return emptyPage;
+  },
+  history: async (cursor) => {
+    calls.history.push(cursor);
+    return emptyPage;
+  },
+  references: async (cursor) => {
+    calls.references.push(cursor);
+    return emptyPage;
+  },
+});
+
+const detailCalls = (): Record<keyof WorkstreamDetailLoaders, Array<string | undefined>> => ({
+  detail: [],
+  memberships: [],
+  declarations: [],
+  edges: [],
+  history: [],
+  references: [],
+});
 
 describe("complete Workstream list loading", () => {
   it("projects only stable native identity pairs, preserves colon IDs and caps excess inventory", () => {
@@ -117,6 +170,49 @@ describe("complete Workstream list loading", () => {
       ),
     ).rejects.toMatchObject({ message: "workstream_cursor_stale" });
     expect(firstPages).toBe(3);
+    expect(wait.mock.calls).toEqual([[50], [100]]);
+  });
+});
+
+describe("complete Workstream detail loading", () => {
+  it("restarts every detail component when a later page becomes stale", async () => {
+    const calls = detailCalls();
+    const wait = vi.fn(async () => undefined);
+    let round = 0;
+    const loaders = detailLoaders(calls, async (cursor) => {
+      calls.memberships.push(cursor);
+      if (cursor === undefined) {
+        round += 1;
+        return { ...emptyPage, next_cursor: round === 1 ? "stale" : null };
+      }
+      throw new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" });
+    });
+
+    const result = await loadCompleteWorkstreamDetail(loaders, { wait });
+
+    expect(result.detail).toBe(detail);
+    expect(calls.memberships).toEqual([undefined, "stale", undefined]);
+    for (const name of ["detail", "declarations", "edges", "history", "references"] as const)
+      expect(calls[name]).toHaveLength(2);
+    expect(wait.mock.calls).toEqual([[50]]);
+  });
+
+  it("fails closed after three complete detail rounds under sustained churn", async () => {
+    const calls = detailCalls();
+    const wait = vi.fn(async () => undefined);
+    const loaders = detailLoaders(calls, async (cursor) => {
+      calls.memberships.push(cursor);
+      if (cursor === undefined) return { ...emptyPage, next_cursor: "stale" };
+      throw new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" });
+    });
+
+    await expect(loadCompleteWorkstreamDetail(loaders, { wait })).rejects.toMatchObject({
+      message: "workstream_cursor_stale",
+    });
+
+    expect(calls.memberships).toEqual([undefined, "stale", undefined, "stale", undefined, "stale"]);
+    for (const name of ["detail", "declarations", "edges", "history", "references"] as const)
+      expect(calls[name]).toHaveLength(3);
     expect(wait.mock.calls).toEqual([[50], [100]]);
   });
 });
