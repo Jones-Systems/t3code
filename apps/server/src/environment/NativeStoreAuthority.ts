@@ -7,12 +7,14 @@ import * as ServerConfig from "../config.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 import type { T3PlacementTrustProvider } from "../workstreams/WorkstreamGateway.ts";
+import { nativeStoreAuthorityBaseDirFingerprint } from "./nativeStoreAuthorityPath.ts";
 import {
   advanceNativeStoreAuthority,
   decodeNativeStoreAuthorityState,
   fenceNativeStoreAuthority,
   initializeNativeStoreAuthority,
   readNativeStoreAuthorityState,
+  readVerifiedNativeStoreAuthority,
   requireNativeStoreAuthorityLauncherProtocolForBaseDir,
   NativeStoreAuthorityPersistenceError,
   type NativeStoreAuthorityState,
@@ -66,6 +68,8 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
   const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const environmentId = yield* identity.getEnvironmentId;
   const authorityStateDir = config.authorityStateDir;
+  const authorityWitnessPath = config.authorityWitnessPath;
+  const baseDirFingerprint = nativeStoreAuthorityBaseDirFingerprint(config.baseDir);
   const requireSafeLauncher = () =>
     requireNativeStoreAuthorityLauncherProtocolForBaseDir(
       config.baseDir,
@@ -78,7 +82,15 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
   const readCurrent: NativeStoreAuthority["Service"]["readCurrent"] = Effect.try({
     try: () => {
       requireSafeLauncher();
-      return tupleFromState(readNativeStoreAuthorityState(authorityStateDir), environmentId);
+      return tupleFromState(
+        readVerifiedNativeStoreAuthority(
+          authorityStateDir,
+          authorityWitnessPath,
+          environmentId,
+          baseDirFingerprint,
+        ),
+        environmentId,
+      );
     },
     catch: asPersistenceError,
   });
@@ -88,7 +100,15 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
       requireSafeLauncher();
       return {
         trustedEnvironments: [
-          tupleFromState(readNativeStoreAuthorityState(authorityStateDir), environmentId),
+          tupleFromState(
+            readVerifiedNativeStoreAuthority(
+              authorityStateDir,
+              authorityWitnessPath,
+              environmentId,
+              baseDirFingerprint,
+            ),
+            environmentId,
+          ),
         ],
         readiness: "ready",
       };

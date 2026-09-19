@@ -19,12 +19,18 @@ import {
   initializeNativeStoreAuthority,
 } from "./nativeStoreAuthorityPersistence.ts";
 import * as NativeStoreAuthority from "./NativeStoreAuthority.ts";
+import { nativeStoreAuthorityBaseDirFingerprint } from "./nativeStoreAuthorityPath.ts";
 
 const authorityLayer = (baseDir: string, authorityStateDir: string, environmentId: string) =>
   Layer.mergeAll(
     Layer.succeed(ServerConfig.ServerConfig, {
       baseDir,
       authorityStateDir,
+      authorityWitnessPath: NodePath.join(
+        baseDir,
+        "userdata",
+        "native-store-authority-witness-v1.json",
+      ),
     } as ServerConfig.ServerConfig["Service"]),
     Layer.succeed(
       ServerEnvironment.ServerEnvironmentIdentity,
@@ -41,7 +47,9 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
     );
     try {
       const authorityStateDir = NodePath.join(root, "authority");
+      const witnessPath = NodePath.join(root, "userdata", "native-store-authority-witness-v1.json");
       const environmentId = "environment-layer-test";
+      NodeFS.mkdirSync(NodePath.dirname(witnessPath), { recursive: true, mode: 0o700 });
       NodeFS.mkdirSync(NodePath.join(root, "runtime"), { recursive: true });
       NodeFS.writeFileSync(
         NodePath.join(root, "runtime", "service-state.json"),
@@ -49,7 +57,12 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         JSON.stringify({ protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: "1.0.0" }),
         { mode: 0o600 },
       );
-      const initial = initializeNativeStoreAuthority(authorityStateDir, environmentId);
+      const initial = initializeNativeStoreAuthority(
+        authorityStateDir,
+        witnessPath,
+        environmentId,
+        nativeStoreAuthorityBaseDirFingerprint(root),
+      );
 
       const authority = yield* NativeStoreAuthority.make().pipe(
         Effect.provide(authorityLayer(root, authorityStateDir, environmentId)),
@@ -70,6 +83,19 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         readiness: "ready",
       });
 
+      NodeFS.rmSync(witnessPath);
+      expect(authority.trustProvider.readTrustSnapshot()).toEqual({
+        trustedEnvironments: [],
+        readiness: "trust-provider-required",
+      });
+      initializeNativeStoreAuthority(
+        authorityStateDir,
+        witnessPath,
+        environmentId,
+        nativeStoreAuthorityBaseDirFingerprint(root),
+      );
+      expect(authority.trustProvider.readTrustSnapshot().readiness).toBe("ready");
+
       NodeFS.writeFileSync(
         NodePath.join(root, "runtime", "service-state.json"),
         // @effect-diagnostics-next-line preferSchemaOverJson:off - launcher-owned test fixture.
@@ -87,7 +113,12 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         { mode: 0o600 },
       );
 
-      fenceNativeStoreAuthority(authorityStateDir, environmentId);
+      fenceNativeStoreAuthority(
+        authorityStateDir,
+        witnessPath,
+        environmentId,
+        nativeStoreAuthorityBaseDirFingerprint(root),
+      );
       expect((yield* Effect.result(authority.readCurrent))._tag).toBe("Failure");
       expect(authority.trustProvider.readTrustSnapshot()).toEqual({
         trustedEnvironments: [],

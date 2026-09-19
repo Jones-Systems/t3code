@@ -55,6 +55,31 @@ definition. The launcher snapshots the database before a remote candidate starts
 updates roll back with the server version. An older launcher may require one local
 `service update` before this is available.
 
+## Trusted Workstream Placement
+
+Trusted cross-system workstream placement is opt-in. Update the background service first, then
+enroll the current T3 store:
+
+```sh
+npx t3@latest service update
+npx t3@latest workstream authority enroll
+```
+
+Enrollment creates an owner-private high-water record outside the T3 data directory and a matching
+witness inside the current store. Normal startup never recreates either record. Copying the T3 data
+directory to another location, restoring an older witnessed generation, losing either record, or
+running with an older launcher disables trusted placement instead of silently trusting the copy.
+
+The launcher handles a rollback that it initiated: it fences placement before restoring the
+database, writes the next store witness, and activates the matching high-water generation last. If
+an out-of-band restore leaves the two records mismatched, inspect and accept the restored store
+before running `workstream authority enroll` again. Enrollment is the explicit recovery action; it
+does not repair a launcher-fenced transition or activate placement by itself.
+
+No administrator service or sudo setup is required. Set `T3CODE_NATIVE_AUTHORITY_STATE_DIR` before
+service installation and enrollment only when the independent record needs a custom owner-private
+location; `service update` persists that exact location for the launcher.
+
 ## Platform Support
 
 **Linux** uses a systemd user unit at `~/.config/systemd/user/t3code.service`. The service starts

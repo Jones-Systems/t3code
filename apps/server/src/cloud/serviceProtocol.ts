@@ -1,8 +1,8 @@
 import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 
-/** Protocol 3 durably phases trials and fences native authority before rollback. */
-export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
-export const LEGACY_SERVICE_LAUNCHER_PROTOCOL = 2 as const;
+/** Protocol 4 maintains the store witness before activating a rollback generation. */
+export const SERVICE_LAUNCHER_PROTOCOL = 4 as const;
+export const LEGACY_SERVICE_LAUNCHER_PROTOCOL = 3 as const;
 export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
 export const SERVICE_LAUNCHER_FILE = "service-launcher.mjs";
 export const SERVICE_STATE_FILE = "service-state.json";

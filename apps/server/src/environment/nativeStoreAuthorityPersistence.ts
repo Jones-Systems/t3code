@@ -3,21 +3,38 @@
 // runtime dependencies limited to Node built-ins.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-export const NATIVE_STORE_AUTHORITY_RECORD_VERSION = "t3-native-store-authority/1.0.0" as const;
-export const NATIVE_STORE_AUTHORITY_FILE = "native-store-authority-v1.json" as const;
-export const NATIVE_STORE_AUTHORITY_LOCK_FILE = "native-store-authority-v1.lock" as const;
+import {
+  nativeStoreAuthorityBaseDirFingerprint,
+  resolveNativeStoreAuthorityStateDir,
+} from "./nativeStoreAuthorityPath.ts";
+
+export const NATIVE_STORE_AUTHORITY_RECORD_VERSION = "t3-native-store-authority/2.0.0" as const;
+export const NATIVE_STORE_AUTHORITY_FILE = "native-store-authority-v2.json" as const;
+export const NATIVE_STORE_AUTHORITY_LOCK_FILE = "native-store-authority-v2.lock" as const;
 export const NATIVE_STORE_AUTHORITY_NAMESPACE_PREFIX = "t3-native:" as const;
+export const NATIVE_STORE_AUTHORITY_WITNESS_VERSION =
+  "t3-native-store-authority-witness/1.0.0" as const;
+export const NATIVE_STORE_AUTHORITY_WITNESS_FILE =
+  "native-store-authority-witness-v1.json" as const;
 
 export type NativeStoreAuthorityState = {
   readonly record_version: typeof NATIVE_STORE_AUTHORITY_RECORD_VERSION;
   readonly environment_id: string;
   readonly authority_namespace: string;
   readonly store_generation: number;
+  readonly base_dir_fingerprint: string;
   readonly state: "active" | "fenced";
   readonly transition_id: string | null;
+};
+
+export type NativeStoreAuthorityWitness = {
+  readonly record_version: typeof NATIVE_STORE_AUTHORITY_WITNESS_VERSION;
+  readonly environment_id: string;
+  readonly authority_namespace: string;
+  readonly store_generation: number;
+  readonly base_dir_fingerprint: string;
 };
 
 export type NativeStoreAuthorityErrorCode =
@@ -27,6 +44,8 @@ export type NativeStoreAuthorityErrorCode =
   | "launcher_upgrade_required"
   | "environment_mismatch"
   | "generation_regression"
+  | "witness_missing"
+  | "witness_mismatch"
   | "source_unavailable";
 
 export class NativeStoreAuthorityPersistenceError extends Error {
@@ -44,6 +63,7 @@ export class NativeStoreAuthorityPersistenceError extends Error {
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AUTHORITY_NAMESPACE =
   /^t3-native:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const BASE_DIR_FINGERPRINT = /^sha256:[0-9a-f]{64}$/;
 const NOFOLLOW = NodeFS.constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = NodeFS.constants.O_DIRECTORY ?? 0;
 const MAX_SAFE_GENERATION = Number.MAX_SAFE_INTEGER;
@@ -52,8 +72,16 @@ const REQUIRED_STATE_KEYS = [
   "environment_id",
   "authority_namespace",
   "store_generation",
+  "base_dir_fingerprint",
   "state",
   "transition_id",
+] as const;
+const REQUIRED_WITNESS_KEYS = [
+  "record_version",
+  "environment_id",
+  "authority_namespace",
+  "store_generation",
+  "base_dir_fingerprint",
 ] as const;
 const WRITER_LOCKS = new Set<string>();
 
@@ -63,20 +91,16 @@ export const nativeStoreAuthorityPaths = (authorityStateDir: string) => ({
   lockPath: NodePath.join(authorityStateDir, NATIVE_STORE_AUTHORITY_LOCK_FILE),
 });
 
-/** The launcher has only the T3 home, so it uses the same explicit override as the server. */
+/** The launcher has only the T3 home, so it resolves the same external default or override. */
 export const nativeStoreAuthorityStateDirForBaseDir = (baseDir: string): string => {
-  const configured = process.env.T3CODE_NATIVE_AUTHORITY_STATE_DIR?.trim();
-  if (configured === undefined || configured === "") {
-    return NodePath.join(baseDir, "native-store-authority");
-  }
-  const expanded =
-    configured === "~"
-      ? NodeOS.homedir()
-      : configured.startsWith("~/") || configured.startsWith("~\\")
-        ? NodePath.join(NodeOS.homedir(), configured.slice(2))
-        : configured;
-  return NodePath.resolve(expanded);
+  return resolveNativeStoreAuthorityStateDir(
+    baseDir,
+    process.env.T3CODE_NATIVE_AUTHORITY_STATE_DIR,
+  );
 };
+
+export const nativeStoreAuthorityWitnessPathForBaseDir = (baseDir: string): string =>
+  NodePath.join(baseDir, "userdata", NATIVE_STORE_AUTHORITY_WITNESS_FILE);
 
 const readEnvironmentIdForBaseDir = (baseDir: string): string => {
   const environmentIdPath = NodePath.join(baseDir, "userdata", "environment-id");
@@ -206,6 +230,8 @@ export const decodeNativeStoreAuthorityState = (value: unknown): NativeStoreAuth
     !Number.isSafeInteger(record.store_generation) ||
     record.store_generation < 1 ||
     record.store_generation > MAX_SAFE_GENERATION ||
+    typeof record.base_dir_fingerprint !== "string" ||
+    !BASE_DIR_FINGERPRINT.test(record.base_dir_fingerprint) ||
     (record.state !== "active" && record.state !== "fenced") ||
     (record.transition_id !== null && typeof record.transition_id !== "string") ||
     (record.transition_id !== null && !UUID_V4.test(record.transition_id)) ||
@@ -225,10 +251,62 @@ export const decodeNativeStoreAuthorityState = (value: unknown): NativeStoreAuth
     environment_id: record.environment_id,
     authority_namespace: record.authority_namespace,
     store_generation: record.store_generation,
+    base_dir_fingerprint: record.base_dir_fingerprint,
     state: record.state,
     transition_id: record.transition_id,
   };
 };
+
+export const decodeNativeStoreAuthorityWitness = (value: unknown): NativeStoreAuthorityWitness => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw persistenceError("witness_mismatch", "Native authority witness is not an object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== REQUIRED_WITNESS_KEYS.length ||
+    REQUIRED_WITNESS_KEYS.some((key) => !Object.hasOwn(record, key)) ||
+    record.record_version !== NATIVE_STORE_AUTHORITY_WITNESS_VERSION ||
+    typeof record.environment_id !== "string" ||
+    typeof record.authority_namespace !== "string" ||
+    !AUTHORITY_NAMESPACE.test(record.authority_namespace) ||
+    typeof record.store_generation !== "number" ||
+    !Number.isSafeInteger(record.store_generation) ||
+    record.store_generation < 1 ||
+    record.store_generation > MAX_SAFE_GENERATION ||
+    typeof record.base_dir_fingerprint !== "string" ||
+    !BASE_DIR_FINGERPRINT.test(record.base_dir_fingerprint)
+  ) {
+    throw persistenceError(
+      "witness_mismatch",
+      "Native authority witness failed its schema checks.",
+    );
+  }
+  validateEnvironmentId(record.environment_id);
+  return {
+    record_version: NATIVE_STORE_AUTHORITY_WITNESS_VERSION,
+    environment_id: record.environment_id,
+    authority_namespace: record.authority_namespace,
+    store_generation: record.store_generation,
+    base_dir_fingerprint: record.base_dir_fingerprint,
+  };
+};
+
+const witnessFromState = (state: NativeStoreAuthorityState): NativeStoreAuthorityWitness => ({
+  record_version: NATIVE_STORE_AUTHORITY_WITNESS_VERSION,
+  environment_id: state.environment_id,
+  authority_namespace: state.authority_namespace,
+  store_generation: state.store_generation,
+  base_dir_fingerprint: state.base_dir_fingerprint,
+});
+
+const witnessMatchesState = (
+  witness: NativeStoreAuthorityWitness,
+  state: NativeStoreAuthorityState,
+): boolean =>
+  witness.environment_id === state.environment_id &&
+  witness.authority_namespace === state.authority_namespace &&
+  witness.store_generation === state.store_generation &&
+  witness.base_dir_fingerprint === state.base_dir_fingerprint;
 
 const readStateUnlocked = (authorityStateDir: string): NativeStoreAuthorityState => {
   const { statePath } = nativeStoreAuthorityPaths(authorityStateDir);
@@ -245,6 +323,76 @@ const readStateUnlocked = (authorityStateDir: string): NativeStoreAuthorityState
   } finally {
     if (fd !== undefined) NodeFS.closeSync(fd);
   }
+};
+
+const verifyWitnessDirectory = (directory: string): void => {
+  let stat: NodeFS.Stats;
+  try {
+    stat = NodeFS.lstatSync(directory);
+  } catch (cause) {
+    throw persistenceError(
+      "source_unavailable",
+      "Native authority witness directory is unavailable.",
+      cause,
+    );
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory() || (mode(stat) & 0o022) !== 0) {
+    throw persistenceError(
+      "source_unavailable",
+      "Native authority witness directory is not owner-controlled.",
+    );
+  }
+  verifyOwner(stat, directory);
+};
+
+const readWitnessUnlocked = (witnessPath: string): NativeStoreAuthorityWitness => {
+  verifyWitnessDirectory(NodePath.dirname(witnessPath));
+  let stat: NodeFS.Stats;
+  try {
+    stat = NodeFS.lstatSync(witnessPath);
+  } catch (cause) {
+    if (isErrno(cause, "ENOENT")) {
+      throw persistenceError("witness_missing", "Native authority witness is missing.");
+    }
+    throw persistenceError("source_unavailable", "Native authority witness is unavailable.", cause);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || mode(stat) !== 0o600) {
+    throw persistenceError(
+      "witness_mismatch",
+      "Native authority witness is not a private regular file.",
+    );
+  }
+  verifyOwner(stat, witnessPath);
+  let fd: number | undefined;
+  try {
+    fd = NodeFS.openSync(witnessPath, NodeFS.constants.O_RDONLY | NOFOLLOW);
+    return decodeNativeStoreAuthorityWitness(
+      JSON.parse(NodeFS.readFileSync(fd, "utf8")) as unknown,
+    );
+  } catch (cause) {
+    if (cause instanceof NativeStoreAuthorityPersistenceError) throw cause;
+    throw persistenceError(
+      "witness_mismatch",
+      "Native authority witness could not be read.",
+      cause,
+    );
+  } finally {
+    if (fd !== undefined) NodeFS.closeSync(fd);
+  }
+};
+
+const requireMatchingWitness = (
+  witnessPath: string,
+  state: NativeStoreAuthorityState,
+): NativeStoreAuthorityWitness => {
+  const witness = readWitnessUnlocked(witnessPath);
+  if (!witnessMatchesState(witness, state)) {
+    throw persistenceError(
+      "witness_mismatch",
+      "Native authority witness does not match the independent high-water record.",
+    );
+  }
+  return witness;
 };
 
 export const hasNativeStoreAuthorityState = (authorityStateDir: string): boolean => {
@@ -267,21 +415,29 @@ export const hasNativeStoreAuthorityState = (authorityStateDir: string): boolean
  */
 export const fenceNativeStoreAuthorityForBaseDir = (
   baseDir: string,
+  authorityStateDir = nativeStoreAuthorityStateDirForBaseDir(baseDir),
 ): NativeStoreAuthorityState | null => {
-  const authorityStateDir = nativeStoreAuthorityStateDirForBaseDir(baseDir);
   if (!hasNativeStoreAuthorityState(authorityStateDir)) return null;
-  return fenceNativeStoreAuthority(authorityStateDir, readEnvironmentIdForBaseDir(baseDir));
+  return fenceNativeStoreAuthority(
+    authorityStateDir,
+    nativeStoreAuthorityWitnessPathForBaseDir(baseDir),
+    readEnvironmentIdForBaseDir(baseDir),
+    nativeStoreAuthorityBaseDirFingerprint(baseDir),
+  );
 };
 
 /** Explicitly enroll the current T3-owned environment and authority directory. */
 export const initializeNativeStoreAuthorityForBaseDir = (
   baseDir: string,
   requiredLauncherProtocol: number,
+  authorityStateDir = nativeStoreAuthorityStateDirForBaseDir(baseDir),
 ): NativeStoreAuthorityState => {
   requireNativeStoreAuthorityLauncherProtocolForBaseDir(baseDir, requiredLauncherProtocol);
   const state = initializeNativeStoreAuthority(
-    nativeStoreAuthorityStateDirForBaseDir(baseDir),
+    authorityStateDir,
+    nativeStoreAuthorityWitnessPathForBaseDir(baseDir),
     readEnvironmentIdForBaseDir(baseDir),
+    nativeStoreAuthorityBaseDirFingerprint(baseDir),
   );
   if (state.state !== "active") {
     throw persistenceError(
@@ -336,12 +492,14 @@ export const requireNativeStoreAuthorityLauncherProtocolForBaseDir = (
 export const advanceNativeStoreAuthorityForBaseDir = (
   baseDir: string,
   databasePath: string,
+  authorityStateDir = nativeStoreAuthorityStateDirForBaseDir(baseDir),
 ): NativeStoreAuthorityState | null => {
-  const authorityStateDir = nativeStoreAuthorityStateDirForBaseDir(baseDir);
   if (!hasNativeStoreAuthorityState(authorityStateDir)) return null;
   return advanceNativeStoreAuthority(
     authorityStateDir,
+    nativeStoreAuthorityWitnessPathForBaseDir(baseDir),
     readEnvironmentIdForBaseDir(baseDir),
+    nativeStoreAuthorityBaseDirFingerprint(baseDir),
     databasePath,
   );
 };
@@ -359,6 +517,57 @@ const syncDirectory = (directory: string): void => {
     );
   } finally {
     if (fd !== undefined) NodeFS.closeSync(fd);
+  }
+};
+
+const writeWitnessUnlocked = (witnessPath: string, witness: NativeStoreAuthorityWitness): void => {
+  const directory = NodePath.dirname(witnessPath);
+  verifyWitnessDirectory(directory);
+  try {
+    const stat = NodeFS.lstatSync(witnessPath);
+    if (stat.isSymbolicLink() || !stat.isFile() || mode(stat) !== 0o600) {
+      throw persistenceError(
+        "witness_mismatch",
+        "Native authority witness is not a private regular file.",
+      );
+    }
+    verifyOwner(stat, witnessPath);
+  } catch (cause) {
+    if (!isErrno(cause, "ENOENT")) throw cause;
+  }
+  const tempPath = NodePath.join(
+    directory,
+    `.${NATIVE_STORE_AUTHORITY_WITNESS_FILE}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`,
+  );
+  let fd: number | undefined;
+  try {
+    fd = NodeFS.openSync(
+      tempPath,
+      NodeFS.constants.O_WRONLY | NodeFS.constants.O_CREAT | NodeFS.constants.O_EXCL | NOFOLLOW,
+      0o600,
+    );
+    NodeFS.writeFileSync(fd, `${JSON.stringify(witness)}\n`, "utf8");
+    NodeFS.fsyncSync(fd);
+    NodeFS.closeSync(fd);
+    fd = undefined;
+    NodeFS.renameSync(tempPath, witnessPath);
+    syncDirectory(directory);
+  } catch (cause) {
+    throw cause instanceof NativeStoreAuthorityPersistenceError
+      ? cause
+      : persistenceError(
+          "source_unavailable",
+          "Native authority witness could not be committed.",
+          cause,
+        );
+  } finally {
+    if (fd !== undefined) NodeFS.closeSync(fd);
+    try {
+      NodeFS.rmSync(tempPath, { force: true });
+    } catch {
+      // A successful rename leaves no temporary file. A leftover remains
+      // task-owned and inert because readers use only the fixed witness path.
+    }
   }
 };
 
@@ -453,20 +662,75 @@ export const readNativeStoreAuthorityState = (
   authorityStateDir: string,
 ): NativeStoreAuthorityState => readStateUnlocked(authorityStateDir);
 
+export const readVerifiedNativeStoreAuthority = (
+  authorityStateDir: string,
+  witnessPath: string,
+  environmentId: string,
+  baseDirFingerprint: string,
+): NativeStoreAuthorityState => {
+  const state = readStateUnlocked(authorityStateDir);
+  if (state.environment_id !== environmentId || state.base_dir_fingerprint !== baseDirFingerprint) {
+    throw persistenceError("environment_mismatch", "Native authority environment changed.");
+  }
+  requireMatchingWitness(witnessPath, state);
+  return state;
+};
+
 /**
  * Explicit enrollment for a new native store. Normal startup never calls this:
  * losing this record requires owner-controlled re-enrollment, not a reset.
  */
 export const initializeNativeStoreAuthority = (
   authorityStateDir: string,
+  witnessPath: string,
   environmentId: string,
+  baseDirFingerprint: string,
 ): NativeStoreAuthorityState =>
   withWriterLock(authorityStateDir, () => {
     validateEnvironmentId(environmentId);
+    if (!BASE_DIR_FINGERPRINT.test(baseDirFingerprint)) {
+      throw persistenceError("environment_mismatch", "Native authority base binding is invalid.");
+    }
     try {
       const current = readStateUnlocked(authorityStateDir);
-      if (current.environment_id !== environmentId) {
+      if (
+        current.environment_id !== environmentId ||
+        current.base_dir_fingerprint !== baseDirFingerprint
+      ) {
         throw persistenceError("environment_mismatch", "Native authority environment changed.");
+      }
+      if (current.state !== "active") {
+        throw persistenceError(
+          "fenced",
+          "Native authority remains fenced and must be recovered by the service launcher.",
+        );
+      }
+      try {
+        requireMatchingWitness(witnessPath, current);
+      } catch (cause) {
+        if (
+          !(cause instanceof NativeStoreAuthorityPersistenceError) ||
+          (cause.code !== "witness_missing" && cause.code !== "witness_mismatch")
+        ) {
+          throw cause;
+        }
+        const nextGeneration = current.store_generation + 1;
+        if (!Number.isSafeInteger(nextGeneration) || nextGeneration > MAX_SAFE_GENERATION) {
+          throw persistenceError(
+            "generation_regression",
+            "Native authority generation cannot advance.",
+          );
+        }
+        // Enrollment is the explicit owner action that accepts the current
+        // ordinary store after a missing or rolled-back witness is detected.
+        // Advance first so previously published placement tuples stay stale.
+        const recovered: NativeStoreAuthorityState = {
+          ...current,
+          store_generation: nextGeneration,
+        };
+        writeWitnessUnlocked(witnessPath, witnessFromState(recovered));
+        writeStateUnlocked(authorityStateDir, recovered);
+        return recovered;
       }
       return current;
     } catch (cause) {
@@ -477,9 +741,11 @@ export const initializeNativeStoreAuthority = (
         environment_id: environmentId,
         authority_namespace: `${NATIVE_STORE_AUTHORITY_NAMESPACE_PREFIX}${NodeCrypto.randomUUID()}`,
         store_generation: 1,
+        base_dir_fingerprint: baseDirFingerprint,
         state: "active",
         transition_id: null,
       };
+      writeWitnessUnlocked(witnessPath, witnessFromState(state));
       writeStateUnlocked(authorityStateDir, state);
       return state;
     }
@@ -487,13 +753,31 @@ export const initializeNativeStoreAuthority = (
 
 export const fenceNativeStoreAuthority = (
   authorityStateDir: string,
+  witnessPath: string,
   environmentId: string,
+  baseDirFingerprint: string,
 ): NativeStoreAuthorityState =>
   withWriterLock(authorityStateDir, () => {
     validateEnvironmentId(environmentId);
     const current = readStateUnlocked(authorityStateDir);
-    if (current.environment_id !== environmentId) {
+    if (
+      current.environment_id !== environmentId ||
+      current.base_dir_fingerprint !== baseDirFingerprint
+    ) {
       throw persistenceError("environment_mismatch", "Native authority environment changed.");
+    }
+    const witness = readWitnessUnlocked(witnessPath);
+    const interruptedAdvance =
+      current.state === "fenced" &&
+      witness.environment_id === current.environment_id &&
+      witness.authority_namespace === current.authority_namespace &&
+      witness.base_dir_fingerprint === current.base_dir_fingerprint &&
+      witness.store_generation === current.store_generation + 1;
+    if (!witnessMatchesState(witness, current) && !interruptedAdvance) {
+      throw persistenceError(
+        "witness_mismatch",
+        "Native authority witness does not match the independent high-water record.",
+      );
     }
     if (current.state === "fenced") return current;
     const fenced: NativeStoreAuthorityState = {
@@ -507,13 +791,18 @@ export const fenceNativeStoreAuthority = (
 
 export const advanceNativeStoreAuthority = (
   authorityStateDir: string,
+  witnessPath: string,
   environmentId: string,
+  baseDirFingerprint: string,
   databasePath: string,
 ): NativeStoreAuthorityState =>
   withWriterLock(authorityStateDir, () => {
     validateEnvironmentId(environmentId);
     const current = readStateUnlocked(authorityStateDir);
-    if (current.environment_id !== environmentId) {
+    if (
+      current.environment_id !== environmentId ||
+      current.base_dir_fingerprint !== baseDirFingerprint
+    ) {
       throw persistenceError("environment_mismatch", "Native authority environment changed.");
     }
     if (current.state !== "fenced") {
@@ -560,7 +849,8 @@ export const advanceNativeStoreAuthority = (
     } finally {
       if (dbFd !== undefined) NodeFS.closeSync(dbFd);
     }
-    let nextGeneration = current.store_generation + 1;
+    const witness = readWitnessUnlocked(witnessPath);
+    const nextGeneration = current.store_generation + 1;
     if (!Number.isSafeInteger(nextGeneration) || nextGeneration > MAX_SAFE_GENERATION) {
       throw persistenceError(
         "generation_regression",
@@ -573,6 +863,19 @@ export const advanceNativeStoreAuthority = (
       state: "active",
       transition_id: null,
     };
+    if (witnessMatchesState(witness, current)) {
+      writeWitnessUnlocked(witnessPath, witnessFromState(active));
+    } else if (
+      witness.environment_id !== active.environment_id ||
+      witness.authority_namespace !== active.authority_namespace ||
+      witness.store_generation !== active.store_generation ||
+      witness.base_dir_fingerprint !== active.base_dir_fingerprint
+    ) {
+      throw persistenceError(
+        "witness_mismatch",
+        "Native authority witness does not match the fenced recovery generation.",
+      );
+    }
     writeStateUnlocked(authorityStateDir, active);
     return active;
   });

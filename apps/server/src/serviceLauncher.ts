@@ -30,6 +30,7 @@ import {
 import {
   advanceNativeStoreAuthorityForBaseDir,
   fenceNativeStoreAuthorityForBaseDir,
+  nativeStoreAuthorityStateDirForBaseDir,
 } from "./environment/nativeStoreAuthorityPersistence.ts";
 import { isEntrypoint } from "./entrypoint.ts";
 
@@ -236,6 +237,7 @@ async function markDatabaseRestorePending(backupDir: string): Promise<void> {
 async function restoreDatabaseBackup(
   baseDir: string,
   pending: PendingServiceUpdate,
+  authorityStateDir: string,
 ): Promise<void> {
   validateDatabasePathForBaseDir(baseDir, pending.dbPath);
   const backupDir = databaseBackupDir(baseDir, pending.id);
@@ -248,7 +250,7 @@ async function restoreDatabaseBackup(
   // Persist restore intent before fencing so recovery cannot restart or commit
   // a trial while the native authority remains fenced.
   await markDatabaseRestorePending(backupDir);
-  fenceNativeStoreAuthorityForBaseDir(baseDir);
+  fenceNativeStoreAuthorityForBaseDir(baseDir, authorityStateDir);
   for (const suffix of DB_FILE_SUFFIXES) {
     const target = `${pending.dbPath}${suffix}`;
     const source = databaseBackupFile(backupDir, suffix);
@@ -259,7 +261,7 @@ async function restoreDatabaseBackup(
     }
   }
   await syncDirectory(NodePath.dirname(pending.dbPath));
-  advanceNativeStoreAuthorityForBaseDir(baseDir, pending.dbPath);
+  advanceNativeStoreAuthorityForBaseDir(baseDir, pending.dbPath, authorityStateDir);
 }
 
 async function discardDatabaseBackup(baseDir: string, updateId: string): Promise<void> {
@@ -370,6 +372,7 @@ const stopMarkerPath = (baseDir: string) =>
 
 export class Launcher {
   readonly #baseDir: string;
+  readonly #authorityStateDir: string;
   readonly #statePath: string;
   #state: ServiceState;
   #child: ManagedChild | null = null;
@@ -380,8 +383,13 @@ export class Launcher {
   #done = false;
   readonly #completion = Promise.withResolvers<void>();
 
-  constructor(baseDir: string, state: ServiceState) {
+  constructor(
+    baseDir: string,
+    state: ServiceState,
+    authorityStateDir = nativeStoreAuthorityStateDirForBaseDir(baseDir),
+  ) {
     this.#baseDir = baseDir;
+    this.#authorityStateDir = authorityStateDir;
     this.#statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
     this.#state = state;
   }
@@ -482,7 +490,7 @@ export class Launcher {
       return;
     }
     if (!(await pathExists(databaseBackupDir(this.#baseDir, update.id)))) {
-      fenceNativeStoreAuthorityForBaseDir(this.#baseDir);
+      fenceNativeStoreAuthorityForBaseDir(this.#baseDir, this.#authorityStateDir);
       throw new Error("Cannot recover a trial-ready update without its database backup.");
     }
     if (!(await runtimeExists(this.#baseDir, update.targetVersion))) {
@@ -736,7 +744,7 @@ export class Launcher {
       this.#child = null;
       await terminateChild(child.process);
     }
-    await restoreDatabaseBackup(this.#baseDir, pending);
+    await restoreDatabaseBackup(this.#baseDir, pending, this.#authorityStateDir);
     const outcome = terminalUpdate({ pending, status, reason });
     const next: ServiceState = {
       ...this.#state,

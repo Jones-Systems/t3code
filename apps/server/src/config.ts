@@ -17,6 +17,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
+import { defaultNativeStoreAuthorityStateDir } from "./environment/nativeStoreAuthorityPath.ts";
 
 export const DEFAULT_PORT = 3773;
 
@@ -31,8 +32,10 @@ export type StartupPresentation = typeof StartupPresentation.Type;
  */
 export interface ServerDerivedPaths {
   readonly stateDir: string;
-  /** Native placement trust state; deliberately outside application/SQLite state. */
+  /** Native placement trust state; deliberately outside the complete T3 data directory. */
   readonly authorityStateDir: string;
+  /** Rollback-visible half of the native placement authority binding. */
+  readonly authorityWitnessPath: string;
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
@@ -122,7 +125,8 @@ export const deriveServerPaths = Effect.fn(function* (
   const providerStatusCacheDir = join(baseDir, "caches");
   return {
     stateDir,
-    authorityStateDir: options.authorityStateDir ?? join(baseDir, "native-store-authority"),
+    authorityStateDir: options.authorityStateDir ?? defaultNativeStoreAuthorityStateDir(baseDir),
+    authorityWitnessPath: join(stateDir, "native-store-authority-witness-v1.json"),
     dbPath,
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),
@@ -195,14 +199,24 @@ export class AuthorityStateDirConflictError extends Schema.TaggedErrorClass<Auth
 
 /** Reject authority placement inside application state or rollback backups. */
 export const validateAuthorityStateDir = Effect.fn("ServerConfig.validateAuthorityStateDir")(
-  function* (authorityStateDir: string, stateDir: string, databaseBackupDir: string) {
+  function* (
+    authorityStateDir: string,
+    baseDir: string,
+    stateDir: string,
+    databaseBackupDir: string,
+  ) {
     const path = yield* Path.Path;
-    const [authority, state, backup] = yield* Effect.all([
+    const [authority, base, state, backup] = yield* Effect.all([
       canonicalizePath(authorityStateDir),
+      canonicalizePath(baseDir),
       canonicalizePath(stateDir),
       canonicalizePath(databaseBackupDir),
     ]);
-    if (pathsOverlap(path, state, authority) || pathsOverlap(path, backup, authority)) {
+    if (
+      pathsOverlap(path, base, authority) ||
+      pathsOverlap(path, state, authority) ||
+      pathsOverlap(path, backup, authority)
+    ) {
       return yield* new AuthorityStateDirConflictError({
         authorityStateDir,
         stateDir,
@@ -218,6 +232,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
 
   yield* validateAuthorityStateDir(
     derivedPaths.authorityStateDir,
+    path.dirname(derivedPaths.stateDir),
     derivedPaths.stateDir,
     path.join(path.dirname(derivedPaths.stateDir), "runtime", "db-backup"),
   );
@@ -225,7 +240,6 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   yield* Effect.all(
     [
       fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.authorityStateDir, { recursive: true, mode: 0o700 }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),
@@ -259,7 +273,10 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     typeof baseDirOrPrefix === "string"
       ? baseDirOrPrefix
       : yield* fs.makeTempDirectoryScoped({ prefix: baseDirOrPrefix.prefix });
-  const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
+  const authorityStateDir = yield* fs.makeTempDirectoryScoped({
+    prefix: "t3-test-native-authority-",
+  });
+  const derivedPaths = yield* deriveServerPaths(baseDir, devUrl, { authorityStateDir });
   // Test paths are derived internally and cannot overlap; keep this test-only
   // invariant out of the service layer's ordinary error channel.
   yield* ensureServerDirectories(derivedPaths).pipe(Effect.orDie);

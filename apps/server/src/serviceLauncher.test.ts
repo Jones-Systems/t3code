@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - launcher tests exercise the filesystem boundary.
 import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -24,6 +25,21 @@ import {
   initializeNativeStoreAuthority,
   readNativeStoreAuthorityState,
 } from "./environment/nativeStoreAuthorityPersistence.ts";
+import { nativeStoreAuthorityBaseDirFingerprint } from "./environment/nativeStoreAuthorityPath.ts";
+
+const initializeLauncherAuthority = (
+  root: string,
+  authorityStateDir: string,
+  environmentId: string,
+) => {
+  NodeFS.chmodSync(NodePath.join(root, "userdata"), 0o700);
+  return initializeNativeStoreAuthority(
+    authorityStateDir,
+    NodePath.join(root, "userdata", "native-store-authority-witness-v1.json"),
+    environmentId,
+    nativeStoreAuthorityBaseDirFingerprint(root),
+  );
+};
 
 it("accepts only exact semantic versions", () => {
   for (const version of ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-0", "1.2.3+001"]) {
@@ -286,7 +302,7 @@ if (context.update?.status === "pending") {
         path.join(root, "userdata", "environment-id"),
         "environment-launcher\n",
       );
-      initializeNativeStoreAuthority(authorityStateDir, "environment-launcher");
+      initializeLauncherAuthority(root, authorityStateDir, "environment-launcher");
       // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in fake child source.
       const encodedDatabasePath = JSON.stringify(databasePath);
       const childSource = `
@@ -318,7 +334,11 @@ if (context.update?.status === "pending") {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        authorityStateDir,
+      );
       yield* Effect.promise(() =>
         launcher.run().then(
           () => Promise.reject(new Error("launcher unexpectedly completed")),
@@ -356,10 +376,8 @@ if (context.update?.status === "pending") {
         path.join(root, "userdata", "environment-id"),
         "environment-missing-backup\n",
       );
-      initializeNativeStoreAuthority(
-        path.join(root, "native-store-authority"),
-        "environment-missing-backup",
-      );
+      const authorityStateDir = path.join(root, "native-store-authority");
+      initializeLauncherAuthority(root, authorityStateDir, "environment-missing-backup");
       const targetEntry = path.join(
         root,
         "runtime",
@@ -391,7 +409,11 @@ if (context.update?.status === "pending") {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        authorityStateDir,
+      );
       yield* Effect.promise(() =>
         launcher.run().then(
           () => Promise.reject(new Error("launcher unexpectedly completed")),
@@ -437,10 +459,8 @@ if (context.update?.status === "pending") {
       );
       yield* fs.writeFileString(path.join(backupDir, "database"), "SQLite format 3\0original");
       yield* fs.writeFileString(path.join(backupDir, ".restore-pending"), "");
-      initializeNativeStoreAuthority(
-        path.join(root, "native-store-authority"),
-        "environment-restore-resume",
-      );
+      const authorityStateDir = path.join(root, "native-store-authority");
+      initializeLauncherAuthority(root, authorityStateDir, "environment-restore-resume");
 
       const versionDir = path.join(root, "runtime", "versions", "1.0.0");
       const entryPath = path.join(versionDir, "node_modules", "t3", "dist", "bin.mjs");
@@ -462,7 +482,11 @@ if (context.update?.status === "pending") {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        authorityStateDir,
+      );
       yield* Effect.promise(() =>
         launcher.run().then(
           () => Promise.reject(new Error("launcher unexpectedly completed")),
@@ -505,10 +529,8 @@ if (context.update?.status === "pending") {
         path.join(root, "userdata", "environment-id"),
         "environment-db-link\n",
       );
-      initializeNativeStoreAuthority(
-        path.join(root, "native-store-authority"),
-        "environment-db-link",
-      );
+      const authorityStateDir = path.join(root, "native-store-authority");
+      initializeLauncherAuthority(root, authorityStateDir, "environment-db-link");
 
       const versionDir = path.join(root, "runtime", "versions", "1.0.0");
       const entryPath = path.join(versionDir, "node_modules", "t3", "dist", "bin.mjs");
@@ -530,7 +552,11 @@ if (context.update?.status === "pending") {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        authorityStateDir,
+      );
       yield* Effect.promise(() =>
         launcher.run().then(
           () => Promise.reject(new Error("launcher unexpectedly completed")),

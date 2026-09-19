@@ -17,6 +17,7 @@ import {
   fenceNativeStoreAuthority,
   initializeNativeStoreAuthority,
 } from "../environment/nativeStoreAuthorityPersistence.ts";
+import { nativeStoreAuthorityBaseDirFingerprint } from "../environment/nativeStoreAuthorityPath.ts";
 import { workstreamCommand } from "./workstream.ts";
 
 const runtimeLayer = Layer.mergeAll(
@@ -25,20 +26,29 @@ const runtimeLayer = Layer.mergeAll(
     findAvailablePort: () => Effect.succeed(3773),
   } as unknown as NetService.NetService["Service"]),
   TestConsole.layer,
-  ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
 );
 
-const runEnroll = (baseDir: string) =>
+const runEnroll = (baseDir: string, authorityStateDir: string) =>
   Command.runWith(workstreamCommand, { version: "0.0.0" })([
     "authority",
     "enroll",
     "--base-dir",
     baseDir,
-  ]);
+  ]).pipe(
+    Effect.provide(
+      ConfigProvider.layer(
+        ConfigProvider.fromEnv({
+          env: { T3CODE_NATIVE_AUTHORITY_STATE_DIR: authorityStateDir },
+        }),
+      ),
+    ),
+  );
 
 const writeEnvironment = (baseDir: string, environmentId: string) => {
-  NodeFS.mkdirSync(NodePath.join(baseDir, "userdata"), { recursive: true });
-  NodeFS.writeFileSync(NodePath.join(baseDir, "userdata", "environment-id"), `${environmentId}\n`);
+  const stateDir = NodePath.join(baseDir, "userdata");
+  NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  NodeFS.chmodSync(stateDir, 0o700);
+  NodeFS.writeFileSync(NodePath.join(stateDir, "environment-id"), `${environmentId}\n`);
 };
 
 const writeLauncherState = (baseDir: string, protocol = SERVICE_LAUNCHER_PROTOCOL) => {
@@ -53,35 +63,46 @@ const writeLauncherState = (baseDir: string, protocol = SERVICE_LAUNCHER_PROTOCO
 it.effect("enrolls idempotently only with a current launcher and reports blocked states", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-workstream-enroll-cli-" });
+    const scratch = yield* fs.makeTempDirectoryScoped({ prefix: "t3-workstream-enroll-cli-" });
+    const root = NodePath.join(scratch, "base");
+    const authorityStateDir = NodePath.join(scratch, "authority");
     writeEnvironment(root, "environment-enroll");
 
-    const missingLauncher = yield* runEnroll(root).pipe(Effect.flip);
+    const missingLauncher = yield* runEnroll(root, authorityStateDir).pipe(Effect.flip);
     expect(String(missingLauncher)).toContain("service launcher must be upgraded");
 
     writeLauncherState(root);
-    yield* runEnroll(root);
-    yield* runEnroll(root);
+    yield* runEnroll(root, authorityStateDir);
+    yield* runEnroll(root, authorityStateDir);
     expect(
       (yield* TestConsole.logLines).filter(
         (line): line is string => typeof line === "string" && line.includes("Enrolled"),
       ),
     ).toHaveLength(2);
 
-    fenceNativeStoreAuthority(NodePath.join(root, "native-store-authority"), "environment-enroll");
-    const fenced = yield* runEnroll(root).pipe(Effect.flip);
+    fenceNativeStoreAuthority(
+      authorityStateDir,
+      NodePath.join(root, "userdata", "native-store-authority-witness-v1.json"),
+      "environment-enroll",
+      nativeStoreAuthorityBaseDirFingerprint(root),
+    );
+    const fenced = yield* runEnroll(root, authorityStateDir).pipe(Effect.flip);
     expect(String(fenced)).toContain("remains fenced");
 
-    const mismatchRoot = yield* fs.makeTempDirectoryScoped({
+    const mismatchScratch = yield* fs.makeTempDirectoryScoped({
       prefix: "t3-workstream-enroll-mismatch-cli-",
     });
+    const mismatchRoot = NodePath.join(mismatchScratch, "base");
+    const mismatchAuthorityStateDir = NodePath.join(mismatchScratch, "authority");
     writeEnvironment(mismatchRoot, "environment-current");
     writeLauncherState(mismatchRoot);
     initializeNativeStoreAuthority(
-      NodePath.join(mismatchRoot, "native-store-authority"),
+      mismatchAuthorityStateDir,
+      NodePath.join(mismatchRoot, "userdata", "native-store-authority-witness-v1.json"),
       "environment-other",
+      nativeStoreAuthorityBaseDirFingerprint(mismatchRoot),
     );
-    const mismatch = yield* runEnroll(mismatchRoot).pipe(Effect.flip);
+    const mismatch = yield* runEnroll(mismatchRoot, mismatchAuthorityStateDir).pipe(Effect.flip);
     expect(String(mismatch)).toContain("environment changed");
   }).pipe(Effect.provide(runtimeLayer)),
 );
