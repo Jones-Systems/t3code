@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration exercises the filesystem boundary.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
@@ -49,6 +50,12 @@ const writeEnvironment = (baseDir: string, environmentId: string) => {
   NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   NodeFS.chmodSync(stateDir, 0o700);
   NodeFS.writeFileSync(NodePath.join(stateDir, "environment-id"), `${environmentId}\n`);
+  const database = new NodeSqlite.DatabaseSync(NodePath.join(stateDir, "state.sqlite"));
+  try {
+    database.exec("CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY)");
+  } finally {
+    database.close();
+  }
 };
 
 const writeLauncherState = (baseDir: string, protocol = SERVICE_LAUNCHER_PROTOCOL) => {
@@ -82,12 +89,30 @@ it.effect("enrolls idempotently only with a current launcher and reports blocked
 
     fenceNativeStoreAuthority(
       authorityStateDir,
-      NodePath.join(root, "userdata", "native-store-authority-witness-v1.json"),
+      "123e4567-e89b-42d3-a456-426614174000",
       "environment-enroll",
       nativeStoreAuthorityBaseDirFingerprint(root),
     );
     const fenced = yield* runEnroll(root, authorityStateDir).pipe(Effect.flip);
-    expect(String(fenced)).toContain("remains fenced");
+    expect(String(fenced)).toContain("active restore barrier");
+
+    const unenrolledScratch = yield* fs.makeTempDirectoryScoped({
+      prefix: "t3-workstream-enroll-restore-barrier-cli-",
+    });
+    const unenrolledRoot = NodePath.join(unenrolledScratch, "base");
+    const unenrolledAuthorityStateDir = NodePath.join(unenrolledScratch, "authority");
+    writeEnvironment(unenrolledRoot, "environment-unenrolled");
+    writeLauncherState(unenrolledRoot);
+    fenceNativeStoreAuthority(
+      unenrolledAuthorityStateDir,
+      "123e4567-e89b-42d3-a456-426614174001",
+      "environment-unenrolled",
+      nativeStoreAuthorityBaseDirFingerprint(unenrolledRoot),
+    );
+    const restorePending = yield* runEnroll(unenrolledRoot, unenrolledAuthorityStateDir).pipe(
+      Effect.flip,
+    );
+    expect(String(restorePending)).toContain("active restore barrier");
 
     const mismatchScratch = yield* fs.makeTempDirectoryScoped({
       prefix: "t3-workstream-enroll-mismatch-cli-",
@@ -98,7 +123,7 @@ it.effect("enrolls idempotently only with a current launcher and reports blocked
     writeLauncherState(mismatchRoot);
     initializeNativeStoreAuthority(
       mismatchAuthorityStateDir,
-      NodePath.join(mismatchRoot, "userdata", "native-store-authority-witness-v1.json"),
+      NodePath.join(mismatchRoot, "userdata", "state.sqlite"),
       "environment-other",
       nativeStoreAuthorityBaseDirFingerprint(mismatchRoot),
     );

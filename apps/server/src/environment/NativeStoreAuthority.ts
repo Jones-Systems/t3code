@@ -13,6 +13,7 @@ import {
   decodeNativeStoreAuthorityState,
   fenceNativeStoreAuthority,
   initializeNativeStoreAuthority,
+  prepareNativeStoreAuthorityAdvance,
   readNativeStoreAuthorityState,
   readVerifiedNativeStoreAuthority,
   requireNativeStoreAuthorityLauncherProtocolForBaseDir,
@@ -29,6 +30,10 @@ export class NativeStoreAuthority extends Context.Service<
       NativeStoreAuthorityTuple,
       NativeStoreAuthorityPersistenceError
     >;
+    readonly prepareOrchestrationCommit: (
+      expectedPreviousSequence: number,
+      nextSequence: number,
+    ) => Effect.Effect<void, NativeStoreAuthorityPersistenceError>;
     readonly trustProvider: T3PlacementTrustProvider;
   }
 >()("t3/environment/NativeStoreAuthority") {}
@@ -68,7 +73,6 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
   const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const environmentId = yield* identity.getEnvironmentId;
   const authorityStateDir = config.authorityStateDir;
-  const authorityWitnessPath = config.authorityWitnessPath;
   const baseDirFingerprint = nativeStoreAuthorityBaseDirFingerprint(config.baseDir);
   const requireSafeLauncher = () =>
     requireNativeStoreAuthorityLauncherProtocolForBaseDir(
@@ -85,7 +89,7 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
       return tupleFromState(
         readVerifiedNativeStoreAuthority(
           authorityStateDir,
-          authorityWitnessPath,
+          config.dbPath,
           environmentId,
           baseDirFingerprint,
         ),
@@ -103,7 +107,7 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
           tupleFromState(
             readVerifiedNativeStoreAuthority(
               authorityStateDir,
-              authorityWitnessPath,
+              config.dbPath,
               environmentId,
               baseDirFingerprint,
             ),
@@ -117,8 +121,25 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
     }
   };
 
+  const prepareOrchestrationCommit: NativeStoreAuthority["Service"]["prepareOrchestrationCommit"] =
+    (expectedPreviousSequence, nextSequence) =>
+      Effect.try({
+        try: () => {
+          prepareNativeStoreAuthorityAdvance(
+            authorityStateDir,
+            config.dbPath,
+            environmentId,
+            baseDirFingerprint,
+            expectedPreviousSequence,
+            nextSequence,
+          );
+        },
+        catch: asPersistenceError,
+      });
+
   return NativeStoreAuthority.of({
     readCurrent,
+    prepareOrchestrationCommit,
     trustProvider: {
       readTrustSnapshot,
     },

@@ -25,6 +25,8 @@ import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 
 import * as ServerConfig from "../config.ts";
+import * as NativeStoreAuthority from "../environment/NativeStoreAuthority.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationLayerLive } from "../orchestration/runtimeLayer.ts";
@@ -200,6 +202,7 @@ const projectCommandUuid = Crypto.Crypto.pipe(
 const ProjectCliRuntimeLive = Layer.mergeAll(
   WorkspacePaths.layer,
   OrchestrationLayerLive.pipe(
+    Layer.provide(NativeStoreAuthority.layer.pipe(Layer.provide(ServerEnvironment.identityLayer))),
     Layer.provideMerge(RepositoryIdentityResolver.layer),
     Layer.provideMerge(SqlitePersistenceLayerLive),
   ),

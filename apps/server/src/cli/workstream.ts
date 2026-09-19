@@ -20,6 +20,7 @@ const authorityEnrollCommand = Command.make("enroll", projectLocationFlags).pipe
         try: () =>
           initializeNativeStoreAuthorityForBaseDir(
             config.baseDir,
+            config.dbPath,
             SERVICE_LAUNCHER_PROTOCOL,
             config.authorityStateDir,
           ),

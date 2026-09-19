@@ -250,7 +250,7 @@ async function restoreDatabaseBackup(
   // Persist restore intent before fencing so recovery cannot restart or commit
   // a trial while the native authority remains fenced.
   await markDatabaseRestorePending(backupDir);
-  fenceNativeStoreAuthorityForBaseDir(baseDir, authorityStateDir);
+  fenceNativeStoreAuthorityForBaseDir(baseDir, pending.id, authorityStateDir);
   for (const suffix of DB_FILE_SUFFIXES) {
     const target = `${pending.dbPath}${suffix}`;
     const source = databaseBackupFile(backupDir, suffix);
@@ -261,7 +261,7 @@ async function restoreDatabaseBackup(
     }
   }
   await syncDirectory(NodePath.dirname(pending.dbPath));
-  advanceNativeStoreAuthorityForBaseDir(baseDir, pending.dbPath, authorityStateDir);
+  advanceNativeStoreAuthorityForBaseDir(baseDir, pending.dbPath, pending.id, authorityStateDir);
 }
 
 async function discardDatabaseBackup(baseDir: string, updateId: string): Promise<void> {
@@ -490,7 +490,7 @@ export class Launcher {
       return;
     }
     if (!(await pathExists(databaseBackupDir(this.#baseDir, update.id)))) {
-      fenceNativeStoreAuthorityForBaseDir(this.#baseDir, this.#authorityStateDir);
+      fenceNativeStoreAuthorityForBaseDir(this.#baseDir, update.id, this.#authorityStateDir);
       throw new Error("Cannot recover a trial-ready update without its database backup.");
     }
     if (!(await runtimeExists(this.#baseDir, update.targetVersion))) {

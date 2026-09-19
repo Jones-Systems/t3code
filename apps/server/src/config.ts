@@ -34,8 +34,6 @@ export interface ServerDerivedPaths {
   readonly stateDir: string;
   /** Native placement trust state; deliberately outside the complete T3 data directory. */
   readonly authorityStateDir: string;
-  /** Rollback-visible half of the native placement authority binding. */
-  readonly authorityWitnessPath: string;
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
@@ -126,7 +124,6 @@ export const deriveServerPaths = Effect.fn(function* (
   return {
     stateDir,
     authorityStateDir: options.authorityStateDir ?? defaultNativeStoreAuthorityStateDir(baseDir),
-    authorityWitnessPath: join(stateDir, "native-store-authority-witness-v1.json"),
     dbPath,
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),

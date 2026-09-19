@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId } from "@t3tools/contracts";
@@ -26,11 +27,7 @@ const authorityLayer = (baseDir: string, authorityStateDir: string, environmentI
     Layer.succeed(ServerConfig.ServerConfig, {
       baseDir,
       authorityStateDir,
-      authorityWitnessPath: NodePath.join(
-        baseDir,
-        "userdata",
-        "native-store-authority-witness-v1.json",
-      ),
+      dbPath: NodePath.join(baseDir, "userdata", "state.sqlite"),
     } as ServerConfig.ServerConfig["Service"]),
     Layer.succeed(
       ServerEnvironment.ServerEnvironmentIdentity,
@@ -40,6 +37,19 @@ const authorityLayer = (baseDir: string, authorityStateDir: string, environmentI
     ),
   );
 
+const writeDatabase = (databasePath: string, sequence: number) => {
+  NodeFS.mkdirSync(NodePath.dirname(databasePath), { recursive: true, mode: 0o700 });
+  const database = new NodeSqlite.DatabaseSync(databasePath);
+  try {
+    database.exec("CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY)");
+    if (sequence > 0) {
+      database.prepare("INSERT INTO orchestration_events (sequence) VALUES (?)").run(sequence);
+    }
+  } finally {
+    database.close();
+  }
+};
+
 it.effect("publishes only the current T3-owned tuple and fails closed when fenced", () =>
   Effect.gen(function* () {
     const root = NodeFS.mkdtempSync(
@@ -47,9 +57,9 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
     );
     try {
       const authorityStateDir = NodePath.join(root, "authority");
-      const witnessPath = NodePath.join(root, "userdata", "native-store-authority-witness-v1.json");
+      const databasePath = NodePath.join(root, "userdata", "state.sqlite");
       const environmentId = "environment-layer-test";
-      NodeFS.mkdirSync(NodePath.dirname(witnessPath), { recursive: true, mode: 0o700 });
+      writeDatabase(databasePath, 3);
       NodeFS.mkdirSync(NodePath.join(root, "runtime"), { recursive: true });
       NodeFS.writeFileSync(
         NodePath.join(root, "runtime", "service-state.json"),
@@ -59,10 +69,11 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
       );
       const initial = initializeNativeStoreAuthority(
         authorityStateDir,
-        witnessPath,
+        databasePath,
         environmentId,
         nativeStoreAuthorityBaseDirFingerprint(root),
       );
+      expect(initial.orchestration_sequence).toBe(3);
 
       const authority = yield* NativeStoreAuthority.make().pipe(
         Effect.provide(authorityLayer(root, authorityStateDir, environmentId)),
@@ -83,17 +94,21 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         readiness: "ready",
       });
 
-      NodeFS.rmSync(witnessPath);
+      const rolledBackDatabasePath = NodePath.join(root, "rolled-back.sqlite");
+      writeDatabase(rolledBackDatabasePath, 2);
+      NodeFS.renameSync(rolledBackDatabasePath, databasePath);
       expect(authority.trustProvider.readTrustSnapshot()).toEqual({
         trustedEnvironments: [],
         readiness: "trust-provider-required",
       });
-      initializeNativeStoreAuthority(
+      const recovered = initializeNativeStoreAuthority(
         authorityStateDir,
-        witnessPath,
+        databasePath,
         environmentId,
         nativeStoreAuthorityBaseDirFingerprint(root),
       );
+      expect(recovered.orchestration_sequence).toBe(2);
+      expect(recovered.store_generation).toBe(initial.store_generation + 1);
       expect(authority.trustProvider.readTrustSnapshot().readiness).toBe("ready");
 
       NodeFS.writeFileSync(
@@ -115,7 +130,7 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
 
       fenceNativeStoreAuthority(
         authorityStateDir,
-        witnessPath,
+        "123e4567-e89b-42d3-a456-426614174000",
         environmentId,
         nativeStoreAuthorityBaseDirFingerprint(root),
       );
