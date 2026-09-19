@@ -1,7 +1,9 @@
 import * as NodeCrypto from "node:crypto";
 
 import { expect, it } from "@effect/vitest";
+import { WorkstreamDetail, WorkstreamReferenceDetail } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import {
   WORKSTREAM_CONTRACT_HEADER_VERSION,
@@ -117,7 +119,20 @@ it.effect("rejects a receipt attributed to another principal", () =>
 
 it.effect("returns schema-valid typed detail and reference fixtures", () =>
   Effect.gen(function* () {
-    const gateway = yield* make(makeSyntheticWorkstreamTransport(), { binding });
+    const transport = makeSyntheticWorkstreamTransport();
+    const contract = {
+      contractVersion: WORKSTREAM_CONTRACT_HEADER_VERSION,
+      contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+    } as const;
+    const rawDetail = yield* transport.getWorkstream({ ...contract, workstreamId: "ws-core-v1" });
+    const rawReference = yield* transport.getReference({
+      ...contract,
+      nativeReferenceId: "reference-fixture",
+    });
+    Schema.decodeUnknownSync(WorkstreamDetail)(rawDetail);
+    Schema.decodeUnknownSync(WorkstreamReferenceDetail)(rawReference);
+
+    const gateway = yield* make(transport, { binding });
     const detail = yield* gateway.readDetail("ws-core-v1");
     const reference = yield* gateway.readReference("reference-fixture");
 
