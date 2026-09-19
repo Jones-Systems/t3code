@@ -798,6 +798,68 @@ describe("CodexSessionRuntime collab integration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.live("interrupts live children without claiming a pending recovery root", () =>
+    Effect.gen(function* () {
+      const scratchRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-codex-child-stop-"),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scratchRoot, { recursive: true, force: true });
+        }),
+      );
+      const uniqueScriptPath = NodePath.join(scratchRoot, "script.json");
+      const childTurnStarted = wireFixture.notifications.find(
+        (entry) =>
+          entry.method === "turn/started" &&
+          (entry.params as { threadId?: string }).threadId === CHILD_A,
+      );
+      assert.isDefined(childTurnStarted);
+      const script = {
+        rootThreadId: ROOT,
+        holdTurnOpen: true,
+        turnIds: ["pending-recovery-root"],
+        notifications: [capturedStartedActivity(CHILD_A), childTurnStarted],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(uniqueScriptPath, JSON.stringify(script), "utf8");
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-child-only-stop"),
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: uniqueScriptPath },
+      });
+      const childStarted = yield* runtime.events.pipe(
+        Stream.filter(
+          (event) =>
+            event.method === "collabAgent/turnStarted" &&
+            (event.payload as { agentThreadId?: string }).agentThreadId === CHILD_A,
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "keep working" });
+      yield* Fiber.join(childStarted);
+      yield* runtime.interruptChildTurns;
+
+      const interrupts = NodeFS.readFileSync(`${uniqueScriptPath}.interrupts`, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { threadId?: string; turnId?: string });
+      assert.deepEqual(interrupts, [
+        {
+          threadId: CHILD_A,
+          turnId: (childTurnStarted.params as { turn: { id: string } }).turn.id,
+        },
+      ]);
+      assert.equal((yield* runtime.getSession).activeTurnId, "pending-recovery-root");
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.live("resolves an omitted root turn id after child interruption yields", () =>
     Effect.gen(function* () {
       const scratchRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-race-"));

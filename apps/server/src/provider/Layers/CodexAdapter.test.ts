@@ -96,6 +96,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly pauseActiveGoalImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
+  public readonly interruptChildTurnsImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
 
   public readonly readThreadImpl = vi.fn((): Promise<CodexThreadSnapshot> =>
     Promise.resolve({
@@ -152,6 +153,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   pauseActiveGoal = Effect.promise(() => this.pauseActiveGoalImpl());
+  interruptChildTurns = Effect.promise(() => this.interruptChildTurnsImpl());
 
   readThread = Effect.promise(() => this.readThreadImpl());
 
@@ -749,6 +751,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
 
       NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
       NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 0);
+      NodeAssert.equal(runtime.interruptChildTurnsImpl.mock.calls.length, 1);
       yield* Fiber.interrupt(drainFiber);
     }),
   );
@@ -795,6 +798,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         yield* adapter.interruptTurn(asThreadId("thread-1"));
         NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
         NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 0);
+        NodeAssert.equal(runtime.interruptChildTurnsImpl.mock.calls.length, 1);
         const retryTurnId = asTurnId("stop-starting-late-turn");
         releaseStart({ threadId: asThreadId("thread-1"), turnId: retryTurnId });
         yield* Effect.promise(() => interrupted);
@@ -805,6 +809,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         yield* TestClock.adjust("5 minutes");
         NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
         NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
+        NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 1);
         yield* Fiber.interrupt(drainFiber);
       }),
   );

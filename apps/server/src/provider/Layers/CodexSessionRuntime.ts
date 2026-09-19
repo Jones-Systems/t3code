@@ -202,6 +202,7 @@ export interface CodexSessionRuntimeShape {
   >;
   readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly pauseActiveGoal: Effect.Effect<void>;
+  readonly interruptChildTurns: Effect.Effect<void>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
@@ -2324,10 +2325,29 @@ export const makeCodexSessionRuntime = (
       });
     }).pipe(Effect.timeoutOption("1 second"), Effect.ignore);
 
+    const interruptChildTurns = Effect.gen(function* () {
+      // Children can outlive a completed root or a pending recovery start.
+      // Bound every request and the whole fleet so a wedged child cannot
+      // prevent the caller from continuing root cancellation.
+      const liveChildTurns = yield* Ref.get(collabChildLiveTurnsRef);
+      yield* Effect.forEach(
+        Array.from(liveChildTurns.entries()),
+        ([childThreadId, childTurnId]) =>
+          client
+            .request("turn/interrupt", {
+              threadId: childThreadId,
+              turnId: childTurnId,
+            })
+            .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
+        { concurrency: 8, discard: true },
+      ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
+    });
+
     return {
       start,
       getSession: Ref.get(sessionRef),
       pauseActiveGoal,
+      interruptChildTurns,
       compactThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         yield* client.request("thread/compact/start", { threadId: providerThreadId });
@@ -2421,26 +2441,7 @@ export const makeCodexSessionRuntime = (
       interruptTurn: (turnId) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          // Stop-everything: children are full threads with their own turns;
-          // interrupting only the parent leaves the fleet running. Interrupt
-          // each live child turn first, best-effort per child, BOUNDED: the
-          // transport awaits an unbounded Deferred per request, so a wedged
-          // child would otherwise block the parent interrupt forever —
-          // exactly during the runaway fleet where Stop matters most
-          // (review finding). Per-child and overall deadlines guarantee the
-          // parent interrupt below always runs.
-          const liveChildTurns = yield* Ref.get(collabChildLiveTurnsRef);
-          yield* Effect.forEach(
-            Array.from(liveChildTurns.entries()),
-            ([childThreadId, childTurnId]) =>
-              client
-                .request("turn/interrupt", {
-                  threadId: childThreadId,
-                  turnId: childTurnId,
-                })
-                .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
-            { concurrency: 8, discard: true },
-          ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
+          yield* interruptChildTurns;
           // Resolve an omitted id only after child interruption has yielded. A
           // queued follow-up can otherwise replace the active id during that
           // wait; an explicit id remains authoritative for recovery callers.

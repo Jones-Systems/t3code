@@ -3064,7 +3064,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         Effect.gen(function* () {
           // Stop owns goal pausing; recovery/new-input helpers call the
           // raw runtime interrupt and must remain goal-neutral.
-          yield* session.runtime.pauseActiveGoal.pipe(Effect.ignore);
+          yield* session.runtime.pauseActiveGoal;
           let effectiveTurnId = turnId;
           let shouldInterrupt = true;
           let terminal: Deferred.Deferred<void> | undefined;
@@ -3109,7 +3109,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }
             }),
           );
-          if (shouldInterrupt) {
+          if (!shouldInterrupt) {
+            // Recovery owns the pending root's exact late-start containment,
+            // but existing children must stop immediately in either phase.
+            yield* session.runtime.interruptChildTurns;
+          } else {
             if (!effectiveTurnId) {
               yield* session.runtime.interruptTurn();
               return;
