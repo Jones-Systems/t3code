@@ -196,6 +196,10 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
+  readonly listModels: Effect.Effect<
+    ReadonlyArray<EffectCodexSchema.V2ModelListResponse__Model>,
+    CodexSessionRuntimeError
+  >;
   readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
@@ -223,6 +227,17 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
   | CodexSessionRuntimeThreadIdMissingError;
+
+export function isCodexModelSelectionAvailable(
+  models: ReadonlyArray<EffectCodexSchema.V2ModelListResponse__Model>,
+  selection: { readonly model: string; readonly effort: string },
+): boolean {
+  const model = models.find((candidate) => candidate.model === selection.model);
+  return (
+    model !== undefined &&
+    model.supportedReasoningEfforts.some((option) => option.reasoningEffort === selection.effort)
+  );
+}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -2355,6 +2370,35 @@ export const makeCodexSessionRuntime = (
               : {}),
           } satisfies ProviderTurnStartResult;
         }),
+      listModels: Effect.gen(function* () {
+        const models: Array<EffectCodexSchema.V2ModelListResponse__Model> = [];
+        const seenCursors = new Set<string>();
+        let cursor: string | null | undefined = undefined;
+        let pageCount = 0;
+        do {
+          if (pageCount >= 20) {
+            return yield* new CodexErrors.CodexAppServerRequestError({
+              code: -32603,
+              errorMessage: "model/list exceeded the 20-page safety bound",
+            });
+          }
+          pageCount += 1;
+          const response: EffectCodexSchema.V2ModelListResponse = yield* client.request(
+            "model/list",
+            cursor ? { cursor } : {},
+          );
+          models.push(...response.data);
+          cursor = response.nextCursor;
+          if (cursor && seenCursors.has(cursor)) {
+            return yield* new CodexErrors.CodexAppServerRequestError({
+              code: -32603,
+              errorMessage: `model/list repeated cursor '${cursor}'`,
+            });
+          }
+          if (cursor) seenCursors.add(cursor);
+        } while (cursor);
+        return models;
+      }),
       interruptTurn: (turnId) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
