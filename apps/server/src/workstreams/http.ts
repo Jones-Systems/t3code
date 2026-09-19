@@ -1,7 +1,9 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  EnvironmentHttpConflictError,
   EnvironmentHttpApi,
+  EnvironmentInternalError,
   T3_PLACEMENT_MAX_REQUEST_BYTES,
   type WorkstreamDeclarationPage,
   type WorkstreamDetail,
@@ -98,10 +100,29 @@ export const workstreamGatewayLayerLive = makeWorkstreamGatewayLayerLive().pipe(
   Layer.provide(NativeStoreAuthority.layer),
 );
 
-const internal = <A>(operation: string, effect: Effect.Effect<A, WorkstreamGatewayError>) =>
+const internal = <A>(
+  operation: string,
+  effect: Effect.Effect<A, WorkstreamGatewayError>,
+): Effect.Effect<A, EnvironmentInternalError> =>
   effect.pipe(
     Effect.catch((error) =>
       failEnvironmentInternal("internal_error", { operation, reason: error.reason }),
+    ),
+  );
+
+const restartable = <A>(
+  operation: string,
+  effect: Effect.Effect<A, WorkstreamGatewayError>,
+): Effect.Effect<A, EnvironmentHttpConflictError | EnvironmentInternalError> =>
+  effect.pipe(
+    Effect.catch(
+      (error): Effect.Effect<never, EnvironmentHttpConflictError | EnvironmentInternalError> => {
+        if (error.reason === "cursor-stale")
+          return Effect.fail(
+            new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" }),
+          );
+        return failEnvironmentInternal("internal_error", { operation, reason: error.reason });
+      },
     ),
   );
 
@@ -133,7 +154,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       )
       .handle("list", (args) =>
         read(args.endpoint.name).pipe(
-          Effect.andThen(internal("list", gateway.readMetadata(pageInput(args.payload)))),
+          Effect.andThen(restartable("list", gateway.readMetadata(pageInput(args.payload)))),
         ),
       )
       .handle("detail", (args) =>
@@ -148,7 +169,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       .handle("references", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal("references", gateway.readReferences(pageInput(args.payload))).pipe(
+            restartable("references", gateway.readReferences(pageInput(args.payload))).pipe(
               Effect.map((value) => value as WorkstreamReferencePage),
             ),
           ),
@@ -166,7 +187,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       .handle("memberships", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "memberships",
               gateway.readMemberships(args.params.workstreamId, pageInput(args.payload)),
             ).pipe(Effect.map((value) => value as WorkstreamMembershipPage)),
@@ -176,7 +197,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       .handle("declarations", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "declarations",
               gateway.readDeclarations(args.params.workstreamId, pageInput(args.payload)),
             ).pipe(Effect.map((value) => value as WorkstreamDeclarationPage)),
@@ -186,7 +207,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       .handle("edges", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "edges",
               gateway.readEdges(args.params.workstreamId, pageInput(args.payload)),
             ).pipe(Effect.map((value) => value as WorkstreamEdgePage)),
@@ -196,7 +217,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       .handle("history", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "history",
               gateway.readHistory(args.params.workstreamId, pageInput(args.payload)),
             ).pipe(Effect.map((value) => value as WorkstreamHistoryPage)),

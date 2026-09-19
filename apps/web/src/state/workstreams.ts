@@ -12,7 +12,7 @@ import type {
   WorkstreamCommand,
   WorkstreamReceipt,
 } from "@t3tools/contracts";
-import { T3_PLACEMENT_MAX_IDENTITIES } from "@t3tools/contracts";
+import { EnvironmentHttpConflictError, T3_PLACEMENT_MAX_IDENTITIES } from "@t3tools/contracts";
 import {
   appendWorkstreamDtoPage,
   appendWorkstreamListResult,
@@ -23,6 +23,7 @@ import {
   type LiveT3Placements,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "../environments/primary/httpClient";
@@ -34,6 +35,36 @@ const request = <A, E>(run: (client: PrimaryClient) => Effect.Effect<A, E>) =>
   runPrimaryHttp(PrimaryEnvironmentHttpClient.pipe(Effect.flatMap(run)));
 
 const metadataCache = new LiveWorkstreamMetadataCache();
+const isCursorStale = Schema.is(EnvironmentHttpConflictError);
+const CURSOR_RESTART_ATTEMPTS = 3;
+
+const isRestartableCursorStale = (cause: unknown): boolean =>
+  isCursorStale(cause) && cause.message === "workstream_cursor_stale";
+
+export interface CursorRestartOptions {
+  readonly wait?: (delayMs: number) => Promise<void>;
+}
+
+async function withCursorRestart<A>(
+  load: () => Promise<A>,
+  options: CursorRestartOptions = {},
+): Promise<A> {
+  const wait =
+    options.wait ??
+    ((delayMs: number) =>
+      new Promise<void>((resolve) => {
+        globalThis.setTimeout(resolve, delayMs);
+      }));
+  for (let attempt = 0; attempt < CURSOR_RESTART_ATTEMPTS; attempt += 1) {
+    try {
+      return await load();
+    } catch (cause) {
+      if (!isRestartableCursorStale(cause) || attempt + 1 === CURSOR_RESTART_ATTEMPTS) throw cause;
+      await wait(50 * 2 ** attempt);
+    }
+  }
+  throw new Error("Workstream cursor restart policy is invalid.");
+}
 
 async function loadAllPages<Item>(
   load: (cursor?: string) => Promise<WorkstreamDtoPage<Item>>,
@@ -50,15 +81,106 @@ async function loadAllPages<Item>(
 
 export async function loadCompleteWorkstreamList(
   load: (cursor?: string) => Promise<T3WorkstreamListResult>,
+  options: CursorRestartOptions = {},
 ): Promise<T3WorkstreamListResult> {
-  let result = await load();
-  const cursors = new Set<string>();
-  while (result.nextCursor !== null) {
-    if (cursors.has(result.nextCursor)) throw new Error("Workstream list cursor repeated.");
-    cursors.add(result.nextCursor);
-    result = appendWorkstreamListResult(result, await load(result.nextCursor));
-  }
-  return result;
+  return withCursorRestart(async () => {
+    let result = await load();
+    const cursors = new Set<string>();
+    while (result.nextCursor !== null) {
+      if (cursors.has(result.nextCursor)) throw new Error("Workstream list cursor repeated.");
+      cursors.add(result.nextCursor);
+      result = appendWorkstreamListResult(result, await load(result.nextCursor));
+    }
+    return result;
+  }, options);
+}
+
+export interface WorkstreamDetailView {
+  readonly detail: WorkstreamDetail;
+  readonly memberships: WorkstreamMembershipPage;
+  readonly declarations: WorkstreamDeclarationPage;
+  readonly edges: WorkstreamEdgePage;
+  readonly history: WorkstreamHistoryPage;
+  readonly references: WorkstreamReferencePage;
+}
+
+export interface WorkstreamDetailLoaders {
+  readonly detail: () => Promise<WorkstreamDetail>;
+  readonly memberships: (cursor?: string) => Promise<WorkstreamMembershipPage>;
+  readonly declarations: (cursor?: string) => Promise<WorkstreamDeclarationPage>;
+  readonly edges: (cursor?: string) => Promise<WorkstreamEdgePage>;
+  readonly history: (cursor?: string) => Promise<WorkstreamHistoryPage>;
+  readonly references: (cursor?: string) => Promise<WorkstreamReferencePage>;
+}
+
+export async function loadCompleteWorkstreamDetail(
+  loaders: WorkstreamDetailLoaders,
+  options: CursorRestartOptions = {},
+): Promise<WorkstreamDetailView> {
+  return withCursorRestart(async () => {
+    const [
+      detailResult,
+      membershipsResult,
+      declarationsResult,
+      edgesResult,
+      historyResult,
+      referencesResult,
+    ] = await Promise.allSettled([
+      loaders.detail(),
+      loadAllPages(loaders.memberships),
+      loadAllPages(loaders.declarations),
+      loadAllPages(loaders.edges),
+      loadAllPages(loaders.history),
+      loadAllPages(loaders.references),
+    ] as const);
+    const failures = [
+      detailResult,
+      membershipsResult,
+      declarationsResult,
+      edgesResult,
+      historyResult,
+      referencesResult,
+    ].filter((result) => result.status === "rejected");
+    const nonRestartableFailure = failures.find(
+      (result) => result.status === "rejected" && !isRestartableCursorStale(result.reason),
+    );
+    if (nonRestartableFailure?.status === "rejected") throw nonRestartableFailure.reason;
+    const staleFailure = failures[0];
+    if (staleFailure?.status === "rejected") throw staleFailure.reason;
+    if (
+      detailResult.status !== "fulfilled" ||
+      membershipsResult.status !== "fulfilled" ||
+      declarationsResult.status !== "fulfilled" ||
+      edgesResult.status !== "fulfilled" ||
+      historyResult.status !== "fulfilled" ||
+      referencesResult.status !== "fulfilled"
+    )
+      throw new Error("Workstream detail load did not settle.");
+    const detail = detailResult.value;
+    const memberships = membershipsResult.value;
+    const declarations = declarationsResult.value;
+    const edges = edgesResult.value;
+    const history = historyResult.value;
+    const references = referencesResult.value;
+    const contexts: readonly WorkstreamReadContext[] = [
+      memberships.context,
+      declarations.context,
+      edges.context,
+      history.context,
+      references.context,
+    ];
+    if (
+      contexts.some(
+        (context) =>
+          context.owner_id !== detail.context.owner_id ||
+          context.server_generation !== detail.context.server_generation ||
+          context.registry_version !== detail.context.registry_version,
+      )
+    ) {
+      throw new Error("Workstream detail changed while it was loading; reload it.");
+    }
+    return { detail, memberships, declarations, edges, history, references };
+  }, options);
 }
 
 export interface WorkstreamListView {
@@ -68,14 +190,7 @@ export interface WorkstreamListView {
   readonly loading: boolean;
   readonly refresh: () => void;
   readonly submit: (command: WorkstreamCommand) => Promise<WorkstreamReceipt>;
-  readonly loadDetail: (workstreamId: string) => Promise<{
-    readonly detail: WorkstreamDetail;
-    readonly memberships: WorkstreamMembershipPage;
-    readonly declarations: WorkstreamDeclarationPage;
-    readonly edges: WorkstreamEdgePage;
-    readonly history: WorkstreamHistoryPage;
-    readonly references: WorkstreamReferencePage;
-  }>;
+  readonly loadDetail: (workstreamId: string) => Promise<WorkstreamDetailView>;
   readonly loadReference: (nativeReferenceId: string) => Promise<WorkstreamReferenceDetail>;
 }
 
@@ -212,12 +327,10 @@ export function useWorkstreams(
 
   const loadDetail = useCallback(async (workstreamId: string) => {
     try {
-      const paged = <Item>(
-        run: (cursor?: string) => Promise<WorkstreamDtoPage<Item>>,
-      ): Promise<WorkstreamDtoPage<Item>> => loadAllPages(run);
-      const [detail, memberships, declarations, edges, history, references] = await Promise.all([
-        request((client) => client.workstreams.detail({ headers: {}, params: { workstreamId } })),
-        paged((cursor) =>
+      return await loadCompleteWorkstreamDetail({
+        detail: () =>
+          request((client) => client.workstreams.detail({ headers: {}, params: { workstreamId } })),
+        memberships: (cursor) =>
           request((client) =>
             client.workstreams.memberships({
               headers: {},
@@ -225,8 +338,7 @@ export function useWorkstreams(
               payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
             }),
           ),
-        ),
-        paged((cursor) =>
+        declarations: (cursor) =>
           request((client) =>
             client.workstreams.declarations({
               headers: {},
@@ -234,8 +346,7 @@ export function useWorkstreams(
               payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
             }),
           ),
-        ),
-        paged((cursor) =>
+        edges: (cursor) =>
           request((client) =>
             client.workstreams.edges({
               headers: {},
@@ -243,8 +354,7 @@ export function useWorkstreams(
               payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
             }),
           ),
-        ),
-        paged((cursor) =>
+        history: (cursor) =>
           request((client) =>
             client.workstreams.history({
               headers: {},
@@ -252,34 +362,14 @@ export function useWorkstreams(
               payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
             }),
           ),
-        ),
-        paged((cursor) =>
+        references: (cursor) =>
           request((client) =>
             client.workstreams.references({
               headers: {},
               payload: { limit: 50, ...(cursor === undefined ? {} : { cursor }) },
             }),
           ),
-        ),
-      ]);
-      const contexts: readonly WorkstreamReadContext[] = [
-        memberships.context,
-        declarations.context,
-        edges.context,
-        history.context,
-        references.context,
-      ];
-      if (
-        contexts.some(
-          (context) =>
-            context.owner_id !== detail.context.owner_id ||
-            context.server_generation !== detail.context.server_generation ||
-            context.registry_version !== detail.context.registry_version,
-        )
-      ) {
-        throw new Error("Workstream detail changed while it was loading; reload it.");
-      }
-      return { detail, memberships, declarations, edges, history, references };
+      });
     } catch (cause) {
       generation.current += 1;
       setPlacements(null);
