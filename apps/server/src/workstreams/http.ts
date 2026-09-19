@@ -5,13 +5,6 @@ import {
   EnvironmentHttpApi,
   EnvironmentInternalError,
   T3_PLACEMENT_MAX_REQUEST_BYTES,
-  type WorkstreamDeclarationPage,
-  type WorkstreamDetail,
-  type WorkstreamEdgePage,
-  type WorkstreamHistoryPage,
-  type WorkstreamMembershipPage,
-  type WorkstreamReferenceDetail,
-  type WorkstreamReferencePage,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -159,28 +152,20 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       )
       .handle("detail", (args) =>
         read(args.endpoint.name).pipe(
-          Effect.andThen(
-            internal("detail", gateway.readDetail(args.params.workstreamId)).pipe(
-              Effect.map((value) => value as WorkstreamDetail),
-            ),
-          ),
+          Effect.andThen(internal("detail", gateway.readDetail(args.params.workstreamId))),
         ),
       )
       .handle("references", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            restartable("references", gateway.readReferences(pageInput(args.payload))).pipe(
-              Effect.map((value) => value as WorkstreamReferencePage),
-            ),
+            restartable("references", gateway.readReferences(pageInput(args.payload))),
           ),
         ),
       )
       .handle("reference", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal("reference", gateway.readReference(args.params.nativeReferenceId)).pipe(
-              Effect.map((value) => value as WorkstreamReferenceDetail),
-            ),
+            internal("reference", gateway.readReference(args.params.nativeReferenceId)),
           ),
         ),
       )
@@ -190,7 +175,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
             restartable(
               "memberships",
               gateway.readMemberships(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamMembershipPage)),
+            ),
           ),
         ),
       )
@@ -200,7 +185,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
             restartable(
               "declarations",
               gateway.readDeclarations(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamDeclarationPage)),
+            ),
           ),
         ),
       )
@@ -210,7 +195,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
             restartable(
               "edges",
               gateway.readEdges(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamEdgePage)),
+            ),
           ),
         ),
       )
@@ -220,7 +205,7 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
             restartable(
               "history",
               gateway.readHistory(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamHistoryPage)),
+            ),
           ),
         ),
       )
