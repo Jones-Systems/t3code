@@ -9,6 +9,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "../config.ts";
+import {
+  LEGACY_SERVICE_LAUNCHER_PROTOCOL,
+  SERVICE_LAUNCHER_PROTOCOL,
+} from "../cloud/serviceProtocol.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 import {
   fenceNativeStoreAuthority,
@@ -16,9 +20,10 @@ import {
 } from "./nativeStoreAuthorityPersistence.ts";
 import * as NativeStoreAuthority from "./NativeStoreAuthority.ts";
 
-const authorityLayer = (authorityStateDir: string, environmentId: string) =>
+const authorityLayer = (baseDir: string, authorityStateDir: string, environmentId: string) =>
   Layer.mergeAll(
     Layer.succeed(ServerConfig.ServerConfig, {
+      baseDir,
       authorityStateDir,
     } as ServerConfig.ServerConfig["Service"]),
     Layer.succeed(
@@ -37,10 +42,17 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
     try {
       const authorityStateDir = NodePath.join(root, "authority");
       const environmentId = "environment-layer-test";
+      NodeFS.mkdirSync(NodePath.join(root, "runtime"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(root, "runtime", "service-state.json"),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - launcher-owned test fixture.
+        JSON.stringify({ protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: "1.0.0" }),
+        { mode: 0o600 },
+      );
       const initial = initializeNativeStoreAuthority(authorityStateDir, environmentId);
 
       const authority = yield* NativeStoreAuthority.make().pipe(
-        Effect.provide(authorityLayer(authorityStateDir, environmentId)),
+        Effect.provide(authorityLayer(root, authorityStateDir, environmentId)),
       );
       expect(yield* authority.readCurrent).toEqual({
         environmentId,
@@ -57,6 +69,23 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         ],
         readiness: "ready",
       });
+
+      NodeFS.writeFileSync(
+        NodePath.join(root, "runtime", "service-state.json"),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - launcher-owned test fixture.
+        JSON.stringify({ protocol: LEGACY_SERVICE_LAUNCHER_PROTOCOL, activeVersion: "1.0.0" }),
+        { mode: 0o600 },
+      );
+      expect(authority.trustProvider.readTrustSnapshot()).toEqual({
+        trustedEnvironments: [],
+        readiness: "trust-provider-required",
+      });
+      NodeFS.writeFileSync(
+        NodePath.join(root, "runtime", "service-state.json"),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - launcher-owned test fixture.
+        JSON.stringify({ protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: "1.0.0" }),
+        { mode: 0o600 },
+      );
 
       fenceNativeStoreAuthority(authorityStateDir, environmentId);
       expect((yield* Effect.result(authority.readCurrent))._tag).toBe("Failure");
@@ -79,7 +108,7 @@ it.effect("keeps live placement fail-closed when the native authority is missing
     try {
       const missingAuthority = yield* NativeStoreAuthority.make().pipe(
         Effect.provide(
-          authorityLayer(NodePath.join(root, "missing-authority"), "environment-missing"),
+          authorityLayer(root, NodePath.join(root, "missing-authority"), "environment-missing"),
         ),
       );
       expect(missingAuthority.trustProvider.readTrustSnapshot()).toEqual({
@@ -90,7 +119,7 @@ it.effect("keeps live placement fail-closed when the native authority is missing
       const authorityStatePath = NodePath.join(root, "authority-state");
       NodeFS.writeFileSync(authorityStatePath, "not a directory");
       const authority = yield* NativeStoreAuthority.make().pipe(
-        Effect.provide(authorityLayer(authorityStatePath, "environment-unavailable")),
+        Effect.provide(authorityLayer(root, authorityStatePath, "environment-unavailable")),
       );
       expect(authority.trustProvider.readTrustSnapshot()).toEqual({
         trustedEnvironments: [],

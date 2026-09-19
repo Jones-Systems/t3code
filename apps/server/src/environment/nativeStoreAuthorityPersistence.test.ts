@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
 
+import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
 import {
   advanceNativeStoreAuthority,
   decodeNativeStoreAuthorityState,
@@ -33,10 +34,18 @@ describe("native store authority persistence", () => {
         NodePath.join(root, "userdata", "environment-id"),
         "environment-native-enrollment\n",
       );
-      const state = initializeNativeStoreAuthorityForBaseDir(root);
+      NodeFS.mkdirSync(NodePath.join(root, "runtime"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(root, "runtime", "service-state.json"),
+        JSON.stringify({ protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: "1.0.0" }),
+        { mode: 0o600 },
+      );
+      const state = initializeNativeStoreAuthorityForBaseDir(root, SERVICE_LAUNCHER_PROTOCOL);
       expect(state.environment_id).toBe("environment-native-enrollment");
       expect(state.state).toBe("active");
-      expect(() => initializeNativeStoreAuthorityForBaseDir(root)).not.toThrow();
+      expect(() =>
+        initializeNativeStoreAuthorityForBaseDir(root, SERVICE_LAUNCHER_PROTOCOL),
+      ).not.toThrow();
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

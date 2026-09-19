@@ -24,6 +24,7 @@ export type NativeStoreAuthorityErrorCode =
   | "missing"
   | "corrupt"
   | "fenced"
+  | "launcher_upgrade_required"
   | "environment_mismatch"
   | "generation_regression"
   | "source_unavailable";
@@ -275,11 +276,61 @@ export const fenceNativeStoreAuthorityForBaseDir = (
 /** Explicitly enroll the current T3-owned environment and authority directory. */
 export const initializeNativeStoreAuthorityForBaseDir = (
   baseDir: string,
-): NativeStoreAuthorityState =>
-  initializeNativeStoreAuthority(
+  requiredLauncherProtocol: number,
+): NativeStoreAuthorityState => {
+  requireNativeStoreAuthorityLauncherProtocolForBaseDir(baseDir, requiredLauncherProtocol);
+  const state = initializeNativeStoreAuthority(
     nativeStoreAuthorityStateDirForBaseDir(baseDir),
     readEnvironmentIdForBaseDir(baseDir),
   );
+  if (state.state !== "active") {
+    throw persistenceError(
+      "fenced",
+      "Native authority remains fenced and must be recovered by the service launcher.",
+    );
+  }
+  return state;
+};
+
+export const requireNativeStoreAuthorityLauncherProtocolForBaseDir = (
+  baseDir: string,
+  requiredLauncherProtocol: number,
+): void => {
+  const statePath = NodePath.join(baseDir, "runtime", "service-state.json");
+  let fd: number | undefined;
+  try {
+    fd = NodeFS.openSync(statePath, NodeFS.constants.O_RDONLY | NOFOLLOW);
+    const stat = NodeFS.fstatSync(fd);
+    verifyOwner(stat, statePath);
+    if (!stat.isFile() || (mode(stat) & 0o022) !== 0) {
+      throw persistenceError(
+        "launcher_upgrade_required",
+        "The installed service launcher state is not owner-controlled.",
+      );
+    }
+    const value: unknown = JSON.parse(NodeFS.readFileSync(fd, "utf8"));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("protocol" in value) ||
+      value.protocol !== requiredLauncherProtocol
+    ) {
+      throw persistenceError(
+        "launcher_upgrade_required",
+        "The installed service launcher must be upgraded before native authority can be trusted.",
+      );
+    }
+  } catch (cause) {
+    if (cause instanceof NativeStoreAuthorityPersistenceError) throw cause;
+    throw persistenceError(
+      "launcher_upgrade_required",
+      "The installed service launcher must be upgraded before native authority can be trusted.",
+      cause,
+    );
+  } finally {
+    if (fd !== undefined) NodeFS.closeSync(fd);
+  }
+};
 
 /** Complete a fenced launcher restore and advance the trusted generation. */
 export const advanceNativeStoreAuthorityForBaseDir = (

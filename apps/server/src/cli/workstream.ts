@@ -2,7 +2,11 @@ import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import { Command, GlobalFlag } from "effect/unstable/cli";
 
-import { initializeNativeStoreAuthorityForBaseDir } from "../environment/nativeStoreAuthorityPersistence.ts";
+import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
+import {
+  initializeNativeStoreAuthorityForBaseDir,
+  NativeStoreAuthorityPersistenceError,
+} from "../environment/nativeStoreAuthorityPersistence.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 const authorityEnrollCommand = Command.make("enroll", projectLocationFlags).pipe(
@@ -12,9 +16,18 @@ const authorityEnrollCommand = Command.make("enroll", projectLocationFlags).pipe
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const config = yield* resolveCliAuthConfig(flags, yield* GlobalFlag.LogLevel);
-      const state = yield* Effect.try(() =>
-        initializeNativeStoreAuthorityForBaseDir(config.baseDir),
-      );
+      const state = yield* Effect.try({
+        try: () =>
+          initializeNativeStoreAuthorityForBaseDir(config.baseDir, SERVICE_LAUNCHER_PROTOCOL),
+        catch: (cause) =>
+          cause instanceof NativeStoreAuthorityPersistenceError
+            ? cause
+            : new NativeStoreAuthorityPersistenceError(
+                "source_unavailable",
+                "Native authority enrollment failed.",
+                cause,
+              ),
+      });
       yield* Console.log(
         `Enrolled native workstream placement authority at generation ${state.store_generation}.`,
       );

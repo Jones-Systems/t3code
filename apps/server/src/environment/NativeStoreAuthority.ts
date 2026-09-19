@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "../config.ts";
+import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 import type { T3PlacementTrustProvider } from "../workstreams/WorkstreamGateway.ts";
 import {
@@ -12,6 +13,7 @@ import {
   fenceNativeStoreAuthority,
   initializeNativeStoreAuthority,
   readNativeStoreAuthorityState,
+  requireNativeStoreAuthorityLauncherProtocolForBaseDir,
   NativeStoreAuthorityPersistenceError,
   type NativeStoreAuthorityState,
 } from "./nativeStoreAuthorityPersistence.ts";
@@ -64,17 +66,26 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
   const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const environmentId = yield* identity.getEnvironmentId;
   const authorityStateDir = config.authorityStateDir;
+  const requireSafeLauncher = () =>
+    requireNativeStoreAuthorityLauncherProtocolForBaseDir(
+      config.baseDir,
+      SERVICE_LAUNCHER_PROTOCOL,
+    );
 
   // Enrollment is explicit: a missing or rolled-back authority record is not
   // regenerated here, because doing so could reset the generation high-water
   // mark and accidentally trust a replaced native store.
   const readCurrent: NativeStoreAuthority["Service"]["readCurrent"] = Effect.try({
-    try: () => tupleFromState(readNativeStoreAuthorityState(authorityStateDir), environmentId),
+    try: () => {
+      requireSafeLauncher();
+      return tupleFromState(readNativeStoreAuthorityState(authorityStateDir), environmentId);
+    },
     catch: asPersistenceError,
   });
 
   const readTrustSnapshot: T3PlacementTrustProvider["readTrustSnapshot"] = () => {
     try {
+      requireSafeLauncher();
       return {
         trustedEnvironments: [
           tupleFromState(readNativeStoreAuthorityState(authorityStateDir), environmentId),

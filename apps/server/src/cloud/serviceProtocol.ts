@@ -1,7 +1,8 @@
 import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 
-/** Protocol 2 snapshots SQLite before trials so migrations can be rolled back safely. */
-export const SERVICE_LAUNCHER_PROTOCOL = 2 as const;
+/** Protocol 3 durably phases trials and fences native authority before rollback. */
+export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
+export const LEGACY_SERVICE_LAUNCHER_PROTOCOL = 2 as const;
 export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
 export const SERVICE_LAUNCHER_FILE = "service-launcher.mjs";
 export const SERVICE_STATE_FILE = "service-state.json";
@@ -19,6 +20,8 @@ export interface PendingServiceUpdate {
   readonly phase: "accepted" | "trial-ready";
 }
 
+interface LegacyPendingServiceUpdate extends Omit<PendingServiceUpdate, "phase"> {}
+
 export type ServiceUpdateRecord = PendingServiceUpdate | ServerSelfUpdateOutcome;
 
 export interface ServiceState {
@@ -29,9 +32,9 @@ export interface ServiceState {
 
 /** Context is copied from launcher-owned state when a child is spawned. */
 export interface ServiceLauncherContext {
-  readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL;
+  readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL | typeof LEGACY_SERVICE_LAUNCHER_PROTOCOL;
   readonly childVersion: string;
-  readonly update?: ServiceUpdateRecord;
+  readonly update?: ServiceUpdateRecord | LegacyPendingServiceUpdate;
 }
 
 export type ServiceLauncherChildMessage =
@@ -210,13 +213,19 @@ export function decodeServiceLauncherContext(value: string): ServiceLauncherCont
   }
   if (
     !isRecord(parsed) ||
-    parsed.protocol !== SERVICE_LAUNCHER_PROTOCOL ||
+    (parsed.protocol !== SERVICE_LAUNCHER_PROTOCOL &&
+      parsed.protocol !== LEGACY_SERVICE_LAUNCHER_PROTOCOL) ||
     typeof parsed.childVersion !== "string" ||
     !isExactServiceVersion(parsed.childVersion)
   ) {
     return undefined;
   }
-  const update = parsed.update === undefined ? undefined : decodeServiceUpdate(parsed.update);
+  const update =
+    parsed.update === undefined
+      ? undefined
+      : parsed.protocol === SERVICE_LAUNCHER_PROTOCOL
+        ? decodeServiceUpdate(parsed.update)
+        : decodeLegacyServiceUpdate(parsed.update);
   if (parsed.update !== undefined && update === undefined) return undefined;
   const selectedVersion =
     update?.status === "pending" || update?.status === "committed"
@@ -228,10 +237,28 @@ export function decodeServiceLauncherContext(value: string): ServiceLauncherCont
     return undefined;
   }
   return {
-    protocol: SERVICE_LAUNCHER_PROTOCOL,
+    protocol: parsed.protocol,
     childVersion: parsed.childVersion,
     ...(update === undefined ? {} : { update }),
   };
+}
+
+function decodeLegacyServiceUpdate(
+  value: unknown,
+): ServiceUpdateRecord | LegacyPendingServiceUpdate | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.status !== "pending") return decodeServiceUpdate(value);
+  const { id, fromVersion, targetVersion, dbPath, status } = value;
+  return typeof id === "string" &&
+    id.trim() !== "" &&
+    typeof fromVersion === "string" &&
+    isExactServiceVersion(fromVersion) &&
+    typeof targetVersion === "string" &&
+    isExactServiceVersion(targetVersion) &&
+    typeof dbPath === "string" &&
+    dbPath.trim() !== ""
+    ? { id, fromVersion, targetVersion, dbPath, status }
+    : undefined;
 }
 
 export function decodeServiceLauncherChildMessage(
