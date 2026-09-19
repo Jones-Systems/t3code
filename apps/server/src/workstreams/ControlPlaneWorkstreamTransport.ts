@@ -15,6 +15,7 @@ import {
   WorkstreamReceipt,
   WorkstreamReferenceDetail,
   WorkstreamReferencePage,
+  WorkstreamError,
   type T3WorkstreamBinding,
   T3_PLACEMENT_CONTRACT,
   T3_PLACEMENT_MANIFEST_SHA256,
@@ -33,9 +34,9 @@ const EMPTY_SHA256 = NodeCrypto.createHash("sha256").update("").digest("hex");
 const TIMEOUT_MS = 15_000;
 
 class BoundedTransportFailure extends Error {
-  readonly reason: "invalid_target" | "response_too_large" | "http_error";
+  readonly reason: "invalid_target" | "response_too_large" | "http_error" | "cursor_stale";
 
-  constructor(reason: "invalid_target" | "response_too_large" | "http_error") {
+  constructor(reason: "invalid_target" | "response_too_large" | "http_error" | "cursor_stale") {
     super(reason);
     this.reason = reason;
   }
@@ -190,11 +191,10 @@ async function readBoundedResponse(response: Response): Promise<string> {
     await response.body?.cancel();
     throw new BoundedTransportFailure("response_too_large");
   }
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new BoundedTransportFailure("http_error");
+  if (response.body === null) {
+    if (!response.ok) throw new BoundedTransportFailure("http_error");
+    return "";
   }
-  if (response.body === null) return "";
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let total = 0;
@@ -209,11 +209,23 @@ async function readBoundedResponse(response: Response): Promise<string> {
       }
       body += decoder.decode(chunk.value, { stream: true });
     }
-    return body + decoder.decode();
+    body += decoder.decode();
   } catch (cause) {
     await reader.cancel().catch(() => undefined);
     throw cause;
   }
+  if (!response.ok) {
+    try {
+      const error = Schema.decodeUnknownSync(Schema.fromJsonString(WorkstreamError))(body, {
+        onExcessProperty: "error",
+      });
+      if (error.code === "cursor_stale") throw new BoundedTransportFailure("cursor_stale");
+    } catch (cause) {
+      if (cause instanceof BoundedTransportFailure) throw cause;
+    }
+    throw new BoundedTransportFailure("http_error");
+  }
+  return body;
 }
 
 async function performRequest(input: {

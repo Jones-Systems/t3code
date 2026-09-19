@@ -4,7 +4,7 @@ export const WORKSTREAM_CONTRACT_FAMILY = "workstreams" as const;
 export const WORKSTREAM_CONTRACT_VERSION = "1.0.0" as const;
 export const WORKSTREAM_CONTRACT_HEADER_VERSION = "workstreams/1.0.0" as const;
 export const WORKSTREAM_CONTRACT_MANIFEST_SHA256 =
-  "a03e34613ea1293b579316a21f98d4edd69a19221f9907cf0449e3b4933420dd" as const;
+  "6d8da23d51c1bba024dddc4b8d4dd9a594d2f474affd73e4cc7de508b797f557" as const;
 export const WORKSTREAM_MAX_PAGE_ITEMS = 100;
 export const WORKSTREAM_MAX_RESPONSE_BYTES = 1_048_576;
 

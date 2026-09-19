@@ -141,6 +141,33 @@ it.effect("rejects malformed and over-bound control-plane responses", () =>
   }),
 );
 
+it.effect("preserves a validated cursor-stale response for bounded page restart", () =>
+  Effect.gen(function* () {
+    const configured = makeControlPlaneWorkstreamTransport(
+      activation,
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: "cursor_stale",
+            status: 409,
+            request_id: "request-fixture",
+            recovery: "restart_page",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const failure = yield* configured.transport
+      .listWorkstreams({
+        limit: 50,
+        cursor: "stale-cursor",
+        contractVersion: "workstreams/1.0.0",
+        contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+      })
+      .pipe(Effect.flip);
+    expect(failure.detail).toBe("cursor_stale");
+  }),
+);
+
 it.effect("disables non-HTTPS and header-unsafe activation before transport", () =>
   Effect.gen(function* () {
     let requests = 0;

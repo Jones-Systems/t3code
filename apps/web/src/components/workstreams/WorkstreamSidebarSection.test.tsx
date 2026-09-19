@@ -22,7 +22,7 @@ vi.mock("../../state/workstreams", () => ({
         registryVersion: 11,
         permissions: ["workstreams:read", "workstreams:write"],
         contractVersion: "workstreams/1.0.0",
-        contractManifest: "a03e34613ea1293b579316a21f98d4edd69a19221f9907cf0449e3b4933420dd",
+        contractManifest: "6d8da23d51c1bba024dddc4b8d4dd9a594d2f474affd73e4cc7de508b797f557",
       },
       items: [
         {

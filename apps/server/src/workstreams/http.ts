@@ -1,15 +1,10 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  EnvironmentHttpConflictError,
   EnvironmentHttpApi,
+  EnvironmentInternalError,
   T3_PLACEMENT_MAX_REQUEST_BYTES,
-  type WorkstreamDeclarationPage,
-  type WorkstreamDetail,
-  type WorkstreamEdgePage,
-  type WorkstreamHistoryPage,
-  type WorkstreamMembershipPage,
-  type WorkstreamReferenceDetail,
-  type WorkstreamReferencePage,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -28,14 +23,10 @@ import {
   failEnvironmentInternal,
   requireEnvironmentScope,
 } from "../auth/http.ts";
-import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
-import {
-  WorkstreamGateway,
-  make,
-  type WorkstreamGatewayError,
-  type T3PlacementTrustProvider,
-} from "./WorkstreamGateway.ts";
+import type { T3PlacementTrustProvider } from "../environment/NativePlacementTrust.ts";
 import * as NativeStoreAuthority from "../environment/NativeStoreAuthority.ts";
+import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
+import { WorkstreamGateway, make, type WorkstreamGatewayError } from "./WorkstreamGateway.ts";
 
 export const WORKSTREAM_RESPONSE_HEADERS = {
   "cache-control": "private, no-store",
@@ -98,10 +89,29 @@ export const workstreamGatewayLayerLive = makeWorkstreamGatewayLayerLive().pipe(
   Layer.provide(NativeStoreAuthority.layer),
 );
 
-const internal = <A>(operation: string, effect: Effect.Effect<A, WorkstreamGatewayError>) =>
+const internal = <A>(
+  operation: string,
+  effect: Effect.Effect<A, WorkstreamGatewayError>,
+): Effect.Effect<A, EnvironmentInternalError> =>
   effect.pipe(
     Effect.catch((error) =>
       failEnvironmentInternal("internal_error", { operation, reason: error.reason }),
+    ),
+  );
+
+const restartable = <A>(
+  operation: string,
+  effect: Effect.Effect<A, WorkstreamGatewayError>,
+): Effect.Effect<A, EnvironmentHttpConflictError | EnvironmentInternalError> =>
+  effect.pipe(
+    Effect.catch(
+      (error): Effect.Effect<never, EnvironmentHttpConflictError | EnvironmentInternalError> => {
+        if (error.reason === "cursor-stale")
+          return Effect.fail(
+            new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" }),
+          );
+        return failEnvironmentInternal("internal_error", { operation, reason: error.reason });
+      },
     ),
   );
 
@@ -133,73 +143,65 @@ export const workstreamHttpApiLayer = HttpApiBuilder.group(
       )
       .handle("list", (args) =>
         read(args.endpoint.name).pipe(
-          Effect.andThen(internal("list", gateway.readMetadata(pageInput(args.payload)))),
+          Effect.andThen(restartable("list", gateway.readMetadata(pageInput(args.payload)))),
         ),
       )
       .handle("detail", (args) =>
         read(args.endpoint.name).pipe(
-          Effect.andThen(
-            internal("detail", gateway.readDetail(args.params.workstreamId)).pipe(
-              Effect.map((value) => value as WorkstreamDetail),
-            ),
-          ),
+          Effect.andThen(internal("detail", gateway.readDetail(args.params.workstreamId))),
         ),
       )
       .handle("references", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal("references", gateway.readReferences(pageInput(args.payload))).pipe(
-              Effect.map((value) => value as WorkstreamReferencePage),
-            ),
+            restartable("references", gateway.readReferences(pageInput(args.payload))),
           ),
         ),
       )
       .handle("reference", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal("reference", gateway.readReference(args.params.nativeReferenceId)).pipe(
-              Effect.map((value) => value as WorkstreamReferenceDetail),
-            ),
+            internal("reference", gateway.readReference(args.params.nativeReferenceId)),
           ),
         ),
       )
       .handle("memberships", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "memberships",
               gateway.readMemberships(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamMembershipPage)),
+            ),
           ),
         ),
       )
       .handle("declarations", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "declarations",
               gateway.readDeclarations(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamDeclarationPage)),
+            ),
           ),
         ),
       )
       .handle("edges", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "edges",
               gateway.readEdges(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamEdgePage)),
+            ),
           ),
         ),
       )
       .handle("history", (args) =>
         read(args.endpoint.name).pipe(
           Effect.andThen(
-            internal(
+            restartable(
               "history",
               gateway.readHistory(args.params.workstreamId, pageInput(args.payload)),
-            ).pipe(Effect.map((value) => value as WorkstreamHistoryPage)),
+            ),
           ),
         ),
       )
