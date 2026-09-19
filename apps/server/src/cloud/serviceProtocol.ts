@@ -16,6 +16,7 @@ export interface PendingServiceUpdate {
   readonly targetVersion: string;
   readonly dbPath: string;
   readonly status: "pending";
+  readonly phase: "accepted" | "trial-ready";
 }
 
 export type ServiceUpdateRecord = PendingServiceUpdate | ServerSelfUpdateOutcome;
@@ -85,8 +86,10 @@ export function decodeServiceUpdate(value: unknown): ServiceUpdateRecord | undef
     return undefined;
   }
   if (status === "pending") {
-    return typeof value.dbPath === "string" && value.dbPath.trim() !== ""
-      ? { id, fromVersion, targetVersion, dbPath: value.dbPath, status }
+    return typeof value.dbPath === "string" &&
+      value.dbPath.trim() !== "" &&
+      (value.phase === "accepted" || value.phase === "trial-ready")
+      ? { id, fromVersion, targetVersion, dbPath: value.dbPath, status, phase: value.phase }
       : undefined;
   }
   if (

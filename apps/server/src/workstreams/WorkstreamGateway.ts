@@ -136,9 +136,10 @@ export interface WorkstreamGatewayOptions {
 
 // Only an independently supplied T3 authority may provide native store trust; the registry response cannot.
 export interface T3PlacementTrustProvider {
-  readonly readTrustedEnvironments: () => readonly TrustedT3PlacementEnvironment[];
-  /** False keeps placement fail-closed when the native authority is missing or fenced. */
-  readonly isReady?: () => boolean;
+  readonly readTrustSnapshot: () => {
+    readonly trustedEnvironments: readonly TrustedT3PlacementEnvironment[];
+    readonly readiness: "ready" | "trust-provider-required";
+  };
 }
 
 export class WorkstreamGateway extends Context.Service<
@@ -475,14 +476,19 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
       if (!finalPage) return yield* invalid("Placement page workload exceeded.");
       if (items.some((item) => Date.parse(item.expires_at) <= now()))
         return yield* invalid("Placement expired while loading.");
-      const trustedEnvironments = yield* Effect.try({
-        try: () => options.placementTrustProvider?.readTrustedEnvironments() ?? [],
+      const trustSnapshot = yield* Effect.try({
+        try: () =>
+          options.placementTrustProvider?.readTrustSnapshot() ?? {
+            trustedEnvironments: [],
+            readiness: "trust-provider-required" as const,
+          },
         catch: () =>
           new WorkstreamGatewayError({
             reason: "invalid-response",
             detail: "Native trust provider unavailable.",
           }),
       });
+      const { trustedEnvironments, readiness } = trustSnapshot;
       if (
         new Set(trustedEnvironments.map((value) => value.environmentId)).size !==
         trustedEnvironments.length
@@ -495,10 +501,7 @@ export const make = (transport: WorkstreamTransport, options: WorkstreamGatewayO
       const result = {
         page: { ...finalPage, items, next_cursor: null },
         trustedEnvironments,
-        readiness:
-          (options.placementTrustProvider?.isReady?.() ?? Boolean(options.placementTrustProvider))
-            ? ("ready" as const)
-            : ("trust-provider-required" as const),
+        readiness,
       };
       if (Buffer.byteLength(canonicalJson(result)) > WORKSTREAM_MAX_RESPONSE_BYTES)
         return yield* invalid("Placement response workload exceeded.");

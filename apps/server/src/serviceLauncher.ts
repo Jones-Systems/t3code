@@ -159,18 +159,13 @@ async function restoreDatabaseBackup(
 ): Promise<void> {
   validateDatabasePathForBaseDir(baseDir, pending.dbPath);
   const backupDir = databaseBackupDir(baseDir, pending.id);
-
-  // A trusted native placement must be fenced before any database restore.
-  // Older installations without the follow-on authority have no trusted
-  // placement state and retain the existing rollback behavior.
-  const fencedAuthority = fenceNativeStoreAuthorityForBaseDir(baseDir);
   if (!(await pathExists(backupDir))) {
-    if (fencedAuthority !== null) {
-      throw new Error("Cannot rollback while the native database backup is missing.");
-    }
-    return;
+    throw new Error("Cannot rollback while the native database backup is missing.");
   }
+  // Persist restore intent before fencing so recovery cannot restart or commit
+  // a trial while the native authority remains fenced.
   await markDatabaseRestorePending(backupDir);
+  fenceNativeStoreAuthorityForBaseDir(baseDir);
   for (const suffix of DB_FILE_SUFFIXES) {
     const target = `${pending.dbPath}${suffix}`;
     const source = databaseBackupFile(backupDir, suffix);
@@ -390,33 +385,66 @@ export class Launcher {
       await this.#startChild(this.#state.activeVersion, "active", update);
       return;
     }
+    if (update.phase === "accepted") {
+      if (!(await runtimeExists(this.#baseDir, update.targetVersion))) {
+        await this.#finishWithoutTrial(update, "target-runtime-missing");
+        return;
+      }
+      await this.#startTrial(update);
+      return;
+    }
     if (await databaseRestorePending(this.#baseDir, update)) {
       await this.#returnToPrevious(update, "failed", "rollback-interrupted");
       return;
+    }
+    if (!(await pathExists(databaseBackupDir(this.#baseDir, update.id)))) {
+      fenceNativeStoreAuthorityForBaseDir(this.#baseDir);
+      throw new Error("Cannot recover a trial-ready update without its database backup.");
     }
     if (!(await runtimeExists(this.#baseDir, update.targetVersion))) {
       await this.#returnToPrevious(update, "failed", "target-runtime-missing");
       return;
     }
-    // The pending record is written before backup creation. Until the trial
-    // child starts, a missing backup is therefore known no-effect state;
-    // #startTrial creates the complete backup before spawning that child.
     await this.#startTrial(update);
   }
 
   async #startTrial(pending: PendingServiceUpdate): Promise<void> {
-    // The previous child is dead here, so all three SQLite files are quiescent.
-    try {
-      await backupDatabaseOnce(this.#baseDir, pending);
-    } catch {
-      await this.#returnToPrevious(pending, "failed", "db-backup-failed");
-      return;
+    if (pending.phase === "accepted") {
+      // The previous child is dead here, so all three SQLite files are quiescent.
+      try {
+        await backupDatabaseOnce(this.#baseDir, pending);
+      } catch {
+        await this.#finishWithoutTrial(pending, "db-backup-failed");
+        return;
+      }
+    } else if (!(await pathExists(databaseBackupDir(this.#baseDir, pending.id)))) {
+      throw new Error("Cannot start a trial-ready update without its database backup.");
+    }
+    let trialReady = pending;
+    if (pending.phase === "accepted") {
+      trialReady = { ...pending, phase: "trial-ready" };
+      const next: ServiceState = { ...this.#state, update: trialReady };
+      await writeServiceState(this.#statePath, next);
+      this.#state = next;
     }
     try {
-      await this.#startChild(pending.targetVersion, "trial", pending);
+      await this.#startChild(trialReady.targetVersion, "trial", trialReady);
     } catch {
-      await this.#returnToPrevious(pending, "failed", "candidate-start-failed");
+      await this.#returnToPrevious(trialReady, "failed", "candidate-start-failed");
     }
+  }
+
+  async #finishWithoutTrial(pending: PendingServiceUpdate, reason: string): Promise<void> {
+    const outcome = terminalUpdate({ pending, status: "failed", reason });
+    const next: ServiceState = {
+      ...this.#state,
+      activeVersion: pending.fromVersion,
+      update: outcome,
+    };
+    await writeServiceState(this.#statePath, next);
+    this.#state = next;
+    await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
+    await this.#startChild(next.activeVersion, "active", outcome);
   }
 
   async #startChild(version: string, role: ChildRole, update?: ServiceUpdateRecord): Promise<void> {
@@ -527,6 +555,7 @@ export class Launcher {
       targetVersion: message.targetVersion,
       dbPath: message.dbPath,
       status: "pending",
+      phase: "accepted",
     };
     const next: ServiceState = { ...this.#state, update: pending };
     await writeServiceState(this.#statePath, next);

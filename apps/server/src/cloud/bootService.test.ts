@@ -328,6 +328,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           targetVersion: "1.2.4",
           dbPath: "/tmp/state.sqlite",
           status: "pending",
+          phase: "trial-ready",
         },
       });
       yield* fs.writeFileString(statePath, pendingState);
@@ -496,6 +497,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           fromVersion: "1.2.3",
           targetVersion: "1.2.4",
           status: "pending",
+          phase: "trial-ready",
         },
       });
       yield* fs.writeFileString(statePath, pendingState);
@@ -654,6 +656,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           fromVersion: "1.2.3",
           targetVersion: "1.2.4",
           status: "pending",
+          phase: "trial-ready",
         },
       });
       yield* fs.writeFileString(statePath, pendingState);

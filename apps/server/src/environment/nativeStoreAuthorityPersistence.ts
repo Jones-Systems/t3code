@@ -272,6 +272,15 @@ export const fenceNativeStoreAuthorityForBaseDir = (
   return fenceNativeStoreAuthority(authorityStateDir, readEnvironmentIdForBaseDir(baseDir));
 };
 
+/** Explicitly enroll the current T3-owned environment and authority directory. */
+export const initializeNativeStoreAuthorityForBaseDir = (
+  baseDir: string,
+): NativeStoreAuthorityState =>
+  initializeNativeStoreAuthority(
+    nativeStoreAuthorityStateDirForBaseDir(baseDir),
+    readEnvironmentIdForBaseDir(baseDir),
+  );
+
 /** Complete a fenced launcher restore and advance the trusted generation. */
 export const advanceNativeStoreAuthorityForBaseDir = (
   baseDir: string,

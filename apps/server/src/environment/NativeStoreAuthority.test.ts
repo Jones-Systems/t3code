@@ -47,18 +47,23 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         authorityNamespace: initial.authority_namespace,
         storeGeneration: initial.store_generation,
       });
-      expect(authority.trustProvider.readTrustedEnvironments()).toEqual([
-        {
-          environmentId,
-          authorityNamespace: initial.authority_namespace,
-          storeGeneration: initial.store_generation,
-        },
-      ]);
+      expect(authority.trustProvider.readTrustSnapshot()).toEqual({
+        trustedEnvironments: [
+          {
+            environmentId,
+            authorityNamespace: initial.authority_namespace,
+            storeGeneration: initial.store_generation,
+          },
+        ],
+        readiness: "ready",
+      });
 
       fenceNativeStoreAuthority(authorityStateDir, environmentId);
       expect((yield* Effect.result(authority.readCurrent))._tag).toBe("Failure");
-      expect(authority.trustProvider.readTrustedEnvironments()).toEqual([]);
-      expect(authority.trustProvider.isReady?.()).toBe(false);
+      expect(authority.trustProvider.readTrustSnapshot()).toEqual({
+        trustedEnvironments: [],
+        readiness: "trust-provider-required",
+      });
       expect(initial.authority_namespace).toMatch(/^t3-native:/);
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
@@ -77,16 +82,20 @@ it.effect("keeps live placement fail-closed when the native authority is missing
           authorityLayer(NodePath.join(root, "missing-authority"), "environment-missing"),
         ),
       );
-      expect(missingAuthority.trustProvider.readTrustedEnvironments()).toEqual([]);
-      expect(missingAuthority.trustProvider.isReady?.()).toBe(false);
+      expect(missingAuthority.trustProvider.readTrustSnapshot()).toEqual({
+        trustedEnvironments: [],
+        readiness: "trust-provider-required",
+      });
 
       const authorityStatePath = NodePath.join(root, "authority-state");
       NodeFS.writeFileSync(authorityStatePath, "not a directory");
       const authority = yield* NativeStoreAuthority.make().pipe(
         Effect.provide(authorityLayer(authorityStatePath, "environment-unavailable")),
       );
-      expect(authority.trustProvider.readTrustedEnvironments()).toEqual([]);
-      expect(authority.trustProvider.isReady?.()).toBe(false);
+      expect(authority.trustProvider.readTrustSnapshot()).toEqual({
+        trustedEnvironments: [],
+        readiness: "trust-provider-required",
+      });
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

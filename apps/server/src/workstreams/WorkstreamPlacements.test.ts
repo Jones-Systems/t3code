@@ -8,7 +8,6 @@ import {
   T3_PLACEMENT_ROUTE,
   t3PlacementInventoryJson,
   type T3PlacementIdentity,
-  type T3PlacementRequest,
   type T3ThreadPlacement,
   type T3PlacementPage,
 } from "@t3tools/contracts";
@@ -134,7 +133,9 @@ it.effect("defaults to empty native trust and permits independent server injecti
     const injected = yield* make(transport, {
       binding,
       now: () => now,
-      placementTrustProvider: { readTrustedEnvironments: () => trustedEnvironments },
+      placementTrustProvider: {
+        readTrustSnapshot: () => ({ trustedEnvironments, readiness: "ready" }),
+      },
     });
     expect((yield* injected.readThreadPlacements({ identities })).trustedEnvironments).toEqual(
       trustedEnvironments,
@@ -152,8 +153,10 @@ it.effect("keeps placement fail-closed when the independent native authority is 
       binding,
       now: () => now,
       placementTrustProvider: {
-        readTrustedEnvironments: () => [],
-        isReady: () => false,
+        readTrustSnapshot: () => ({
+          trustedEnvironments: [],
+          readiness: "trust-provider-required",
+        }),
       },
     });
     const result = yield* gateway.readThreadPlacements({ identities });

@@ -73,20 +73,23 @@ export const make = Effect.fn("NativeStoreAuthority.make")(function* () {
     catch: asPersistenceError,
   });
 
-  const currentOrEmpty = (): readonly TrustedT3PlacementEnvironment[] => {
+  const readTrustSnapshot: T3PlacementTrustProvider["readTrustSnapshot"] = () => {
     try {
-      return [tupleFromState(readNativeStoreAuthorityState(authorityStateDir), environmentId)];
+      return {
+        trustedEnvironments: [
+          tupleFromState(readNativeStoreAuthorityState(authorityStateDir), environmentId),
+        ],
+        readiness: "ready",
+      };
     } catch {
-      return [];
+      return { trustedEnvironments: [], readiness: "trust-provider-required" };
     }
   };
-  const isReady = (): boolean => currentOrEmpty().length === 1;
 
   return NativeStoreAuthority.of({
     readCurrent,
     trustProvider: {
-      readTrustedEnvironments: currentOrEmpty,
-      isReady,
+      readTrustSnapshot,
     },
   });
 });

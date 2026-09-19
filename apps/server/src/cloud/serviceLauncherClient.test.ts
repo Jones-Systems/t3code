@@ -56,6 +56,7 @@ it.effect("waits for the launcher to durably commit the trial update ID", () =>
       targetVersion: "1.1.0",
       dbPath: "/tmp/state.sqlite",
       status: "pending" as const,
+      phase: "trial-ready" as const,
     };
     const host = new FakeLauncherProcess({
       protocol: SERVICE_LAUNCHER_PROTOCOL,
@@ -130,6 +131,7 @@ it.effect("rejects contradictory trial context instead of leaving activation clo
         targetVersion: "1.2.0",
         dbPath: "/tmp/state.sqlite",
         status: "pending",
+        phase: "trial-ready",
       },
     });
     const error = yield* makeClient(host, "1.1.0").pipe(Effect.flip);

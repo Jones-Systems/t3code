@@ -10,6 +10,7 @@ import {
   decodeNativeStoreAuthorityState,
   fenceNativeStoreAuthority,
   initializeNativeStoreAuthority,
+  initializeNativeStoreAuthorityForBaseDir,
   nativeStoreAuthorityPaths,
   readNativeStoreAuthorityState,
 } from "./nativeStoreAuthorityPersistence.ts";
@@ -24,6 +25,23 @@ const withDirectory = (run: (directory: string) => void): void => {
 };
 
 describe("native store authority persistence", () => {
+  it("enrolls only from the persisted T3 environment identity", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-enroll-test-"));
+    try {
+      NodeFS.mkdirSync(NodePath.join(root, "userdata"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(root, "userdata", "environment-id"),
+        "environment-native-enrollment\n",
+      );
+      const state = initializeNativeStoreAuthorityForBaseDir(root);
+      expect(state.environment_id).toBe("environment-native-enrollment");
+      expect(state.state).toBe("active");
+      expect(() => initializeNativeStoreAuthorityForBaseDir(root)).not.toThrow();
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates one private authority and advances only after a durable fence", () => {
     withDirectory((authorityStateDir) => {
       const environmentId = "environment-native-authority";
