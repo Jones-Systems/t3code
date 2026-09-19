@@ -3062,6 +3062,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     requireSession(threadId).pipe(
       Effect.flatMap((session) =>
         Effect.gen(function* () {
+          // Stop owns goal pausing; recovery/new-input helpers call the
+          // raw runtime interrupt and must remain goal-neutral.
+          yield* session.runtime.pauseActiveGoal.pipe(Effect.ignore);
           let effectiveTurnId = turnId;
           let shouldInterrupt = true;
           let terminal: Deferred.Deferred<void> | undefined;

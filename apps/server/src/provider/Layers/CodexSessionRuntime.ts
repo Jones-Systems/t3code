@@ -201,6 +201,7 @@ export interface CodexSessionRuntimeShape {
     CodexSessionRuntimeError
   >;
   readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly pauseActiveGoal: Effect.Effect<void>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
@@ -2306,9 +2307,27 @@ export const makeCodexSessionRuntime = (
       yield* Queue.shutdown(events);
     });
 
+    const pauseActiveGoal = Effect.gen(function* () {
+      // User-facing Stop pauses the persisted goal before interrupting its
+      // child fleet or root turn. Internal recovery and containment paths use
+      // interruptTurn directly so they never change goal state implicitly.
+      const providerThreadId = yield* readProviderThreadId;
+      const { goal } = yield* client.request("thread/goal/get", {
+        threadId: providerThreadId,
+      });
+      if (goal?.status !== "active") {
+        return;
+      }
+      yield* client.request("thread/goal/set", {
+        threadId: providerThreadId,
+        status: "paused",
+      });
+    }).pipe(Effect.timeoutOption("1 second"), Effect.ignore);
+
     return {
       start,
       getSession: Ref.get(sessionRef),
+      pauseActiveGoal,
       compactThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         yield* client.request("thread/compact/start", { threadId: providerThreadId });
@@ -2402,7 +2421,6 @@ export const makeCodexSessionRuntime = (
       interruptTurn: (turnId) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          const session = yield* Ref.get(sessionRef);
           // Stop-everything: children are full threads with their own turns;
           // interrupting only the parent leaves the fleet running. Interrupt
           // each live child turn first, best-effort per child, BOUNDED: the
@@ -2423,7 +2441,10 @@ export const makeCodexSessionRuntime = (
                 .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
             { concurrency: 8, discard: true },
           ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
-          const effectiveTurnId = turnId ?? session.activeTurnId;
+          // Resolve an omitted id only after child interruption has yielded. A
+          // queued follow-up can otherwise replace the active id during that
+          // wait; an explicit id remains authoritative for recovery callers.
+          const effectiveTurnId = turnId ?? (yield* Ref.get(sessionRef)).activeTurnId;
           if (!effectiveTurnId) {
             return;
           }

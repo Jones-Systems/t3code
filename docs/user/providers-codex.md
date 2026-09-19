@@ -55,6 +55,15 @@ Sending a new message or interrupting the turn cancels a pending retry. T3 Code 
 instead of replaying when Codex cannot confirm what happened, when the session closes, or when a
 fallback selection is unavailable.
 
+## Stop a goal
+
+Selecting **Stop** pauses an active native Codex goal before interrupting the current turn and
+its sub-agents. This prevents the goal from immediately starting another continuation. Stop
+also pauses the goal when an automatic capacity retry is waiting to start.
+
+If Codex cannot read or pause the goal, T3 Code still interrupts the turn. The goal may remain
+active in that case. Threads without an active goal keep their ordinary Stop behavior.
+
 ## Sub-agent models
 
 The web and desktop Agents panel shows each sub-agent's model and reasoning effort when Codex

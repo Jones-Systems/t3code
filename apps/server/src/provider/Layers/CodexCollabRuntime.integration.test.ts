@@ -9,6 +9,7 @@
  */
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -644,6 +645,222 @@ describe("CodexSessionRuntime collab integration", () => {
         turnId: activeTurnId,
       });
 
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("pauses an active goal and keeps it paused across a runtime restart", () =>
+    Effect.gen(function* () {
+      const scratchRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-goal-"));
+      const uniqueScriptPath = NodePath.join(scratchRoot, "script.json");
+      const restartedScriptPath = NodePath.join(scratchRoot, "restarted-script.json");
+      const goalStatePath = NodePath.join(scratchRoot, "goal.json");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scratchRoot, { recursive: true, force: true });
+        }),
+      );
+      const script = {
+        rootThreadId: ROOT,
+        holdTurnOpen: true,
+        turnIds: ["goal-stop-first", "goal-stop-restart"],
+        goalStatus: "active",
+        goalStatePath,
+        recordControlRequests: true,
+        notifications: [],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(uniqueScriptPath, JSON.stringify(script), "utf8");
+      NodeFS.writeFileSync(
+        restartedScriptPath,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        JSON.stringify({ ...script, goalStatus: undefined, turnIds: ["goal-stop-restart"] }),
+        "utf8",
+      );
+
+      const stopRuntime = (threadId: string, scriptPath: string, interruptFirst = false) =>
+        Effect.gen(function* () {
+          const runtime = yield* makeCodexSessionRuntime({
+            threadId: ThreadId.make(threadId),
+            binaryPath: peerPath,
+            cwd: NodeOS.tmpdir(),
+            runtimeMode: "full-access",
+            environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+          });
+          yield* runtime.start();
+          yield* runtime.sendTurn({ input: "keep working" });
+          if (interruptFirst) yield* runtime.interruptTurn();
+          yield* runtime.pauseActiveGoal;
+          yield* runtime.interruptTurn();
+          yield* runtime.close;
+        }).pipe(Effect.scoped);
+
+      yield* stopRuntime("thread-goal-stop-first", uniqueScriptPath);
+      yield* stopRuntime("thread-goal-stop-restarted", restartedScriptPath, true);
+
+      const readControlRequests = (controlPath: string) =>
+        NodeFS.readFileSync(controlPath, "utf8")
+          .trim()
+          .split("\n")
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                method?: string;
+                params?: { threadId?: string; turnId?: string; status?: string };
+              },
+          );
+      const controlRequests = [
+        ...readControlRequests(`${uniqueScriptPath}.control`),
+        ...readControlRequests(`${restartedScriptPath}.control`),
+      ];
+      assert.deepEqual(controlRequests, [
+        { method: "thread/goal/get", params: { threadId: ROOT } },
+        { method: "thread/goal/set", params: { threadId: ROOT, status: "paused" } },
+        { method: "turn/interrupt", params: { threadId: ROOT, turnId: "goal-stop-first" } },
+        { method: "turn/interrupt", params: { threadId: ROOT, turnId: "goal-stop-restart" } },
+        { method: "thread/goal/get", params: { threadId: ROOT } },
+        { method: "turn/interrupt", params: { threadId: ROOT, turnId: "goal-stop-restart" } },
+      ]);
+      const decodeGoalState = Schema.decodeUnknownSync(
+        Schema.fromJsonString(Schema.Struct({ status: Schema.String })),
+      );
+      assert.deepEqual(decodeGoalState(NodeFS.readFileSync(goalStatePath, "utf8")), {
+        status: "paused",
+      });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("keeps Stop interruptible when goal control errors or hangs", () =>
+    Effect.gen(function* () {
+      const scratchRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-goal-"));
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scratchRoot, { recursive: true, force: true });
+        }),
+      );
+      const cases = [
+        { name: "absent", goalStatus: undefined },
+        { name: "paused", goalStatus: "paused" },
+        { name: "get-error", failGoalGet: true },
+        { name: "get-hang", hangGoalGet: true },
+        { name: "set-error", failGoalSet: true },
+        { name: "set-hang", hangGoalSet: true },
+      ] as const;
+
+      for (const goalCase of cases) {
+        const caseRoot = NodeFS.mkdtempSync(NodePath.join(scratchRoot, `${goalCase.name}-`));
+        const uniqueScriptPath = NodePath.join(caseRoot, "script.json");
+        const controlPath = `${uniqueScriptPath}.control`;
+        const interruptsPath = `${uniqueScriptPath}.interrupts`;
+        const script = {
+          rootThreadId: ROOT,
+          holdTurnOpen: true,
+          goalStatus: "active",
+          recordControlRequests: true,
+          notifications: [],
+          ...goalCase,
+        };
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        NodeFS.writeFileSync(uniqueScriptPath, JSON.stringify(script), "utf8");
+
+        yield* Effect.gen(function* () {
+          const runtime = yield* makeCodexSessionRuntime({
+            threadId: ThreadId.make(`thread-goal-${goalCase.name}`),
+            binaryPath: peerPath,
+            cwd: NodeOS.tmpdir(),
+            runtimeMode: "full-access",
+            environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: uniqueScriptPath },
+          });
+          yield* runtime.start();
+          yield* runtime.sendTurn({ input: "keep working" });
+          yield* runtime.pauseActiveGoal;
+          yield* runtime.interruptTurn();
+          yield* runtime.close;
+        }).pipe(Effect.scoped);
+
+        const interrupts = NodeFS.readFileSync(interruptsPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { threadId?: string });
+        assert.isTrue(interrupts.some((entry) => entry.threadId === ROOT));
+        assert.deepEqual(
+          NodeFS.readFileSync(controlPath, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { method?: string })
+            .map((entry) => entry.method),
+          goalCase.name === "set-error" || goalCase.name === "set-hang"
+            ? ["thread/goal/get", "thread/goal/set", "turn/interrupt"]
+            : ["thread/goal/get", "turn/interrupt"],
+        );
+        NodeFS.rmSync(caseRoot, { recursive: true, force: true });
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("resolves an omitted root turn id after child interruption yields", () =>
+    Effect.gen(function* () {
+      const scratchRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-race-"));
+      const uniqueScriptPath = NodePath.join(scratchRoot, "script.json");
+      const interruptsPath = `${uniqueScriptPath}.interrupts`;
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scratchRoot, { recursive: true, force: true });
+        }),
+      );
+      const childTurnStarted = wireFixture.notifications.find((entry) => {
+        return (
+          entry.method === "turn/started" &&
+          (entry.params as { threadId?: string }).threadId === CHILD_A
+        );
+      });
+      assert.isDefined(childTurnStarted);
+      const activeTurnId = "race-active-turn";
+      const queuedTurnId = "race-current-turn";
+      const script = {
+        rootThreadId: ROOT,
+        holdTurnOpen: true,
+        turnIds: [activeTurnId],
+        hangInterruptFor: CHILD_A,
+        turnStartedOnInterrupt: { threadId: CHILD_A, turnId: queuedTurnId },
+        notifications: [capturedStartedActivity(CHILD_A), childTurnStarted],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(uniqueScriptPath, JSON.stringify(script), "utf8");
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-codex-stop-race"),
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: uniqueScriptPath },
+      });
+      const childStarted = yield* runtime.events.pipe(
+        Stream.filter(
+          (event) =>
+            event.method === "collabAgent/turnStarted" &&
+            (event.payload as { agentThreadId?: string }).agentThreadId === CHILD_A,
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "keep working" });
+      yield* Fiber.join(childStarted);
+      yield* runtime.interruptTurn();
+
+      const interrupts = NodeFS.readFileSync(interruptsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { threadId?: string; turnId?: string });
+      assert.deepEqual(interrupts, [
+        {
+          threadId: CHILD_A,
+          turnId: (childTurnStarted.params as { turn: { id: string } }).turn.id,
+        },
+        { threadId: ROOT, turnId: queuedTurnId },
+      ]);
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

@@ -95,6 +95,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     Promise.resolve(undefined),
   );
 
+  public readonly pauseActiveGoalImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
+
   public readonly readThreadImpl = vi.fn((): Promise<CodexThreadSnapshot> =>
     Promise.resolve({
       threadId: "provider-thread-1",
@@ -148,6 +150,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   interruptTurn(turnId?: TurnId) {
     return Effect.promise(() => this.interruptTurnImpl(turnId));
   }
+
+  pauseActiveGoal = Effect.promise(() => this.pauseActiveGoalImpl());
 
   readThread = Effect.promise(() => this.readThreadImpl());
 
@@ -703,6 +707,108 @@ function availableCodexModel(
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("pauses the active goal before a user-facing interrupt", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const callOrder: Array<string> = [];
+      runtime.pauseActiveGoalImpl.mockImplementation(() => {
+        callOrder.push("pause-goal");
+        return Promise.resolve(undefined);
+      });
+      runtime.interruptTurnImpl.mockImplementation((turnId) => {
+        callOrder.push(`interrupt:${turnId ?? "omitted"}`);
+        return Promise.resolve(undefined);
+      });
+
+      yield* adapter.interruptTurn(asThreadId("thread-1"));
+
+      NodeAssert.deepStrictEqual(callOrder, ["pause-goal", "interrupt:omitted"]);
+    }),
+  );
+
+  it.effect("pauses the active goal when Stop cancels sleeping capacity recovery", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const drainFiber = yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkChild);
+      const initial = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      yield* runtime.emit(capacityErrorEvent("stop-sleeping-error", initial.turnId));
+      yield* runtime.emit(turnCompletedEvent("stop-sleeping-completed", initial.turnId));
+      yield* TestClock.adjust("1 second");
+      yield* Effect.yieldNow;
+
+      runtime.pauseActiveGoalImpl.mockClear();
+      runtime.interruptTurnImpl.mockClear();
+      yield* adapter.interruptTurn(asThreadId("thread-1"));
+
+      NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 0);
+      yield* Fiber.interrupt(drainFiber);
+    }),
+  );
+
+  it.effect(
+    "pauses the goal while a capacity continuation is starting and contains its late turn",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const drainFiber = yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkChild);
+        const initial = yield* adapter.sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "keep working",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "medium" },
+          ]),
+          attachments: [],
+        });
+        let markStarting = () => {};
+        const starting = new Promise<void>((resolve) => {
+          markStarting = resolve;
+        });
+        let releaseStart = (_result: ProviderTurnStartResult) => {};
+        const pendingStart = new Promise<ProviderTurnStartResult>((resolve) => {
+          releaseStart = resolve;
+        });
+        let markInterrupted = () => {};
+        const interrupted = new Promise<void>((resolve) => {
+          markInterrupted = resolve;
+        });
+        runtime.sendTurnImpl.mockImplementation(() => {
+          markStarting();
+          return pendingStart;
+        });
+        runtime.interruptTurnImpl.mockImplementation(() => {
+          markInterrupted();
+          return Promise.resolve(undefined);
+        });
+        yield* runtime.emit(capacityErrorEvent("stop-starting-error", initial.turnId));
+        yield* runtime.emit(turnCompletedEvent("stop-starting-completed", initial.turnId));
+        yield* TestClock.adjust("15 seconds");
+        yield* Effect.promise(() => starting);
+
+        yield* adapter.interruptTurn(asThreadId("thread-1"));
+        NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
+        NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 0);
+        const retryTurnId = asTurnId("stop-starting-late-turn");
+        releaseStart({ threadId: asThreadId("thread-1"), turnId: retryTurnId });
+        yield* Effect.promise(() => interrupted);
+        NodeAssert.equal(runtime.interruptTurnImpl.mock.calls[0]?.[0], retryTurnId);
+        yield* runtime.emit(
+          turnCompletedEvent("stop-starting-interrupted", retryTurnId, "interrupted"),
+        );
+        yield* TestClock.adjust("5 minutes");
+        NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+        NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
+        yield* Fiber.interrupt(drainFiber);
+      }),
+  );
+
   it.effect(
     "retries a terminal Sol medium capacity failure as a promptless logical continuation",
     () =>
@@ -1236,6 +1342,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       );
       yield* Fiber.join(explicitFiber);
       NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 3);
+      NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 0);
       yield* Fiber.interrupt(drainFiber);
     }),
   );
@@ -1280,6 +1387,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       NodeAssert.equal(exit._tag, "Failure");
       NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 1);
       NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+      NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 0);
       NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), true);
       yield* Fiber.interrupt(drainFiber);
     }),
