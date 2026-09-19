@@ -328,6 +328,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           targetVersion: "1.2.4",
           dbPath: "/tmp/state.sqlite",
           status: "pending",
+          phase: "trial-ready",
         },
       });
       yield* fs.writeFileString(statePath, pendingState);
@@ -436,6 +437,26 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
+  it.effect("upgrades a settled legacy launcher before native authority can be enrolled", () =>
+    Effect.gen(function* () {
+      const { service, fs, statePath } = yield* makeHarness();
+      const plan = yield* service.install();
+      yield* fs.writeFileString(
+        statePath,
+        `{"protocol":${SERVICE_LAUNCHER_PROTOCOL - 1},"activeVersion":"1.2.3"}`,
+      );
+      yield* fs.writeFileString(plan.launcherPath, "// legacy launcher\n");
+
+      yield* service.install();
+
+      expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
+        activeVersion: "1.2.3",
+      });
+      expect(yield* fs.readFileString(plan.launcherPath)).toBe("export {};\n");
+    }),
+  );
+
   it.effect("repairs versions with equal SemVer precedence without an override", () =>
     Effect.gen(function* () {
       const { service, fs, statePath } = yield* makeHarness();
@@ -496,6 +517,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           fromVersion: "1.2.3",
           targetVersion: "1.2.4",
           status: "pending",
+          phase: "trial-ready",
         },
       });
       yield* fs.writeFileString(statePath, pendingState);
@@ -654,6 +676,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           fromVersion: "1.2.3",
           targetVersion: "1.2.4",
           status: "pending",
+          phase: "trial-ready",
         },
       });
       yield* fs.writeFileString(statePath, pendingState);

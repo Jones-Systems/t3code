@@ -1139,6 +1139,11 @@ const buildAppUnderTest = (options?: {
       }),
       Layer.provideMerge(makeAuthTestLayer()),
       Layer.provideMerge(ServerSecretStore.layer),
+      Layer.provideMerge(
+        Layer.mock(ServerEnvironment.ServerEnvironmentIdentity)({
+          getEnvironmentId: Effect.succeed(testEnvironmentDescriptor.environmentId),
+        }),
+      ),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provide(VcsProcess.layer),
