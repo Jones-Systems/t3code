@@ -19,12 +19,44 @@ import {
   buildTurnStartParams,
   describeMcpElicitation,
   hasConfiguredMcpServer,
+  isCodexModelSelectionAvailable,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("isCodexModelSelectionAvailable", () => {
+  const model = {
+    id: "sol",
+    model: "gpt-5.6-sol",
+    displayName: "Sol",
+    description: "Sol",
+    hidden: false,
+    isDefault: true,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: [
+      { reasoningEffort: "medium", description: "Medium" },
+      { reasoningEffort: "high", description: "High" },
+    ],
+  } satisfies EffectCodexSchema.V2ModelListResponse__Model;
+
+  it("requires the exact advertised model slug and effort", () => {
+    NodeAssert.equal(
+      isCodexModelSelectionAvailable([model], { model: "gpt-5.6-sol", effort: "high" }),
+      true,
+    );
+    NodeAssert.equal(
+      isCodexModelSelectionAvailable([model], { model: "sol", effort: "high" }),
+      false,
+    );
+    NodeAssert.equal(
+      isCodexModelSelectionAvailable([model], { model: "gpt-5.6-sol", effort: "xhigh" }),
+      false,
+    );
+  });
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {
