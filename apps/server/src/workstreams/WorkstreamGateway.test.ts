@@ -1,7 +1,9 @@
 import * as NodeCrypto from "node:crypto";
 
 import { expect, it } from "@effect/vitest";
+import { WorkstreamDetail, WorkstreamReferenceDetail } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import {
   WORKSTREAM_CONTRACT_HEADER_VERSION,
@@ -112,6 +114,31 @@ it.effect("rejects a receipt attributed to another principal", () =>
     );
     const error = yield* gateway.submit(updateCommand()).pipe(Effect.flip);
     expect(error.reason).toBe("invalid-response");
+  }),
+);
+
+it.effect("returns schema-valid typed detail and reference fixtures", () =>
+  Effect.gen(function* () {
+    const transport = makeSyntheticWorkstreamTransport();
+    const contract = {
+      contractVersion: WORKSTREAM_CONTRACT_HEADER_VERSION,
+      contractManifest: WORKSTREAM_CONTRACT_MANIFEST_SHA256,
+    } as const;
+    const rawDetail = yield* transport.getWorkstream({ ...contract, workstreamId: "ws-core-v1" });
+    const rawReference = yield* transport.getReference({
+      ...contract,
+      nativeReferenceId: "reference-fixture",
+    });
+    yield* Schema.decodeUnknownEffect(WorkstreamDetail)(rawDetail);
+    yield* Schema.decodeUnknownEffect(WorkstreamReferenceDetail)(rawReference);
+
+    const gateway = yield* make(transport, { binding });
+    const detail = yield* gateway.readDetail("ws-core-v1");
+    const reference = yield* gateway.readReference("reference-fixture");
+
+    expect(detail.workstream.workstream_id).toBe("ws-core-v1");
+    expect(reference.reference.native_reference_id).toBe("reference-fixture");
+    expect(reference.reference.registration.state).toBe("verification-pending");
   }),
 );
 

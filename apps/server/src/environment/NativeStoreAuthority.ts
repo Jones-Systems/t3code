@@ -6,8 +6,8 @@ import * as Layer from "effect/Layer";
 import * as ServerConfig from "../config.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
-import type { T3PlacementTrustProvider } from "../workstreams/WorkstreamGateway.ts";
 import { nativeStoreAuthorityBaseDirFingerprint } from "./nativeStoreAuthorityPath.ts";
+import type { T3PlacementTrustProvider } from "./NativePlacementTrust.ts";
 import {
   advanceNativeStoreAuthority,
   decodeNativeStoreAuthorityState,
