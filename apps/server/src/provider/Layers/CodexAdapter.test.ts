@@ -34,6 +34,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
+import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -86,6 +87,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   public readonly compactThread = Effect.void;
 
+  public readonly listModelsImpl = vi.fn(
+    (): Promise<ReadonlyArray<EffectCodexSchema.V2ModelListResponse__Model>> => Promise.resolve([]),
+  );
+
   public readonly interruptTurnImpl = vi.fn((_turnId?: TurnId): Promise<void> =>
     Promise.resolve(undefined),
   );
@@ -134,6 +139,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
     return Effect.promise(() => this.sendTurnImpl(input));
+  }
+
+  get listModels() {
+    return Effect.promise(() => this.listModelsImpl());
   }
 
   interruptTurn(turnId?: TurnId) {
@@ -597,7 +606,685 @@ function startLifecycleRuntime() {
   });
 }
 
+function capacityErrorEvent(
+  id: string,
+  turnId: TurnId,
+  options?: {
+    readonly willRetry?: boolean;
+    readonly codexErrorInfo?: "serverOverloaded" | "other";
+  },
+): ProviderEvent {
+  return {
+    id: asEventId(id),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    threadId: asThreadId("thread-1"),
+    createdAt: "2026-01-01T00:00:00.000Z",
+    method: "error",
+    turnId,
+    payload: {
+      threadId: "thread-1",
+      turnId,
+      error: {
+        message: options?.codexErrorInfo === "other" ? "Different failure" : "Server overloaded",
+        codexErrorInfo: options?.codexErrorInfo ?? "serverOverloaded",
+      },
+      willRetry: options?.willRetry ?? false,
+    },
+  };
+}
+
+function turnStartedEvent(id: string, turnId: TurnId): ProviderEvent {
+  return {
+    id: asEventId(id),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    threadId: asThreadId("thread-1"),
+    createdAt: "2026-01-01T00:00:00.000Z",
+    method: "turn/started",
+    turnId,
+    payload: {
+      threadId: "thread-1",
+      turn: { id: turnId, status: "inProgress", items: [] },
+    },
+  };
+}
+
+function turnCompletedEvent(
+  id: string,
+  turnId: TurnId,
+  status: "completed" | "failed" | "interrupted" = "failed",
+  codexErrorInfo: "serverOverloaded" | "other" = "serverOverloaded",
+): ProviderEvent {
+  return {
+    id: asEventId(id),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    threadId: asThreadId("thread-1"),
+    createdAt: "2026-01-01T00:00:01.000Z",
+    method: "turn/completed",
+    turnId,
+    payload: {
+      threadId: "thread-1",
+      turn: {
+        id: turnId,
+        status,
+        items: [],
+        ...(status === "failed"
+          ? {
+              error: {
+                message: codexErrorInfo === "other" ? "Different failure" : "Server overloaded",
+                codexErrorInfo,
+              },
+            }
+          : {}),
+      },
+    },
+  };
+}
+
+function availableCodexModel(
+  model: string,
+  supportedReasoningEfforts: ReadonlyArray<"medium" | "high">,
+): EffectCodexSchema.V2ModelListResponse__Model {
+  return {
+    id: model,
+    model,
+    displayName: model,
+    description: model,
+    hidden: false,
+    isDefault: false,
+    defaultReasoningEffort: supportedReasoningEfforts[0] ?? "medium",
+    supportedReasoningEfforts: supportedReasoningEfforts.map((reasoningEffort) => ({
+      reasoningEffort,
+      description: reasoningEffort,
+    })),
+  };
+}
+
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "retries a terminal Sol medium capacity failure as a promptless logical continuation",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        let turnNumber = 0;
+        runtime.sendTurnImpl.mockImplementation(() =>
+          Promise.resolve({
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId(`capacity-turn-${turnNumber++}`),
+          }),
+        );
+
+        const started = yield* adapter.sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "keep working",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "medium" },
+          ]),
+          attachments: [],
+        });
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.eventId.includes("capacity-")),
+          Stream.take(4),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* runtime.emit({
+          id: asEventId("capacity-error"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "error",
+          turnId: started.turnId,
+          payload: {
+            threadId: "thread-1",
+            turnId: started.turnId,
+            error: { message: "Server overloaded", codexErrorInfo: "serverOverloaded" },
+            willRetry: false,
+          },
+        });
+        yield* runtime.emit({
+          id: asEventId("capacity-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: "turn/completed",
+          turnId: started.turnId,
+          payload: {
+            threadId: "thread-1",
+            turn: {
+              id: started.turnId,
+              status: "failed",
+              items: [],
+              error: { message: "Server overloaded", codexErrorInfo: "serverOverloaded" },
+            },
+          },
+        });
+
+        yield* TestClock.adjust("14 seconds");
+        NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        yield* TestClock.adjust("1 second");
+        yield* Effect.yieldNow;
+        NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+        NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[1]?.[0], {
+          model: "gpt-5.6-sol",
+          effort: "medium",
+        });
+
+        const retryTurnId = asTurnId("capacity-turn-1");
+        yield* runtime.emit({
+          id: asEventId("capacity-retry-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:16.000Z",
+          method: "turn/completed",
+          turnId: retryTurnId,
+          payload: {
+            threadId: "thread-1",
+            turn: { id: retryTurnId, status: "completed", items: [] },
+          },
+        });
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        NodeAssert.deepStrictEqual(
+          events.map((event) => event.type),
+          ["runtime.warning", "runtime.warning", "runtime.warning", "turn.completed"],
+        );
+        const completed = events.at(-1);
+        NodeAssert.equal(completed?.turnId, started.turnId);
+        NodeAssert.equal(completed?.providerRefs?.providerTurnId, retryTurnId);
+      }),
+  );
+
+  it.effect("leaves willRetry capacity handling to the native Codex runtime", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      runtime.sendTurnImpl.mockClear();
+      const started = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.eventId === asEventId("native-retry-completed")),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("native-retry-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "error",
+        turnId: started.turnId,
+        payload: {
+          threadId: "thread-1",
+          turnId: started.turnId,
+          error: { message: "Native retry", codexErrorInfo: "serverOverloaded" },
+          willRetry: true,
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("native-retry-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/completed",
+        turnId: started.turnId,
+        payload: {
+          threadId: "thread-1",
+          turn: {
+            id: started.turnId,
+            status: "failed",
+            items: [],
+            error: { message: "Server overloaded", codexErrorInfo: "serverOverloaded" },
+          },
+        },
+      });
+      yield* TestClock.adjust("5 minutes");
+
+      const completed = yield* Fiber.join(completedFiber);
+      NodeAssert.equal(completed._tag, "Some");
+      if (completed._tag === "Some") NodeAssert.equal(completed.value.type, "turn.completed");
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("buffers initial and continuation events until each turn/start response binds", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const drainFiber = yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkChild);
+      const resolvers: Array<(result: ProviderTurnStartResult) => void> = [];
+      runtime.sendTurnImpl.mockImplementation(
+        () => new Promise((resolve) => resolvers.push(resolve)),
+      );
+
+      const initialFiber = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "keep working",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "medium" },
+          ]),
+          attachments: [],
+        })
+        .pipe(Effect.forkChild);
+      while (resolvers.length < 1) yield* Effect.yieldNow;
+      const initialTurnId = asTurnId("race-initial");
+      yield* runtime.emit(turnStartedEvent("race-initial-started", initialTurnId));
+      yield* runtime.emit(capacityErrorEvent("race-initial-error", initialTurnId));
+      yield* runtime.emit(turnCompletedEvent("race-initial-completed", initialTurnId));
+      yield* Effect.yieldNow;
+      resolvers[0]?.({ threadId: asThreadId("thread-1"), turnId: initialTurnId });
+      const initial = yield* Fiber.join(initialFiber);
+      NodeAssert.equal(initial.turnId, initialTurnId);
+
+      yield* TestClock.adjust("15 seconds");
+      while (resolvers.length < 2) yield* Effect.yieldNow;
+      const continuationTurnId = asTurnId("race-continuation");
+      yield* runtime.emit(turnStartedEvent("race-continuation-started", continuationTurnId));
+      yield* runtime.emit(capacityErrorEvent("race-continuation-error", continuationTurnId));
+      yield* runtime.emit(turnCompletedEvent("race-continuation-completed", continuationTurnId));
+      yield* Effect.yieldNow;
+      resolvers[1]?.({ threadId: asThreadId("thread-1"), turnId: continuationTurnId });
+      yield* Effect.yieldNow;
+
+      yield* TestClock.adjust("14 seconds");
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+      yield* TestClock.adjust("1 second");
+      while (resolvers.length < 3) yield* Effect.yieldNow;
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 3);
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[1]?.[0], {
+        model: "gpt-5.6-sol",
+        effort: "medium",
+      });
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[2]?.[0], {
+        model: "gpt-5.6-sol",
+        effort: "medium",
+      });
+      resolvers[2]?.({
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("race-continuation-2"),
+      });
+      yield* Fiber.interrupt(drainFiber);
+    }),
+  );
+
+  it.effect("rejects a late initial turn/start response after the session is stopped", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const resolvers: Array<(result: ProviderTurnStartResult) => void> = [];
+      runtime.sendTurnImpl.mockImplementation(
+        () => new Promise((resolve) => resolvers.push(resolve)),
+      );
+      const sendFiber = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "keep working",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "medium" },
+          ]),
+          attachments: [],
+        })
+        .pipe(Effect.forkChild);
+      while (resolvers.length < 1) yield* Effect.yieldNow;
+      yield* adapter.stopSession(asThreadId("thread-1"));
+      resolvers[0]?.({ threadId: asThreadId("thread-1"), turnId: asTurnId("late-initial") });
+      const exit = yield* Fiber.await(sendFiber);
+      NodeAssert.equal(exit._tag, "Failure");
+      NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), false);
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("closes the session when an initial turn/start outcome remains unknown", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      runtime.sendTurnImpl.mockImplementation(() => new Promise(() => undefined));
+      const sendFiber = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "keep working",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "medium" },
+          ]),
+          attachments: [],
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("30 seconds");
+      const exit = yield* Fiber.await(sendFiber);
+      NodeAssert.equal(exit._tag, "Failure");
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), false);
+    }),
+  );
+
+  it.effect("publishes one buffered session exit and rejects its late start response", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const resolvers: Array<(result: ProviderTurnStartResult) => void> = [];
+      runtime.sendTurnImpl.mockImplementation(
+        () => new Promise((resolve) => resolvers.push(resolve)),
+      );
+      const exitEventFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "session.exited"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const sendFiber = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "keep working",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "medium" },
+          ]),
+          attachments: [],
+        })
+        .pipe(Effect.forkChild);
+      while (resolvers.length < 1) yield* Effect.yieldNow;
+      yield* runtime.emit({
+        id: asEventId("exit-during-start"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "session/exited",
+        message: "provider exited",
+      });
+      resolvers[0]?.({ threadId: asThreadId("thread-1"), turnId: asTurnId("late-after-exit") });
+      const sendExit = yield* Fiber.await(sendFiber);
+      NodeAssert.equal(sendExit._tag, "Failure");
+      const exitEvents = Array.from(yield* Fiber.join(exitEventFiber));
+      NodeAssert.equal(exitEvents.length, 1);
+      NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), false);
+    }),
+  );
+
+  it.effect("keeps absolute retry offsets when a failed attempt has nonzero latency", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const drainFiber = yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkChild);
+      let turnNumber = 0;
+      runtime.sendTurnImpl.mockImplementation(() =>
+        Promise.resolve({
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(`latency-turn-${turnNumber++}`),
+        }),
+      );
+      const initial = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      yield* runtime.emit(capacityErrorEvent("latency-initial-error", initial.turnId));
+      yield* runtime.emit(turnCompletedEvent("latency-initial-completed", initial.turnId));
+      yield* TestClock.adjust("15 seconds");
+      yield* Effect.yieldNow;
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+
+      yield* TestClock.adjust("5 seconds");
+      const retryTurnId = asTurnId("latency-turn-1");
+      yield* runtime.emit(capacityErrorEvent("latency-retry-error", retryTurnId));
+      yield* runtime.emit(turnCompletedEvent("latency-retry-completed", retryTurnId));
+      yield* TestClock.adjust("9 seconds");
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+      yield* TestClock.adjust("1 second");
+      yield* Effect.yieldNow;
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 3);
+      yield* Fiber.interrupt(drainFiber);
+    }),
+  );
+
+  it.effect("runs the complete advertised fallback chain and stops after sixty continuations", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      let turnNumber = 0;
+      runtime.sendTurnImpl.mockImplementation(() =>
+        Promise.resolve({
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(`full-chain-turn-${turnNumber++}`),
+        }),
+      );
+      runtime.listModelsImpl.mockResolvedValue([
+        availableCodexModel("gpt-5.6-sol", ["medium", "high"]),
+        availableCodexModel("gpt-6-astra", ["medium"]),
+      ]);
+      const exhaustedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.eventId.includes(":exhausted")),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      let currentTurnId = (yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      })).turnId;
+      yield* runtime.emit(capacityErrorEvent("full-chain-initial-error", currentTurnId));
+      yield* runtime.emit(turnCompletedEvent("full-chain-initial-completed", currentTurnId));
+
+      const stages = [
+        { model: "gpt-5.6-sol", effort: "medium" },
+        { model: "gpt-5.6-sol", effort: "high" },
+        { model: "gpt-6-astra", effort: "medium" },
+      ] as const;
+      let callIndex = 1;
+      for (const stage of stages) {
+        for (let attempt = 1; attempt <= 20; attempt += 1) {
+          yield* TestClock.adjust("15 seconds");
+          yield* Effect.yieldNow;
+          NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[callIndex]?.[0], stage);
+          currentTurnId = asTurnId(`full-chain-turn-${callIndex}`);
+          yield* runtime.emit(capacityErrorEvent(`full-chain-error-${callIndex}`, currentTurnId));
+          yield* runtime.emit(
+            turnCompletedEvent(`full-chain-completed-${callIndex}`, currentTurnId),
+          );
+          callIndex += 1;
+        }
+      }
+
+      const exhausted = yield* Fiber.join(exhaustedFiber);
+      NodeAssert.equal(exhausted._tag, "Some");
+      if (exhausted._tag === "Some") NodeAssert.equal(exhausted.value.type, "runtime.error");
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 61);
+      NodeAssert.equal(runtime.listModelsImpl.mock.calls.length, 2);
+      yield* TestClock.adjust("5 minutes");
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 61);
+    }),
+  );
+
+  it.effect("fails visibly when a terminal capacity error never receives completion", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const initial = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.eventId.includes("watchdog-error")),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* runtime.emit(capacityErrorEvent("watchdog-error", initial.turnId));
+      yield* TestClock.adjust("40 seconds");
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["runtime.warning", "runtime.error"],
+      );
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), false);
+    }),
+  );
+
+  it.effect("passes through a noncapacity retry error and its logical completion", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      let turnNumber = 0;
+      runtime.sendTurnImpl.mockImplementation(() =>
+        Promise.resolve({
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(`noncapacity-turn-${turnNumber++}`),
+        }),
+      );
+      const initial = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      yield* runtime.emit(capacityErrorEvent("noncapacity-initial-error", initial.turnId));
+      yield* runtime.emit(turnCompletedEvent("noncapacity-initial-completed", initial.turnId));
+      yield* TestClock.adjust("15 seconds");
+      yield* Effect.yieldNow;
+
+      const retryTurnId = asTurnId("noncapacity-turn-1");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.eventId.includes("noncapacity-retry")),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* runtime.emit(
+        capacityErrorEvent("noncapacity-retry-error", retryTurnId, {
+          codexErrorInfo: "other",
+        }),
+      );
+      yield* runtime.emit(
+        turnCompletedEvent("noncapacity-retry-completed", retryTurnId, "failed", "other"),
+      );
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["runtime.error", "turn.completed"],
+      );
+      NodeAssert.ok(events.every((event) => event.turnId === initial.turnId));
+      NodeAssert.ok(events.every((event) => event.providerRefs?.providerTurnId === retryTurnId));
+      yield* TestClock.adjust("5 minutes");
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+    }),
+  );
+
+  it.effect("interrupts an active recovery turn before accepting newer explicit input", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const drainFiber = yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkChild);
+      let turnNumber = 0;
+      runtime.sendTurnImpl.mockImplementation(() =>
+        Promise.resolve({
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(`cancel-turn-${turnNumber++}`),
+        }),
+      );
+      const initial = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      yield* runtime.emit(capacityErrorEvent("cancel-initial-error", initial.turnId));
+      yield* runtime.emit(turnCompletedEvent("cancel-initial-completed", initial.turnId));
+      yield* TestClock.adjust("15 seconds");
+      yield* Effect.yieldNow;
+      const recoveryTurnId = asTurnId("cancel-turn-1");
+
+      const explicitFiber = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "new direction",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "high" },
+          ]),
+          attachments: [],
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+
+      NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtime.interruptTurnImpl.mock.calls[0]?.[0], recoveryTurnId);
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+      yield* runtime.emit(
+        turnCompletedEvent("cancel-recovery-completed", recoveryTurnId, "failed", "other"),
+      );
+      yield* Fiber.join(explicitFiber);
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 3);
+      yield* Fiber.interrupt(drainFiber);
+    }),
+  );
+
+  it.effect("rejects newer input when recovery interruption is not confirmed", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const drainFiber = yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkChild);
+      let turnNumber = 0;
+      runtime.sendTurnImpl.mockImplementation(() =>
+        Promise.resolve({
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(`unconfirmed-turn-${turnNumber++}`),
+        }),
+      );
+      const initial = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      yield* runtime.emit(capacityErrorEvent("unconfirmed-error", initial.turnId));
+      yield* runtime.emit(turnCompletedEvent("unconfirmed-completed", initial.turnId));
+      yield* TestClock.adjust("15 seconds");
+      yield* Effect.yieldNow;
+
+      const explicitFiber = yield* adapter
+        .sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "new direction",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+            { id: "reasoningEffort", value: "high" },
+          ]),
+          attachments: [],
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("10 seconds");
+      const exit = yield* Fiber.await(explicitFiber);
+      NodeAssert.equal(exit._tag, "Failure");
+      NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+      NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), true);
+      yield* Fiber.interrupt(drainFiber);
+    }),
+  );
+
   it.effect("carries child model metadata through every task event", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

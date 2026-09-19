@@ -43,6 +43,18 @@ Your answers are sent as a new message. They reach the current turn while Codex 
 start a new turn if it has finished. Unanswered questions stay available after you reconnect.
 This works in the web, desktop, and mobile apps. Codex must support async questions.
 
+## Automatic capacity recovery
+
+If a turn started with Sol at medium reasoning and Codex reports terminal server-capacity pressure,
+T3 Code keeps the failure visible and continues the same turn automatically. It retries the same
+selection up to 20 times at 15-second intervals, then tries Sol at high reasoning and Astra at
+medium reasoning when Codex advertises those exact selections. Each selection gets the same bounded
+retry window.
+
+Sending a new message or interrupting the turn cancels a pending retry. T3 Code stops recovery
+instead of replaying when Codex cannot confirm what happened, when the session closes, or when a
+fallback selection is unavailable.
+
 ## Sub-agent models
 
 The web and desktop Agents panel shows each sub-agent's model and reasoning effort when Codex

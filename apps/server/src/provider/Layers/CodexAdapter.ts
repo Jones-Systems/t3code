@@ -28,16 +28,20 @@ import {
   type RuntimeTaskUsage,
   ProviderApprovalDecision,
   ThreadId,
+  type TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
+import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -63,11 +67,22 @@ import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   describeMcpElicitation,
+  isCodexModelSelectionAvailable,
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
+  type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
+import {
+  CODEX_CAPACITY_RECOVERY_STAGES,
+  bindCodexCapacityRecoveryNativeTurn,
+  beginCodexCapacityRecovery,
+  isCodexCapacityRecoveryEligible,
+  nextCodexCapacityRecoveryAttempt,
+  type CodexCapacityRecoveryDecision,
+  type CodexCapacityRecoveryState,
+} from "./CodexCapacityRecovery.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
@@ -77,6 +92,7 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
+const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -99,8 +115,71 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  readonly nativeToLogicalTurnIds: Map<TurnId, TurnId>;
+  readonly containedRecoveryNativeTurnIds: Set<TurnId>;
+  readonly sendSemaphore: Semaphore.Semaphore;
+  readonly controlSemaphore: Semaphore.Semaphore;
+  pendingTurnStart?: CodexPendingTurnStart;
+  capacityRecovery?: CodexAdapterCapacityRecovery;
+  generation: number;
   stopped: boolean;
 }
+
+type ScheduledCapacityAttempt = Extract<
+  CodexCapacityRecoveryDecision,
+  { readonly _tag: "schedule" }
+>;
+
+type CodexCapacityRecoveryPhase =
+  | { readonly _tag: "active"; readonly nativeTurnId: TurnId }
+  | {
+      readonly _tag: "awaiting-completion";
+      readonly nativeTurnId: TurnId;
+      readonly watchdogFiber: Fiber.Fiber<void, never>;
+    }
+  | {
+      readonly _tag: "sleeping";
+      readonly decision: ScheduledCapacityAttempt;
+      readonly dueAtMillis: number;
+      readonly source: ProviderEvent;
+      readonly fiber: Fiber.Fiber<void, never>;
+    }
+  | {
+      readonly _tag: "starting";
+      readonly decision: ScheduledCapacityAttempt;
+      readonly dueAtMillis: number;
+      readonly source: ProviderEvent;
+      cancelRequested: boolean;
+    }
+  | {
+      readonly _tag: "containing";
+      readonly nativeTurnId: TurnId;
+      readonly terminal: Deferred.Deferred<void>;
+    };
+
+interface CodexAdapterCapacityRecovery {
+  state: CodexCapacityRecoveryState;
+  terminalCapacitySignaled: boolean;
+  stageEpochMillis?: number;
+  phase: CodexCapacityRecoveryPhase;
+  lastSource?: ProviderEvent;
+  readonly continuationInput: Pick<
+    CodexSessionRuntimeSendTurnInput,
+    "interactionMode" | "serviceTier"
+  >;
+}
+
+interface CodexPendingTurnStart {
+  readonly kind: "initial" | "recovery";
+  readonly bufferedEvents: Array<ProviderEvent>;
+  readonly generation: number;
+  bufferedBytes: number;
+}
+
+const CODEX_TURN_START_TIMEOUT = "30 seconds";
+const CODEX_INTERRUPT_CONFIRM_TIMEOUT = "10 seconds";
+const CODEX_PENDING_START_EVENT_LIMIT = 64;
+const CODEX_PENDING_START_BYTE_LIMIT = 256 * 1024;
 
 function mapCodexRuntimeError(
   threadId: ThreadId,
@@ -2011,6 +2090,628 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
+  const emitCapacityRecoveryEvent = (
+    source: ProviderEvent,
+    logicalTurnId: TurnId,
+    suffix: string,
+    type: "runtime.warning" | "runtime.error" | "turn.completed",
+    payload: ProviderRuntimeEvent["payload"],
+  ) =>
+    Queue.offer(runtimeEventQueue, {
+      ...runtimeEventBase(source, source.threadId),
+      eventId: EventId.make(`${source.id}:capacity-recovery:${suffix}`),
+      turnId: logicalTurnId,
+      type,
+      payload,
+    } as ProviderRuntimeEvent).pipe(Effect.asVoid);
+
+  const cleanupNativeTurn = (session: CodexAdapterSessionContext, nativeTurnId: TurnId) =>
+    Effect.sync(() => {
+      session.nativeToLogicalTurnIds.delete(nativeTurnId);
+      session.containedRecoveryNativeTurnIds.delete(nativeTurnId);
+    });
+
+  const finishCapacityRecoveryWithError = Effect.fn("finishCapacityRecoveryWithError")(function* (
+    session: CodexAdapterSessionContext,
+    source: ProviderEvent,
+    message: string,
+    containNativeTurn: boolean,
+  ) {
+    const recovery = session.capacityRecovery;
+    if (!recovery) return;
+    const logicalTurnId = recovery.state.logicalTurnId;
+    const nativeTurnId = recovery.state.currentNativeTurnId;
+    delete session.capacityRecovery;
+    if (containNativeTurn) {
+      session.containedRecoveryNativeTurnIds.add(nativeTurnId);
+    } else {
+      yield* cleanupNativeTurn(session, nativeTurnId);
+    }
+    yield* emitCapacityRecoveryEvent(source, logicalTurnId, "terminal-error", "runtime.error", {
+      message,
+      class: "provider_error",
+    });
+    yield* emitCapacityRecoveryEvent(
+      source,
+      logicalTurnId,
+      "terminal-completed",
+      "turn.completed",
+      {
+        state: "failed",
+        errorMessage: message,
+      },
+    );
+  });
+
+  const boundedInterrupt = (session: CodexAdapterSessionContext, nativeTurnId: TurnId) =>
+    session.runtime
+      .interruptTurn(nativeTurnId)
+      .pipe(Effect.timeoutOption("5 seconds"), Effect.ignore);
+
+  const emitSessionContainmentError = (
+    session: CodexAdapterSessionContext,
+    source: ProviderEvent,
+    message: string,
+  ) =>
+    Queue.offer(runtimeEventQueue, {
+      ...runtimeEventBase(source, session.threadId),
+      eventId: EventId.make(`${source.id}:capacity-recovery:session-contained`),
+      type: "runtime.error",
+      payload: { message, class: "provider_error" },
+    } as ProviderRuntimeEvent).pipe(Effect.asVoid);
+
+  const containSessionUnlocked = Effect.fn("containSessionUnlocked")(function* (
+    session: CodexAdapterSessionContext,
+    source: ProviderEvent,
+    message: string,
+  ) {
+    if (session.stopped) return false;
+    session.stopped = true;
+    session.generation += 1;
+    sessions.delete(session.threadId);
+    const recovery = session.capacityRecovery;
+    if (recovery?.phase._tag === "sleeping") {
+      yield* Fiber.interrupt(recovery.phase.fiber).pipe(Effect.ignore);
+    }
+    if (recovery?.phase._tag === "awaiting-completion") {
+      yield* Fiber.interrupt(recovery.phase.watchdogFiber).pipe(Effect.ignore);
+    }
+    if (recovery?.phase._tag === "containing") {
+      yield* Deferred.succeed(recovery.phase.terminal, undefined).pipe(Effect.ignore);
+    }
+    delete session.pendingTurnStart;
+    yield* emitSessionContainmentError(session, source, message);
+    return true;
+  });
+
+  const closeContainedSession = (
+    session: CodexAdapterSessionContext,
+    source: ProviderEvent,
+    message: string,
+  ) =>
+    session.controlSemaphore
+      .withPermits(1)(containSessionUnlocked(session, source, message))
+      .pipe(
+        Effect.flatMap((shouldClose) =>
+          shouldClose ? session.runtime.close.pipe(Effect.ignore) : Effect.void,
+        ),
+      );
+
+  const interruptAndAwaitTerminal = Effect.fn("interruptAndAwaitTerminal")(function* (
+    session: CodexAdapterSessionContext,
+    nativeTurnId: TurnId,
+    terminal: Deferred.Deferred<void>,
+  ) {
+    const interrupt = yield* session.runtime
+      .interruptTurn(nativeTurnId)
+      .pipe(Effect.timeoutOption("5 seconds"), Effect.result);
+    if (interrupt._tag === "Failure" || interrupt.success._tag === "None") return false;
+    const confirmed = yield* Deferred.await(terminal).pipe(
+      Effect.timeoutOption(CODEX_INTERRUPT_CONFIRM_TIMEOUT),
+    );
+    return confirmed._tag === "Some";
+  });
+
+  const processProviderEventUnlocked: (
+    session: CodexAdapterSessionContext,
+    event: ProviderEvent,
+  ) => Effect.Effect<void> = Effect.fn("processProviderEventUnlocked")(function* (session, event) {
+    const pending = session.pendingTurnStart;
+    if (
+      pending &&
+      (event.turnId !== undefined ||
+        event.method === "session/closed" ||
+        event.method === "session/exited")
+    ) {
+      const eventBytes = Buffer.byteLength(encodeUnknownJsonString(event), "utf8");
+      if (
+        pending.bufferedEvents.length >= CODEX_PENDING_START_EVENT_LIMIT ||
+        pending.bufferedBytes + eventBytes > CODEX_PENDING_START_BYTE_LIMIT
+      ) {
+        const shouldClose = yield* containSessionUnlocked(
+          session,
+          event,
+          "Codex session closed because unresolved turn/start events exceeded the bounded reconciliation buffer.",
+        );
+        if (shouldClose) yield* session.runtime.close.pipe(Effect.ignore);
+        return;
+      }
+      pending.bufferedEvents.push(event);
+      pending.bufferedBytes += eventBytes;
+      return;
+    }
+
+    const nativeTurnId = event.turnId;
+    if (nativeTurnId && session.containedRecoveryNativeTurnIds.has(nativeTurnId)) {
+      if (event.method === "turn/completed") {
+        yield* cleanupNativeTurn(session, nativeTurnId);
+      }
+      return;
+    }
+
+    const logicalTurnId = nativeTurnId
+      ? session.nativeToLogicalTurnIds.get(nativeTurnId)
+      : undefined;
+    let suppress = false;
+    const recovery = session.capacityRecovery;
+
+    if (
+      recovery &&
+      nativeTurnId === recovery.state.currentNativeTurnId &&
+      (recovery.phase._tag === "active" || recovery.phase._tag === "awaiting-completion")
+    ) {
+      if (event.method === "turn/started" && recovery.state.attempt > 0) {
+        suppress = true;
+      } else if (event.method === "error") {
+        const payload = readPayload(EffectCodexSchema.V2ErrorNotification, event.payload);
+        if (payload?.willRetry) {
+          recovery.terminalCapacitySignaled = false;
+        } else if (payload?.error.codexErrorInfo === "serverOverloaded") {
+          recovery.terminalCapacitySignaled = true;
+          recovery.lastSource = event;
+          if (recovery.phase._tag === "awaiting-completion") {
+            suppress = true;
+            return;
+          }
+          const stage = CODEX_CAPACITY_RECOVERY_STAGES[recovery.state.stageIndex]!;
+          if (recovery.state.attempt === 0) {
+            yield* emitCapacityRecoveryEvent(
+              event,
+              recovery.state.logicalTurnId,
+              "initial-capacity",
+              "runtime.warning",
+              {
+                message: `Codex reported terminal server capacity pressure for the initial turn using ${stage.model}/${stage.effort}; waiting up to 30 seconds for its matching completion before recovery starts.`,
+                detail: event.payload,
+              },
+            );
+          }
+          const watchedTurnId = recovery.state.currentNativeTurnId;
+          const watchdogFiber = yield* Effect.gen(function* () {
+            yield* Effect.sleep("30 seconds");
+            let containment: Deferred.Deferred<void> | undefined;
+            yield* session.controlSemaphore.withPermits(1)(
+              Effect.gen(function* () {
+                const current = session.capacityRecovery;
+                if (
+                  current !== recovery ||
+                  current.phase._tag !== "awaiting-completion" ||
+                  current.phase.nativeTurnId !== watchedTurnId
+                ) {
+                  return;
+                }
+                containment = yield* Deferred.make<void>();
+                current.phase = {
+                  _tag: "containing",
+                  nativeTurnId: watchedTurnId,
+                  terminal: containment,
+                };
+              }),
+            );
+            if (!containment) return;
+            const confirmed = yield* interruptAndAwaitTerminal(session, watchedTurnId, containment);
+            if (!confirmed) {
+              yield* closeContainedSession(
+                session,
+                event,
+                "Codex session closed because a capacity-error completion watchdog could not confirm interruption of the native turn.",
+              );
+            }
+          }).pipe(Effect.forkIn(session.scope));
+          recovery.phase = {
+            _tag: "awaiting-completion",
+            nativeTurnId: watchedTurnId,
+            watchdogFiber,
+          };
+          suppress = true;
+        } else if (payload && !payload.willRetry) {
+          if (recovery.phase._tag === "awaiting-completion") {
+            yield* Fiber.interrupt(recovery.phase.watchdogFiber).pipe(Effect.ignore);
+          }
+          delete session.capacityRecovery;
+        }
+      } else if (event.method === "turn/completed") {
+        const payload = readPayload(EffectCodexSchema.V2TurnCompletedNotification, event.payload);
+        const matchingCapacityFailure =
+          recovery.terminalCapacitySignaled &&
+          payload?.turn.id === recovery.state.currentNativeTurnId &&
+          payload.turn.status === "failed" &&
+          payload.turn.error?.codexErrorInfo === "serverOverloaded";
+        if (recovery.phase._tag === "awaiting-completion") {
+          yield* Fiber.interrupt(recovery.phase.watchdogFiber).pipe(Effect.ignore);
+        }
+        if (matchingCapacityFailure) {
+          recovery.lastSource = event;
+          yield* cleanupNativeTurn(session, recovery.state.currentNativeTurnId);
+          const decision = nextCodexCapacityRecoveryAttempt(recovery.state);
+          if (decision._tag === "exhausted") {
+            delete session.capacityRecovery;
+            yield* emitCapacityRecoveryEvent(
+              event,
+              recovery.state.logicalTurnId,
+              "exhausted",
+              "runtime.error",
+              {
+                message:
+                  "Codex capacity recovery exhausted 20 continuation attempts at each of gpt-5.6-sol/medium, gpt-5.6-sol/high, and gpt-6-astra/medium.",
+                class: "provider_error",
+              },
+            );
+          } else {
+            const now = yield* Clock.currentTimeMillis;
+            const stageEpochMillis =
+              decision.switchedStage || recovery.stageEpochMillis === undefined
+                ? now
+                : recovery.stageEpochMillis;
+            const dueAtMillis = stageEpochMillis + decision.stageOffsetMs;
+            recovery.stageEpochMillis = stageEpochMillis;
+            recovery.terminalCapacitySignaled = false;
+            const stageNumber = decision.state.stageIndex + 1;
+            const delayMillis = Math.max(0, dueAtMillis - now);
+            yield* emitCapacityRecoveryEvent(
+              event,
+              recovery.state.logicalTurnId,
+              `attempt-${stageNumber}-${decision.state.attempt}`,
+              "runtime.warning",
+              {
+                message: `Codex capacity recovery will make promptless continuation stage ${stageNumber}/3 attempt ${decision.state.attempt}/20 in ${Math.ceil(delayMillis / 1_000)} seconds using ${decision.stage.model}/${decision.stage.effort}.`,
+              },
+            );
+            const fiber = yield* runCapacityAttempt(
+              session,
+              recovery,
+              decision,
+              dueAtMillis,
+              event,
+            ).pipe(Effect.forkIn(session.scope));
+            recovery.phase = {
+              _tag: "sleeping",
+              decision,
+              dueAtMillis,
+              source: event,
+              fiber,
+            };
+            suppress = true;
+          }
+        } else {
+          if (payload?.turn.status === "completed" && recovery.state.attempt > 0) {
+            const stage = CODEX_CAPACITY_RECOVERY_STAGES[recovery.state.stageIndex]!;
+            yield* emitCapacityRecoveryEvent(
+              event,
+              recovery.state.logicalTurnId,
+              "succeeded",
+              "runtime.warning",
+              {
+                message: `Codex capacity recovery succeeded on stage ${recovery.state.stageIndex + 1}/3 attempt ${recovery.state.attempt}/20 using ${stage.model}/${stage.effort}.`,
+              },
+            );
+          }
+          delete session.capacityRecovery;
+        }
+      }
+    }
+
+    if (
+      !nativeTurnId &&
+      recovery &&
+      (event.method === "session/closed" || event.method === "session/exited")
+    ) {
+      const source = recovery.lastSource ?? event;
+      const phase = recovery.phase;
+      if (phase._tag === "sleeping") yield* Fiber.interrupt(phase.fiber).pipe(Effect.ignore);
+      if (phase._tag === "awaiting-completion") {
+        yield* Fiber.interrupt(phase.watchdogFiber).pipe(Effect.ignore);
+      }
+      if (phase._tag === "containing") {
+        yield* Deferred.succeed(phase.terminal, undefined).pipe(Effect.ignore);
+        delete session.capacityRecovery;
+      } else {
+        yield* finishCapacityRecoveryWithError(
+          session,
+          source,
+          "Codex capacity recovery stopped because the provider session closed; automatic restart is not attempted.",
+          false,
+        );
+      }
+    }
+
+    if (!suppress) {
+      const runtimeEvents = mapToRuntimeEvents(event, event.threadId).map((runtimeEvent) =>
+        logicalTurnId ? { ...runtimeEvent, turnId: logicalTurnId } : runtimeEvent,
+      );
+      if (runtimeEvents.length === 0) {
+        yield* Effect.logDebug("ignoring unhandled Codex provider event", {
+          method: event.method,
+          threadId: event.threadId,
+          turnId: event.turnId,
+          itemId: event.itemId,
+        });
+      } else {
+        yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+      }
+    }
+
+    if (
+      nativeTurnId &&
+      recovery?.phase._tag === "containing" &&
+      recovery.phase.nativeTurnId === nativeTurnId &&
+      (event.method === "turn/completed" || event.method === "turn/aborted")
+    ) {
+      const terminal = recovery.phase.terminal;
+      delete session.capacityRecovery;
+      yield* cleanupNativeTurn(session, nativeTurnId);
+      yield* Deferred.succeed(terminal, undefined).pipe(Effect.ignore);
+      return;
+    }
+
+    if (nativeTurnId && event.method === "turn/completed" && !suppress) {
+      yield* cleanupNativeTurn(session, nativeTurnId);
+    }
+  });
+
+  const replayPendingEventsUnlocked = Effect.fn("replayPendingEventsUnlocked")(function* (
+    session: CodexAdapterSessionContext,
+    pending: CodexPendingTurnStart,
+  ) {
+    delete session.pendingTurnStart;
+    for (const event of pending.bufferedEvents) {
+      yield* processProviderEventUnlocked(session, event);
+    }
+  });
+
+  function runCapacityAttempt(
+    session: CodexAdapterSessionContext,
+    recovery: CodexAdapterCapacityRecovery,
+    decision: ScheduledCapacityAttempt,
+    dueAtMillis: number,
+    source: ProviderEvent,
+  ): Effect.Effect<void> {
+    return Effect.gen(function* () {
+      if (decision.switchedStage) {
+        const models = yield* session.runtime.listModels.pipe(Effect.timeoutOption("10 seconds"));
+        if (
+          models._tag === "None" ||
+          !isCodexModelSelectionAvailable(models.value, decision.stage)
+        ) {
+          yield* session.controlSemaphore.withPermits(1)(
+            finishCapacityRecoveryWithError(
+              session,
+              source,
+              models._tag === "None"
+                ? `Codex capacity recovery stopped because model/list timed out while validating ${decision.stage.model}/${decision.stage.effort}.`
+                : `Codex capacity recovery stopped because model/list does not advertise the exact ${decision.stage.model}/${decision.stage.effort} tuple.`,
+              false,
+            ),
+          );
+          return;
+        }
+      }
+
+      const beforeSleep = yield* Clock.currentTimeMillis;
+      if (beforeSleep < dueAtMillis) {
+        yield* Effect.sleep(`${dueAtMillis - beforeSleep} millis`);
+      }
+      yield* session.sendSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          let shouldStart = false;
+          yield* session.controlSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const current = session.capacityRecovery;
+              if (
+                session.stopped ||
+                current !== recovery ||
+                current.phase._tag !== "sleeping" ||
+                current.phase.decision !== decision
+              ) {
+                return;
+              }
+              const now = yield* Clock.currentTimeMillis;
+              const stageDeadline = (current.stageEpochMillis ?? dueAtMillis) + 300_000;
+              if (now > stageDeadline) {
+                yield* finishCapacityRecoveryWithError(
+                  session,
+                  source,
+                  `Codex capacity recovery stopped incomplete because stage ${decision.state.stageIndex + 1}/3 passed its 300-second deadline before all 20 attempts could start.`,
+                  false,
+                );
+                return;
+              }
+              current.phase = {
+                _tag: "starting",
+                decision,
+                dueAtMillis,
+                source,
+                cancelRequested: false,
+              };
+              session.pendingTurnStart = {
+                kind: "recovery",
+                bufferedEvents: [],
+                bufferedBytes: 0,
+                generation: session.generation,
+              };
+              shouldStart = true;
+            }),
+          );
+          if (!shouldStart) return;
+
+          const result = yield* session.runtime
+            .sendTurn({
+              ...recovery.continuationInput,
+              model: decision.stage.model,
+              effort: decision.stage.effort,
+            })
+            .pipe(Effect.timeoutOption(CODEX_TURN_START_TIMEOUT), Effect.result);
+          let containment: { nativeTurnId: TurnId; terminal: Deferred.Deferred<void> } | undefined;
+          let mustCloseForUnknownStart = false;
+          yield* session.controlSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const pending = session.pendingTurnStart;
+              const current = session.capacityRecovery;
+              if (!pending || session.stopped || pending.generation !== session.generation) return;
+              if (result._tag === "Failure" || result.success._tag === "None") {
+                mustCloseForUnknownStart = yield* containSessionUnlocked(
+                  session,
+                  source,
+                  `Codex session closed for reconciliation because stage ${decision.state.stageIndex + 1}/3 attempt ${decision.state.attempt}/20 turn/start had an unknown outcome.`,
+                );
+                return;
+              }
+
+              const started = result.success.value;
+              session.nativeToLogicalTurnIds.set(started.turnId, recovery.state.logicalTurnId);
+              recovery.state = bindCodexCapacityRecoveryNativeTurn(decision.state, started.turnId);
+              const cancelRequested =
+                current !== recovery ||
+                current.phase._tag !== "starting" ||
+                current.phase.cancelRequested;
+              if (cancelRequested) {
+                const terminal = yield* Deferred.make<void>();
+                recovery.phase = {
+                  _tag: "containing",
+                  nativeTurnId: started.turnId,
+                  terminal,
+                };
+                containment = { nativeTurnId: started.turnId, terminal };
+              } else {
+                recovery.phase = { _tag: "active", nativeTurnId: started.turnId };
+              }
+              yield* replayPendingEventsUnlocked(session, pending);
+            }),
+          );
+          if (mustCloseForUnknownStart) {
+            yield* session.runtime.close.pipe(Effect.ignore);
+            return;
+          }
+          if (containment) {
+            const confirmed = yield* interruptAndAwaitTerminal(
+              session,
+              containment.nativeTurnId,
+              containment.terminal,
+            );
+            if (!confirmed) {
+              yield* session.controlSemaphore.withPermits(1)(
+                emitCapacityRecoveryEvent(
+                  source,
+                  recovery.state.logicalTurnId,
+                  "cancel-unconfirmed",
+                  "runtime.error",
+                  {
+                    message:
+                      "Codex capacity recovery could not confirm interruption of the native continuation; newer input was rejected.",
+                    class: "provider_error",
+                  },
+                ),
+              );
+            }
+          }
+        }),
+      );
+    }).pipe(
+      Effect.catch((cause) =>
+        session.controlSemaphore.withPermits(1)(
+          finishCapacityRecoveryWithError(
+            session,
+            source,
+            `Codex capacity recovery stopped while validating or starting the next continuation: ${cause.message}`,
+            false,
+          ),
+        ),
+      ),
+    );
+  }
+
+  const cancelCapacityRecoveryForExplicitTurn = Effect.fn("cancelCapacityRecoveryForExplicitTurn")(
+    function* (session: CodexAdapterSessionContext) {
+      let containment:
+        | {
+            nativeTurnId: TurnId;
+            terminal: Deferred.Deferred<void>;
+            requestInterrupt: boolean;
+          }
+        | undefined;
+      yield* session.controlSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          const recovery = session.capacityRecovery;
+          if (!recovery) return;
+          const phase = recovery.phase;
+          if (phase._tag === "starting") {
+            phase.cancelRequested = true;
+            return;
+          }
+          if (phase._tag === "active" && recovery.state.attempt === 0) {
+            delete session.capacityRecovery;
+            yield* cleanupNativeTurn(session, phase.nativeTurnId);
+            return;
+          }
+          const source = recovery.lastSource;
+          if (!source) {
+            delete session.capacityRecovery;
+            return;
+          }
+          if (phase._tag === "sleeping") {
+            yield* Fiber.interrupt(phase.fiber).pipe(Effect.ignore);
+            yield* finishCapacityRecoveryWithError(
+              session,
+              source,
+              "Codex capacity recovery was cancelled by a newer explicit turn.",
+              false,
+            );
+            return;
+          }
+          if (phase._tag === "containing") {
+            containment = {
+              nativeTurnId: phase.nativeTurnId,
+              terminal: phase.terminal,
+              requestInterrupt: false,
+            };
+            return;
+          }
+          if (phase._tag === "awaiting-completion") {
+            yield* Fiber.interrupt(phase.watchdogFiber).pipe(Effect.ignore);
+          }
+          const nativeTurnId = phase.nativeTurnId;
+          const terminal = yield* Deferred.make<void>();
+          recovery.phase = { _tag: "containing", nativeTurnId, terminal };
+          containment = { nativeTurnId, terminal, requestInterrupt: true };
+        }),
+      );
+      if (!containment) return;
+      const confirmed = containment.requestInterrupt
+        ? yield* interruptAndAwaitTerminal(session, containment.nativeTurnId, containment.terminal)
+        : (yield* Deferred.await(containment.terminal).pipe(
+            Effect.timeoutOption(CODEX_INTERRUPT_CONFIRM_TIMEOUT),
+          ))._tag === "Some";
+      if (!confirmed) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail:
+            "A prior Codex capacity-recovery continuation could not be confirmed stopped; newer input was not sent.",
+        });
+      }
+    },
+  );
+
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -2088,22 +2789,31 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // this a child of `startSession`, and Effect interrupts a fiber's
         // children when it completes, so the consumer died on return and every
         // runtime event the session emitted afterwards was dropped.
+        const sendSemaphore = yield* Semaphore.make(1);
+        const controlSemaphore = yield* Semaphore.make(1);
+        let sessionContext: CodexAdapterSessionContext | undefined;
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
-            if (runtimeEvents.length === 0) {
-              yield* Effect.logDebug("ignoring unhandled Codex provider event", {
-                method: event.method,
-                threadId: event.threadId,
-                turnId: event.turnId,
-                itemId: event.itemId,
-              });
-              return;
+            if (sessionContext) {
+              yield* sessionContext.controlSemaphore.withPermits(1)(
+                processProviderEventUnlocked(sessionContext, event),
+              );
             }
-            yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
           }),
         ).pipe(Effect.forkIn(sessionScope));
+        sessionContext = {
+          threadId: input.threadId,
+          scope: sessionScope,
+          runtime,
+          eventFiber,
+          nativeToLogicalTurnIds: new Map(),
+          containedRecoveryNativeTurnIds: new Set(),
+          sendSemaphore,
+          controlSemaphore,
+          generation: 0,
+          stopped: false,
+        };
 
         const started = yield* runtime.start().pipe(
           Effect.mapError(
@@ -2124,13 +2834,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
 
-        sessions.set(input.threadId, {
-          threadId: input.threadId,
-          scope: sessionScope,
-          runtime,
-          eventFiber,
-          stopped: false,
-        });
+        sessions.set(input.threadId, sessionContext);
         sessionScopeTransferred = true;
 
         return started;
@@ -2170,40 +2874,177 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    // Codex ingests images only. Anything else would be base64-encoded as an
-    // image and rejected or misread; generic files reach the agent through the
-    // path line ProviderService puts in the prompt.
-    const codexAttachments = yield* Effect.forEach(
-      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
-      (attachment) => resolveAttachment(input, attachment),
-      { concurrency: 1 },
-    );
-
     const session = yield* requireSession(input.threadId);
-    const reasoningEffort =
-      input.modelSelection?.instanceId === boundInstanceId
-        ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
-        : undefined;
-    const serviceTier =
-      input.modelSelection?.instanceId === boundInstanceId
-        ? getCodexServiceTierOptionValue(input.modelSelection)
-        : undefined;
-    return yield* session.runtime
-      .sendTurn({
-        ...(input.input !== undefined ? { input: input.input } : {}),
-        ...(input.modelSelection?.instanceId === boundInstanceId
-          ? { model: input.modelSelection.model }
-          : {}),
-        ...(reasoningEffort
-          ? {
-              effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
+    yield* cancelCapacityRecoveryForExplicitTurn(session);
+    return yield* session.sendSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        yield* cancelCapacityRecoveryForExplicitTurn(session);
+        if (session.stopped) {
+          return yield* new ProviderAdapterSessionClosedError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+          });
+        }
+        // Codex ingests images only. Anything else would be base64-encoded as an
+        // image and rejected or misread; generic files reach the agent through the
+        // path line ProviderService puts in the prompt.
+        const codexAttachments = yield* Effect.forEach(
+          (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
+          (attachment) => resolveAttachment(input, attachment),
+          { concurrency: 1 },
+        );
+
+        const reasoningEffort =
+          input.modelSelection?.instanceId === boundInstanceId
+            ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
+            : undefined;
+        const serviceTier =
+          input.modelSelection?.instanceId === boundInstanceId
+            ? getCodexServiceTierOptionValue(input.modelSelection)
+            : undefined;
+        const eligible = isCodexCapacityRecoveryEligible({
+          model:
+            input.modelSelection?.instanceId === boundInstanceId
+              ? input.modelSelection.model
+              : undefined,
+          effort: reasoningEffort,
+        });
+        const startGeneration = session.generation;
+        if (eligible) {
+          yield* session.controlSemaphore.withPermits(1)(
+            Effect.sync(() => {
+              session.pendingTurnStart = {
+                kind: "initial",
+                bufferedEvents: [],
+                bufferedBytes: 0,
+                generation: startGeneration,
+              };
+            }),
+          );
+        }
+
+        const result = yield* session.runtime
+          .sendTurn({
+            ...(input.input !== undefined ? { input: input.input } : {}),
+            ...(input.modelSelection?.instanceId === boundInstanceId
+              ? { model: input.modelSelection.model }
+              : {}),
+            ...(reasoningEffort
+              ? {
+                  effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
+                }
+              : {}),
+            ...(serviceTier ? { serviceTier } : {}),
+            ...(input.interactionMode !== undefined
+              ? { interactionMode: input.interactionMode }
+              : {}),
+            ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+          })
+          .pipe(Effect.timeoutOption(CODEX_TURN_START_TIMEOUT), Effect.result);
+
+        if (result._tag === "Failure" || result.success._tag === "None") {
+          let closeUnknown = false;
+          let sessionClosedDuringFailure =
+            session.stopped || startGeneration !== session.generation;
+          yield* session.controlSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const pending = session.pendingTurnStart;
+              if (!pending) return;
+              if (result._tag === "Success") {
+                const source = pending.bufferedEvents[0];
+                if (source) {
+                  closeUnknown = yield* containSessionUnlocked(
+                    session,
+                    source,
+                    "Codex session closed because the initial turn/start outcome was unknown after 30 seconds.",
+                  );
+                } else {
+                  session.stopped = true;
+                  session.generation += 1;
+                  sessions.delete(session.threadId);
+                  delete session.pendingTurnStart;
+                  closeUnknown = true;
+                }
+              } else {
+                if (
+                  pending.bufferedEvents.some(
+                    (event) =>
+                      event.method === "session/closed" || event.method === "session/exited",
+                  )
+                ) {
+                  sessionClosedDuringFailure = true;
+                  session.stopped = true;
+                  session.generation += 1;
+                  sessions.delete(session.threadId);
+                }
+                yield* replayPendingEventsUnlocked(session, pending);
+              }
+            }),
+          );
+          if (closeUnknown) yield* session.runtime.close.pipe(Effect.ignore);
+          if (sessionClosedDuringFailure) {
+            return yield* new ProviderAdapterSessionClosedError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+            });
+          }
+          if (result._tag === "Failure") {
+            return yield* mapCodexRuntimeError(input.threadId, "turn/start", result.failure);
+          }
+          return yield* new ProviderAdapterSessionClosedError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+          });
+        }
+
+        const started = result.success.value;
+        let sessionEndedDuringStart = false;
+        yield* session.controlSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const pending = session.pendingTurnStart;
+            const staleStart =
+              session.stopped ||
+              startGeneration !== session.generation ||
+              pending?.bufferedEvents.some(
+                (event) => event.method === "session/closed" || event.method === "session/exited",
+              );
+            if (staleStart) {
+              sessionEndedDuringStart = true;
+              if (pending && !session.stopped) {
+                session.stopped = true;
+                session.generation += 1;
+                sessions.delete(session.threadId);
+                yield* replayPendingEventsUnlocked(session, pending);
+              }
+              return;
             }
-          : {}),
-        ...(serviceTier ? { serviceTier } : {}),
-        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-      })
-      .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+            if (eligible) {
+              session.nativeToLogicalTurnIds.set(started.turnId, started.turnId);
+              session.capacityRecovery = {
+                state: beginCodexCapacityRecovery(started.turnId),
+                terminalCapacitySignaled: false,
+                phase: { _tag: "active", nativeTurnId: started.turnId },
+                continuationInput: {
+                  ...(serviceTier ? { serviceTier } : {}),
+                  ...(input.interactionMode !== undefined
+                    ? { interactionMode: input.interactionMode }
+                    : {}),
+                },
+              };
+            }
+            if (pending) yield* replayPendingEventsUnlocked(session, pending);
+          }),
+        );
+        if (sessionEndedDuringStart) {
+          yield* boundedInterrupt(session, started.turnId);
+          return yield* new ProviderAdapterSessionClosedError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+          });
+        }
+        return started;
+      }),
+    );
   });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
@@ -2219,9 +3060,75 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
     requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
+      Effect.flatMap((session) =>
+        Effect.gen(function* () {
+          let effectiveTurnId = turnId;
+          let shouldInterrupt = true;
+          let terminal: Deferred.Deferred<void> | undefined;
+          yield* session.controlSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const recovery = session.capacityRecovery;
+              if (!recovery) return;
+              const phase = recovery.phase;
+              if (phase._tag === "sleeping") {
+                yield* Fiber.interrupt(phase.fiber).pipe(Effect.ignore);
+                shouldInterrupt = false;
+                const source = recovery.lastSource ?? phase.source;
+                yield* finishCapacityRecoveryWithError(
+                  session,
+                  source,
+                  "Codex capacity recovery was interrupted before its next continuation.",
+                  false,
+                );
+                return;
+              }
+              if (phase._tag === "starting") {
+                phase.cancelRequested = true;
+                shouldInterrupt = false;
+                return;
+              }
+              if (phase._tag === "awaiting-completion") {
+                yield* Fiber.interrupt(phase.watchdogFiber).pipe(Effect.ignore);
+                effectiveTurnId = phase.nativeTurnId;
+              } else if (phase._tag === "containing") {
+                effectiveTurnId = phase.nativeTurnId;
+                terminal = phase.terminal;
+              } else {
+                effectiveTurnId = phase.nativeTurnId;
+              }
+              if (phase._tag !== "containing") {
+                terminal = yield* Deferred.make<void>();
+                recovery.phase = {
+                  _tag: "containing",
+                  nativeTurnId: effectiveTurnId,
+                  terminal,
+                };
+              }
+            }),
+          );
+          if (shouldInterrupt) {
+            if (!effectiveTurnId) {
+              yield* session.runtime.interruptTurn();
+              return;
+            }
+            if (!terminal) {
+              yield* session.runtime.interruptTurn(effectiveTurnId);
+              return;
+            }
+            const confirmed = yield* interruptAndAwaitTerminal(session, effectiveTurnId, terminal);
+            if (!confirmed) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "turn/interrupt",
+                detail: "Codex did not confirm that the interrupted recovery turn terminated.",
+              });
+            }
+          }
+        }),
+      ),
       Effect.mapError((cause) =>
-        cause._tag === "ProviderAdapterSessionNotFoundError"
+        cause._tag === "ProviderAdapterSessionNotFoundError" ||
+        cause._tag === "ProviderAdapterRequestError"
           ? cause
           : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
       ),
@@ -2324,7 +3231,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return;
     }
     session.stopped = true;
+    session.generation += 1;
     sessions.delete(session.threadId);
+    yield* session.controlSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const recovery = session.capacityRecovery;
+        if (recovery?.phase._tag === "sleeping") {
+          yield* Fiber.interrupt(recovery.phase.fiber).pipe(Effect.ignore);
+        }
+        if (recovery?.phase._tag === "awaiting-completion") {
+          yield* Fiber.interrupt(recovery.phase.watchdogFiber).pipe(Effect.ignore);
+        }
+        delete session.pendingTurnStart;
+        delete session.capacityRecovery;
+        session.nativeToLogicalTurnIds.clear();
+        session.containedRecoveryNativeTurnIds.clear();
+      }),
+    );
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
