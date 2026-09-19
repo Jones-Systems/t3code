@@ -52,7 +52,7 @@ const makeClient = (host: FakeLauncherProcess, currentVersion: string) =>
 it.effect("waits for the launcher to durably commit the trial update ID", () =>
   Effect.gen(function* () {
     const pending = {
-      id: "update-1",
+      id: "123e4567-e89b-42d3-a456-426614174010",
       fromVersion: "1.0.0",
       targetVersion: "1.1.0",
       dbPath: "/tmp/state.sqlite",
@@ -67,7 +67,9 @@ it.effect("waits for the launcher to durably commit the trial update ID", () =>
     const client = yield* makeClient(host, "1.1.0");
     const prepared = yield* Effect.forkChild(client.prepareTrial, { startImmediately: true });
     yield* Effect.yieldNow;
-    expect(host.sent).toEqual([{ type: "prepared", updateId: "update-1" }]);
+    expect(host.sent).toEqual([
+      { type: "prepared", updateId: "123e4567-e89b-42d3-a456-426614174010" },
+    ]);
 
     const committed = {
       id: pending.id,
@@ -171,7 +173,7 @@ it.effect("rejects contradictory trial context instead of leaving activation clo
       protocol: SERVICE_LAUNCHER_PROTOCOL,
       childVersion: "1.1.0",
       update: {
-        id: "update-1",
+        id: "123e4567-e89b-42d3-a456-426614174011",
         fromVersion: "1.0.0",
         targetVersion: "1.2.0",
         dbPath: "/tmp/state.sqlite",

@@ -15,6 +15,7 @@ import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 export const bootServiceLayer = (config: ServerConfig.ServerConfig["Service"]) =>
   BootService.layer({
     baseDir: config.baseDir,
+    authorityStateDir: config.authorityStateDir,
     logsDir: config.logsDir,
     cliVersion: packageJson.version,
   }).pipe(Layer.provide(ProcessRunner.layer));

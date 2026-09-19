@@ -220,6 +220,7 @@ it.effect("preserves destination probe failures instead of treating them as miss
       makeLayer({
         fileSystem: FileSystem.makeNoop({
           exists: () => Effect.fail(fileSystemCause),
+          makeTempDirectoryScoped: () => Effect.succeed("/tmp/t3-source-control-native-authority"),
           makeDirectory: () => Effect.void,
           realPath: (path) => Effect.succeed(path),
         }),

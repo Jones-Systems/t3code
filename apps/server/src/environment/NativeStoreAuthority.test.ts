@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId } from "@t3tools/contracts";
@@ -19,12 +20,14 @@ import {
   initializeNativeStoreAuthority,
 } from "./nativeStoreAuthorityPersistence.ts";
 import * as NativeStoreAuthority from "./NativeStoreAuthority.ts";
+import { nativeStoreAuthorityBaseDirFingerprint } from "./nativeStoreAuthorityPath.ts";
 
 const authorityLayer = (baseDir: string, authorityStateDir: string, environmentId: string) =>
   Layer.mergeAll(
     Layer.succeed(ServerConfig.ServerConfig, {
       baseDir,
       authorityStateDir,
+      dbPath: NodePath.join(baseDir, "userdata", "state.sqlite"),
     } as ServerConfig.ServerConfig["Service"]),
     Layer.succeed(
       ServerEnvironment.ServerEnvironmentIdentity,
@@ -34,6 +37,19 @@ const authorityLayer = (baseDir: string, authorityStateDir: string, environmentI
     ),
   );
 
+const writeDatabase = (databasePath: string, sequence: number) => {
+  NodeFS.mkdirSync(NodePath.dirname(databasePath), { recursive: true, mode: 0o700 });
+  const database = new NodeSqlite.DatabaseSync(databasePath);
+  try {
+    database.exec("CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY)");
+    if (sequence > 0) {
+      database.prepare("INSERT INTO orchestration_events (sequence) VALUES (?)").run(sequence);
+    }
+  } finally {
+    database.close();
+  }
+};
+
 it.effect("publishes only the current T3-owned tuple and fails closed when fenced", () =>
   Effect.gen(function* () {
     const root = NodeFS.mkdtempSync(
@@ -41,7 +57,9 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
     );
     try {
       const authorityStateDir = NodePath.join(root, "authority");
+      const databasePath = NodePath.join(root, "userdata", "state.sqlite");
       const environmentId = "environment-layer-test";
+      writeDatabase(databasePath, 3);
       NodeFS.mkdirSync(NodePath.join(root, "runtime"), { recursive: true });
       NodeFS.writeFileSync(
         NodePath.join(root, "runtime", "service-state.json"),
@@ -49,7 +67,13 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         JSON.stringify({ protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: "1.0.0" }),
         { mode: 0o600 },
       );
-      const initial = initializeNativeStoreAuthority(authorityStateDir, environmentId);
+      const initial = initializeNativeStoreAuthority(
+        authorityStateDir,
+        databasePath,
+        environmentId,
+        nativeStoreAuthorityBaseDirFingerprint(root),
+      );
+      expect(initial.orchestration_sequence).toBe(3);
 
       const authority = yield* NativeStoreAuthority.make().pipe(
         Effect.provide(authorityLayer(root, authorityStateDir, environmentId)),
@@ -70,6 +94,23 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         readiness: "ready",
       });
 
+      const rolledBackDatabasePath = NodePath.join(root, "rolled-back.sqlite");
+      writeDatabase(rolledBackDatabasePath, 2);
+      NodeFS.renameSync(rolledBackDatabasePath, databasePath);
+      expect(authority.trustProvider.readTrustSnapshot()).toEqual({
+        trustedEnvironments: [],
+        readiness: "trust-provider-required",
+      });
+      const recovered = initializeNativeStoreAuthority(
+        authorityStateDir,
+        databasePath,
+        environmentId,
+        nativeStoreAuthorityBaseDirFingerprint(root),
+      );
+      expect(recovered.orchestration_sequence).toBe(2);
+      expect(recovered.store_generation).toBe(initial.store_generation + 1);
+      expect(authority.trustProvider.readTrustSnapshot().readiness).toBe("ready");
+
       NodeFS.writeFileSync(
         NodePath.join(root, "runtime", "service-state.json"),
         // @effect-diagnostics-next-line preferSchemaOverJson:off - launcher-owned test fixture.
@@ -87,7 +128,12 @@ it.effect("publishes only the current T3-owned tuple and fails closed when fence
         { mode: 0o600 },
       );
 
-      fenceNativeStoreAuthority(authorityStateDir, environmentId);
+      fenceNativeStoreAuthority(
+        authorityStateDir,
+        "123e4567-e89b-42d3-a456-426614174000",
+        environmentId,
+        nativeStoreAuthorityBaseDirFingerprint(root),
+      );
       expect((yield* Effect.result(authority.readCurrent))._tag).toBe("Failure");
       expect(authority.trustProvider.readTrustSnapshot()).toEqual({
         trustedEnvironments: [],

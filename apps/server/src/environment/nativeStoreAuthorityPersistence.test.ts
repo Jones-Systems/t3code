@@ -1,117 +1,274 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { SERVICE_LAUNCHER_PROTOCOL } from "../cloud/serviceProtocol.ts";
+import { nativeStoreAuthorityBaseDirFingerprint } from "./nativeStoreAuthorityPath.ts";
 import {
   advanceNativeStoreAuthority,
   decodeNativeStoreAuthorityState,
   fenceNativeStoreAuthority,
   initializeNativeStoreAuthority,
-  initializeNativeStoreAuthorityForBaseDir,
   nativeStoreAuthorityPaths,
-  readNativeStoreAuthorityState,
+  prepareNativeStoreAuthorityAdvance,
+  readNativeStoreOrchestrationSequence,
+  readVerifiedNativeStoreAuthority,
 } from "./nativeStoreAuthorityPersistence.ts";
 
-const withDirectory = (run: (directory: string) => void): void => {
+const UPDATE_A = "00000000-0000-4000-8000-000000000001";
+const UPDATE_B = "00000000-0000-4000-8000-000000000002";
+
+const makeFixture = (root: string) => {
+  const baseDir = NodePath.join(root, "base");
+  const authorityStateDir = NodePath.join(root, "authority");
+  const databasePath = NodePath.join(baseDir, "userdata", "state.sqlite");
+  NodeFS.mkdirSync(NodePath.dirname(databasePath), { recursive: true, mode: 0o700 });
+  const database = new NodeSqlite.DatabaseSync(databasePath);
+  database.exec("PRAGMA journal_mode = WAL");
+  database.exec("CREATE TABLE orchestration_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT)");
+  database.close();
+  return {
+    authorityStateDir,
+    databasePath,
+    environmentId: "environment-native-authority",
+    fingerprint: nativeStoreAuthorityBaseDirFingerprint(baseDir),
+  };
+};
+
+const withFixture = (run: (fixture: ReturnType<typeof makeFixture>) => void): void => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-authority-test-"));
   try {
-    run(NodePath.join(root, "authority"));
+    run(makeFixture(root));
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
   }
 };
 
+const enroll = (fixture: ReturnType<typeof makeFixture>) =>
+  initializeNativeStoreAuthority(
+    fixture.authorityStateDir,
+    fixture.databasePath,
+    fixture.environmentId,
+    fixture.fingerprint,
+  );
+
+const appendPrepared = (fixture: ReturnType<typeof makeFixture>, commit: boolean): void => {
+  const database = new NodeSqlite.DatabaseSync(fixture.databasePath);
+  try {
+    const previous = Number(
+      (
+        database
+          .prepare("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM orchestration_events")
+          .get() as { readonly sequence: number }
+      ).sequence,
+    );
+    database.exec("BEGIN IMMEDIATE");
+    database.exec("INSERT INTO orchestration_events DEFAULT VALUES");
+    prepareNativeStoreAuthorityAdvance(
+      fixture.authorityStateDir,
+      fixture.databasePath,
+      fixture.environmentId,
+      fixture.fingerprint,
+      previous,
+      previous + 1,
+    );
+    database.exec(commit ? "COMMIT" : "ROLLBACK");
+  } catch (cause) {
+    if (database.isTransaction) database.exec("ROLLBACK");
+    throw cause;
+  } finally {
+    database.close();
+  }
+};
+
 describe("native store authority persistence", () => {
-  it("enrolls only from the persisted T3 environment identity", () => {
-    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-enroll-test-"));
-    try {
-      NodeFS.mkdirSync(NodePath.join(root, "userdata"), { recursive: true });
-      NodeFS.writeFileSync(
-        NodePath.join(root, "userdata", "environment-id"),
-        "environment-native-enrollment\n",
-      );
-      NodeFS.mkdirSync(NodePath.join(root, "runtime"), { recursive: true });
-      NodeFS.writeFileSync(
-        NodePath.join(root, "runtime", "service-state.json"),
-        JSON.stringify({ protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion: "1.0.0" }),
-        { mode: 0o600 },
-      );
-      const state = initializeNativeStoreAuthorityForBaseDir(root, SERVICE_LAUNCHER_PROTOCOL);
-      expect(state.environment_id).toBe("environment-native-enrollment");
-      expect(state.state).toBe("active");
+  it("detects same-path ordinary database rollback", () => {
+    withFixture((fixture) => {
+      enroll(fixture);
+      const backup = `${fixture.databasePath}.backup`;
+      NodeFS.copyFileSync(fixture.databasePath, backup);
+      appendPrepared(fixture, true);
+      expect(
+        readVerifiedNativeStoreAuthority(
+          fixture.authorityStateDir,
+          fixture.databasePath,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ).orchestration_sequence,
+      ).toBe(1);
+      NodeFS.copyFileSync(backup, fixture.databasePath);
       expect(() =>
-        initializeNativeStoreAuthorityForBaseDir(root, SERVICE_LAUNCHER_PROTOCOL),
+        readVerifiedNativeStoreAuthority(
+          fixture.authorityStateDir,
+          fixture.databasePath,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ),
+      ).toThrow("does not match");
+      expect(() => appendPrepared(fixture, true)).toThrow("unexpected preimage");
+      expect(readNativeStoreOrchestrationSequence(fixture.databasePath)).toBe(0);
+    });
+  });
+
+  it("fails closed after external prepare when the main transaction rolls back", () => {
+    withFixture((fixture) => {
+      enroll(fixture);
+      appendPrepared(fixture, false);
+      expect(() =>
+        readVerifiedNativeStoreAuthority(
+          fixture.authorityStateDir,
+          fixture.databasePath,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ),
+      ).toThrow("does not match");
+    });
+  });
+
+  it("explicit enrollment recovers a sequence mismatch by advancing generation", () => {
+    withFixture((fixture) => {
+      const initial = enroll(fixture);
+      appendPrepared(fixture, false);
+      const recovered = enroll(fixture);
+      expect(recovered.store_generation).toBe(initial.store_generation + 1);
+      expect(recovered.orchestration_sequence).toBe(0);
+    });
+  });
+
+  it("serializes rollback while absent, accepts retry, and clears the barrier", () => {
+    withFixture((fixture) => {
+      expect(
+        fenceNativeStoreAuthority(
+          fixture.authorityStateDir,
+          UPDATE_A,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ),
+      ).toBeNull();
+      expect(
+        fenceNativeStoreAuthority(
+          fixture.authorityStateDir,
+          UPDATE_A,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ),
+      ).toBeNull();
+      expect(() =>
+        fenceNativeStoreAuthority(
+          fixture.authorityStateDir,
+          UPDATE_B,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ),
+      ).toThrow("another restore");
+      expect(() => enroll(fixture)).toThrow("restore barrier");
+      expect(
+        advanceNativeStoreAuthority(
+          fixture.authorityStateDir,
+          fixture.databasePath,
+          UPDATE_A,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ),
+      ).toBeNull();
+      expect(() => enroll(fixture)).not.toThrow();
+    });
+  });
+
+  it("advances generation to the restored database sequence", () => {
+    withFixture((fixture) => {
+      const initial = enroll(fixture);
+      appendPrepared(fixture, true);
+      fenceNativeStoreAuthority(
+        fixture.authorityStateDir,
+        UPDATE_A,
+        fixture.environmentId,
+        fixture.fingerprint,
+      );
+      const database = new NodeSqlite.DatabaseSync(fixture.databasePath);
+      database.exec("DELETE FROM orchestration_events");
+      database.close();
+      const active = advanceNativeStoreAuthority(
+        fixture.authorityStateDir,
+        fixture.databasePath,
+        UPDATE_A,
+        fixture.environmentId,
+        fixture.fingerprint,
+      );
+      expect(active?.store_generation).toBe(initial.store_generation + 1);
+      expect(active?.orchestration_sequence).toBe(0);
+      expect(active?.state).toBe("active");
+    });
+  });
+
+  it("releases an interrupted SQLite coordinator transaction after process death", async () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-authority-test-"));
+    const fixture = makeFixture(root);
+    enroll(fixture);
+    const coordinatorPath = nativeStoreAuthorityPaths(fixture.authorityStateDir).coordinatorPath;
+    const child = NodeChildProcess.spawn(
+      process.execPath,
+      [
+        "-e",
+        `const { DatabaseSync } = require("node:sqlite"); const database = new DatabaseSync(process.argv[1]); database.exec("BEGIN IMMEDIATE"); process.stdout.write("locked"); setInterval(() => {}, 1000);`,
+        coordinatorPath,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.stdout.once("data", () => resolve());
+      });
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGKILL");
+      await exited;
+      expect(() =>
+        fenceNativeStoreAuthority(
+          fixture.authorityStateDir,
+          UPDATE_A,
+          fixture.environmentId,
+          fixture.fingerprint,
+        ),
       ).not.toThrow();
     } finally {
+      child.kill("SIGKILL");
       NodeFS.rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("creates one private authority and advances only after a durable fence", () => {
-    withDirectory((authorityStateDir) => {
-      const environmentId = "environment-native-authority";
-      const initial = initializeNativeStoreAuthority(authorityStateDir, environmentId);
-      expect(initial.authority_namespace).toMatch(/^t3-native:[0-9a-f-]{36}$/);
-      expect(initial.store_generation).toBe(1);
-      expect(initial.state).toBe("active");
-      expect(NodeFS.statSync(authorityStateDir).mode & 0o777).toBe(0o700);
-      expect(
-        NodeFS.statSync(nativeStoreAuthorityPaths(authorityStateDir).statePath).mode & 0o777,
-      ).toBe(0o600);
-
-      const restarted = initializeNativeStoreAuthority(authorityStateDir, environmentId);
-      expect(restarted).toEqual(initial);
-
-      const fenced = fenceNativeStoreAuthority(authorityStateDir, environmentId);
-      expect(fenced.state).toBe("fenced");
-      expect(fenced.transition_id).toMatch(/^[0-9a-f-]{36}$/);
-      expect(() => readNativeStoreAuthorityState(authorityStateDir)).not.toThrow();
-
-      const databasePath = NodePath.join(NodePath.dirname(authorityStateDir), "state.sqlite");
-      NodeFS.writeFileSync(databasePath, "SQLite format 3\0");
-      const active = advanceNativeStoreAuthority(authorityStateDir, environmentId, databasePath);
-      expect(active.state).toBe("active");
-      expect(active.transition_id).toBeNull();
-      expect(active.store_generation).toBe(2);
-      expect(readNativeStoreAuthorityState(authorityStateDir)).toEqual(active);
-    });
-  });
-
-  it("fails closed for malformed, fenced, mismatched, and unreviewable transitions", () => {
-    expect(() =>
-      decodeNativeStoreAuthorityState({
-        record_version: "t3-native-store-authority/1.0.0",
-        environment_id: "env",
-        authority_namespace: "t3-native:00000000-0000-4000-8000-000000000000",
-        store_generation: 1,
-        state: "active",
-        transition_id: "not-null",
-      }),
-    ).toThrow();
-
-    withDirectory((authorityStateDir) => {
-      initializeNativeStoreAuthority(authorityStateDir, "env-a");
-      expect(() => fenceNativeStoreAuthority(authorityStateDir, "env-b")).toThrow(
-        "Native authority environment changed",
-      );
-      const fenced = fenceNativeStoreAuthority(authorityStateDir, "env-a");
-      expect(fenceNativeStoreAuthority(authorityStateDir, "env-a")).toEqual(fenced);
+  it("rejects malformed state, bad update IDs, symlinks, and public directories", () => {
+    expect(() => decodeNativeStoreAuthorityState({ record_version: "old" })).toThrow();
+    withFixture((fixture) => {
       expect(() =>
-        advanceNativeStoreAuthority(
-          authorityStateDir,
-          "env-a",
-          NodePath.join(authorityStateDir, "missing.sqlite"),
+        fenceNativeStoreAuthority(
+          fixture.authorityStateDir,
+          "bad-id",
+          fixture.environmentId,
+          fixture.fingerprint,
         ),
-      ).toThrow();
-      const invalidDatabasePath = NodePath.join(authorityStateDir, "invalid.sqlite");
-      NodeFS.writeFileSync(invalidDatabasePath, "not sqlite");
-      expect(() =>
-        advanceNativeStoreAuthority(authorityStateDir, "env-a", invalidDatabasePath),
-      ).toThrow("not a SQLite database");
+      ).toThrow("update ID");
+      NodeFS.symlinkSync(NodePath.dirname(fixture.authorityStateDir), fixture.authorityStateDir);
+      expect(() => enroll(fixture)).toThrow("not private");
+    });
+    withFixture((fixture) => {
+      NodeFS.mkdirSync(fixture.authorityStateDir, { mode: 0o755 });
+      expect(() => enroll(fixture)).toThrow("not private");
+    });
+    withFixture((fixture) => {
+      NodeFS.mkdirSync(fixture.authorityStateDir, { mode: 0o700 });
+      NodeFS.symlinkSync(
+        fixture.databasePath,
+        nativeStoreAuthorityPaths(fixture.authorityStateDir).coordinatorPath,
+      );
+      expect(() => enroll(fixture)).toThrow("not private");
+      const database = new NodeSqlite.DatabaseSync(fixture.databasePath, { readOnly: true });
+      expect(() => database.prepare("SELECT 1").get()).not.toThrow();
+      database.close();
     });
   });
 });

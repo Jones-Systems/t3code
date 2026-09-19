@@ -53,6 +53,8 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import * as NativeStoreAuthority from "../../environment/NativeStoreAuthority.ts";
+import { NativeStoreAuthorityPersistenceError } from "../../environment/nativeStoreAuthorityPersistence.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
@@ -114,6 +116,130 @@ const hasMetricSnapshot = (
   );
 
 describe("OrchestrationEngine", () => {
+  effectIt.effect("advances native store authority with the committed event sequence", () => {
+    const advances: Array<readonly [previousSequence: number, nextSequence: number]> = [];
+    const authority = NativeStoreAuthority.NativeStoreAuthority.of({
+      readCurrent: Effect.die("unused"),
+      prepareOrchestrationCommit: (previousSequence, nextSequence) =>
+        Effect.sync(() => {
+          advances.push([previousSequence, nextSequence]);
+        }),
+      trustProvider: {
+        readTrustSnapshot: () => ({
+          trustedEnvironments: [],
+          readiness: "trust-provider-required",
+        }),
+      },
+    });
+    return Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const projectId = asProjectId("project-native-authority-sequence");
+      const createdAt = now();
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-native-authority-project-create"),
+        projectId,
+        title: "Native authority sequence",
+        workspaceRoot: "/tmp/native-authority-sequence",
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "project.meta.update",
+        commandId: CommandId.make("cmd-native-authority-project-update"),
+        projectId,
+        title: "Updated native authority sequence",
+      });
+
+      expect(advances).toEqual([
+        [0, 1],
+        [1, 2],
+      ]);
+    }).pipe(
+      Effect.provide(
+        makeOrchestrationLayer().pipe(
+          Layer.provideMerge(Layer.succeed(NativeStoreAuthority.NativeStoreAuthority, authority)),
+        ),
+      ),
+    );
+  });
+
+  effectIt.effect(
+    "rolls back the orchestration transaction when native authority advancement fails",
+    () => {
+      const advances: Array<readonly [previousSequence: number, nextSequence: number]> = [];
+      let failNextAdvance = false;
+      const authority = NativeStoreAuthority.NativeStoreAuthority.of({
+        readCurrent: Effect.die("unused"),
+        prepareOrchestrationCommit: (previousSequence, nextSequence) =>
+          Effect.suspend(() => {
+            advances.push([previousSequence, nextSequence]);
+            if (failNextAdvance) {
+              failNextAdvance = false;
+              return Effect.fail(
+                new NativeStoreAuthorityPersistenceError(
+                  "source_unavailable",
+                  "authority advance failed",
+                ),
+              );
+            }
+            return Effect.void;
+          }),
+        trustProvider: {
+          readTrustSnapshot: () => ({
+            trustedEnvironments: [],
+            readiness: "trust-provider-required",
+          }),
+        },
+      });
+      return Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const projectId = asProjectId("project-native-authority-rollback");
+        const createdAt = now();
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-native-authority-rollback-create"),
+          projectId,
+          title: "Native authority rollback",
+          workspaceRoot: "/tmp/native-authority-rollback",
+          createdAt,
+        });
+
+        const updateCommand = {
+          type: "project.meta.update" as const,
+          commandId: CommandId.make("cmd-native-authority-rollback-update"),
+          projectId,
+          title: "Rejected update",
+        };
+        failNextAdvance = true;
+        const rejected = yield* engine.dispatch(updateCommand).pipe(Effect.flip);
+        expect(rejected.message).toContain("Failed to advance native store authority.");
+
+        const eventsAfterFailure = yield* Stream.runCollect(engine.readEvents(0)).pipe(
+          Effect.map((events): OrchestrationEvent[] => Array.from(events)),
+        );
+        expect(eventsAfterFailure.map((event) => event.type)).toEqual(["project.created"]);
+
+        const retry = yield* engine.dispatch({
+          ...updateCommand,
+          commandId: CommandId.make("cmd-native-authority-rollback-retry"),
+          title: "Accepted update",
+        });
+        expect(retry.sequence).toBe(2);
+        expect(advances).toEqual([
+          [0, 1],
+          [1, 2],
+          [1, 2],
+        ]);
+      }).pipe(
+        Effect.provide(
+          makeOrchestrationLayer().pipe(
+            Layer.provideMerge(Layer.succeed(NativeStoreAuthority.NativeStoreAuthority, authority)),
+          ),
+        ),
+      );
+    },
+  );
+
   it.each(["running", "stopped"] as const)(
     "sends async answers with a %s session and rejects old duplicate replies",
     async (status) => {
