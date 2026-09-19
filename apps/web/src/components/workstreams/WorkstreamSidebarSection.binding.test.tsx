@@ -222,6 +222,11 @@ describe("Workstream sidebar binding cancellation", () => {
     });
     await staleReference;
     await Promise.resolve();
+    expect(JSON.stringify(hooks.snapshot())).not.toContain("STALE STATUS");
+
+    hooks.beginRender();
+    const afterStaleResolution = WorkstreamSidebarSection({ controller });
+    expect(containsText(afterStaleResolution, "STALE STATUS")).toBe(false);
 
     hooks.beginRender();
     const rebound = WorkstreamSidebarSection({ controller });

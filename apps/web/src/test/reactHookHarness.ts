@@ -50,6 +50,9 @@ export function createReactHookHarness() {
     beginRender() {
       cursor = 0;
     },
+    snapshot() {
+      return [...slots] as readonly unknown[];
+    },
     reset() {
       for (const slot of slots) if (isEffectSlot(slot)) slot.cleanup?.();
       cursor = 0;
