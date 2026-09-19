@@ -29,11 +29,12 @@ import {
   WORKSTREAM_MAX_RESPONSE_BYTES,
   t3PlacementIdentityKey,
   t3PlacementInventoryJson,
-  type TrustedT3PlacementEnvironment,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+
+import type { T3PlacementTrustProvider } from "../environment/NativePlacementTrust.ts";
 
 export {
   WORKSTREAM_CONTRACT_FAMILY,
@@ -48,6 +49,7 @@ export type {
   WorkstreamPage,
   WorkstreamReceipt,
 };
+export type { T3PlacementTrustProvider } from "../environment/NativePlacementTrust.ts";
 
 export class WorkstreamTransportError extends Schema.TaggedErrorClass<WorkstreamTransportError>()(
   "WorkstreamTransportError",
@@ -140,14 +142,6 @@ export interface WorkstreamGatewayOptions {
   readonly cacheCapacity?: number;
   readonly cacheMaxAgeMs?: number;
   readonly now?: () => number;
-}
-
-// Only an independently supplied T3 authority may provide native store trust; the registry response cannot.
-export interface T3PlacementTrustProvider {
-  readonly readTrustSnapshot: () => {
-    readonly trustedEnvironments: readonly TrustedT3PlacementEnvironment[];
-    readonly readiness: "ready" | "trust-provider-required";
-  };
 }
 
 export class WorkstreamGateway extends Context.Service<

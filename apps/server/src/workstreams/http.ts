@@ -23,14 +23,10 @@ import {
   failEnvironmentInternal,
   requireEnvironmentScope,
 } from "../auth/http.ts";
-import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
-import {
-  WorkstreamGateway,
-  make,
-  type WorkstreamGatewayError,
-  type T3PlacementTrustProvider,
-} from "./WorkstreamGateway.ts";
+import type { T3PlacementTrustProvider } from "../environment/NativePlacementTrust.ts";
 import * as NativeStoreAuthority from "../environment/NativeStoreAuthority.ts";
+import { makeControlPlaneWorkstreamTransport } from "./ControlPlaneWorkstreamTransport.ts";
+import { WorkstreamGateway, make, type WorkstreamGatewayError } from "./WorkstreamGateway.ts";
 
 export const WORKSTREAM_RESPONSE_HEADERS = {
   "cache-control": "private, no-store",
