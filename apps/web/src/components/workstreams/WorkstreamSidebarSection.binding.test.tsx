@@ -56,6 +56,56 @@ const data = {
   stale: false,
 };
 
+const detailWithReference = {
+  detail: {
+    context: { owner_id: "owner", server_generation: 7, registry_version: 11 },
+    workstream: {
+      workstream_id: "ws-a",
+      name: "Alpha detail",
+      lifecycle: "active",
+      version: 1,
+    },
+  },
+  memberships: {
+    context: {},
+    items: [
+      {
+        membership_id: "membership-a",
+        native_reference_id: "reference-a",
+        kind: "primary",
+        closed: null,
+      },
+    ],
+    next_cursor: null,
+  },
+  declarations: { context: {}, items: [], next_cursor: null },
+  edges: { context: {}, items: [], next_cursor: null },
+  history: { context: {}, items: [], next_cursor: null },
+  references: {
+    context: {},
+    items: [
+      {
+        native_reference_id: "reference-a",
+        identity: {
+          provider: "github",
+          source_instance_id: "github-owner",
+          resource_kind: "pull_request",
+          id_kind: "external",
+          native_id: "jones-systems/t3code#5",
+          account_provenance: { kind: "not_account_scoped" },
+        },
+        pr_locator: {
+          host: "github.com",
+          repository_owner: "jones-systems",
+          repository_name: "t3code",
+          number: 5,
+        },
+      },
+    ],
+    next_cursor: null,
+  },
+} as unknown as WorkstreamDetailView;
+
 function containsText(node: unknown, text: string): boolean {
   if (typeof node === "string") return node.includes(text);
   if (Array.isArray(node)) return node.some((child) => containsText(child, text));
@@ -110,23 +160,82 @@ describe("Workstream sidebar binding cancellation", () => {
     WorkstreamSidebarSection({ controller });
     expect(signal?.aborted).toBe(true);
 
-    resolveDetail({
-      detail: {
-        context: { owner_id: "owner", server_generation: 7, registry_version: 11 },
-        workstream: { name: "STALE DETAIL" },
-      },
-      memberships: { context: {}, items: [], next_cursor: null },
-      declarations: { context: {}, items: [], next_cursor: null },
-      edges: { context: {}, items: [], next_cursor: null },
-      history: { context: {}, items: [], next_cursor: null },
-      references: { context: {}, items: [], next_cursor: null },
-    } as unknown as WorkstreamDetailView);
+    resolveDetail(detailWithReference);
     await pendingDetail;
     await Promise.resolve();
 
     hooks.beginRender();
     const current = WorkstreamSidebarSection({ controller });
-    expect(containsText(current, "STALE DETAIL")).toBe(false);
+    expect(containsText(current, "Alpha detail")).toBe(false);
     expect(loadReference).not.toHaveBeenCalled();
+  });
+
+  it("cannot commit a linked-PR status from a replaced authorization snapshot", async () => {
+    let resolveStaleReference!: (value: unknown) => void;
+    const staleReference = new Promise((resolve) => {
+      resolveStaleReference = resolve;
+    });
+    const pendingCurrentReference = new Promise(() => undefined);
+    const loadDetail = vi.fn(async () => detailWithReference);
+    const loadReference = vi
+      .fn()
+      .mockImplementationOnce(() => staleReference)
+      .mockImplementation(() => pendingCurrentReference);
+    let controller = {
+      placementInventory: {
+        coverage: "complete" as const,
+        identities: [],
+        json: "[]",
+        totalIdentities: 0,
+      },
+      placements: null,
+      data,
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+      submit: vi.fn(),
+      loadDetail,
+      loadReference,
+    } as WorkstreamListView;
+
+    hooks.beginRender();
+    const initial = WorkstreamSidebarSection({ controller });
+    const initialAlpha = visitElements(
+      initial,
+      (element) => element.type === "button" && containsText(element, "Alpha"),
+    ) as ReactElement<{ onClick: () => void }> | undefined;
+    initialAlpha?.props.onClick();
+    await Promise.resolve();
+    expect(loadReference).toHaveBeenCalledTimes(1);
+
+    controller = {
+      ...controller,
+      data: {
+        ...data,
+        binding: { ...binding, authorizationRevision: 2, registryVersion: 12 },
+      },
+    };
+    hooks.beginRender();
+    WorkstreamSidebarSection({ controller });
+    resolveStaleReference({
+      latest_observation: { last_success: { state: "STALE STATUS" } },
+    });
+    await staleReference;
+    await Promise.resolve();
+
+    hooks.beginRender();
+    const rebound = WorkstreamSidebarSection({ controller });
+    const reboundAlpha = visitElements(
+      rebound,
+      (element) => element.type === "button" && containsText(element, "Alpha"),
+    ) as ReactElement<{ onClick: () => void }> | undefined;
+    reboundAlpha?.props.onClick();
+    await Promise.resolve();
+
+    hooks.beginRender();
+    const current = WorkstreamSidebarSection({ controller });
+    expect(containsText(current, "STALE STATUS")).toBe(false);
+    expect(containsText(current, "loading")).toBe(true);
+    expect(loadReference).toHaveBeenCalledTimes(2);
   });
 });
