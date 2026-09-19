@@ -28,7 +28,7 @@ const commandId = () =>
   );
 
 export function WorkstreamSidebarSection(props: { readonly controller: WorkstreamListView }) {
-  const { data, submit, loadDetail, loadReference, refresh } = props.controller;
+  const { data, placementInventory, submit, loadDetail, loadReference, refresh } = props.controller;
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [dragging, setDragging] = useState<string | null>(null);
@@ -144,6 +144,13 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
       <div className="flex h-8 items-center px-1 text-xs font-medium text-sidebar-muted-foreground">
         Workstreams
       </div>
+      {placementInventory.coverage === "partial" ? (
+        <p className="px-1 pb-1 text-xs text-sidebar-muted-foreground">
+          Thread placement coverage is partial (
+          {placementInventory.identities.length.toLocaleString()} of{" "}
+          {placementInventory.totalIdentities.toLocaleString()} checked).
+        </p>
+      ) : null}
       {commandError ? <p className="px-1 pb-1 text-xs text-destructive">{commandError}</p> : null}
       <ul className="space-y-0.5">
         {items.map((item, index) => (

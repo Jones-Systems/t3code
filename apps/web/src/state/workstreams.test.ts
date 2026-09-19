@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import { T3_PLACEMENT_MAX_REQUEST_BYTES } from "@t3tools/contracts";
 
 import {
   loadCompleteWorkstreamList,
@@ -42,6 +43,28 @@ describe("complete Workstream list loading", () => {
     expect(excessInventory.coverage).toBe("partial");
     expect(nativePlacementInventory([...excessThreads].reverse())).toEqual(excessInventory);
     expect(nativePlacementInventory(threads).coverage).toBe("complete");
+
+    const byteBoundInventory = nativePlacementInventory(
+      Array.from({ length: 900 }, (_, i) => ({
+        environmentId: `environment-${String(i).padStart(3, "0")}`,
+        id: `${String(i).padStart(3, "0")}-${"x".repeat(508)}`,
+      })),
+    );
+    expect(byteBoundInventory.identities.length).toBeLessThan(900);
+    expect(byteBoundInventory.coverage).toBe("partial");
+    expect(
+      new TextEncoder().encode(JSON.stringify({ identities: byteBoundInventory.identities }))
+        .byteLength,
+    ).toBeLessThanOrEqual(T3_PLACEMENT_MAX_REQUEST_BYTES);
+    const nextIdentity = {
+      source_instance_id: `environment-${String(byteBoundInventory.identities.length).padStart(3, "0")}`,
+      native_thread_id: `${String(byteBoundInventory.identities.length).padStart(3, "0")}-${"x".repeat(508)}`,
+    };
+    expect(
+      new TextEncoder().encode(
+        JSON.stringify({ identities: [...byteBoundInventory.identities, nextIdentity] }),
+      ).byteLength,
+    ).toBeGreaterThan(T3_PLACEMENT_MAX_REQUEST_BYTES);
   });
   it("loads across page boundaries before exposing an owner list", async () => {
     const cursors: Array<string | undefined> = [];

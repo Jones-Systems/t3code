@@ -12,7 +12,7 @@ import type {
   WorkstreamCommand,
   WorkstreamReceipt,
 } from "@t3tools/contracts";
-import { T3_PLACEMENT_MAX_IDENTITIES } from "@t3tools/contracts";
+import { T3_PLACEMENT_MAX_IDENTITIES, T3_PLACEMENT_MAX_REQUEST_BYTES } from "@t3tools/contracts";
 import {
   appendWorkstreamDtoPage,
   appendWorkstreamListResult,
@@ -98,10 +98,21 @@ export function nativePlacementInventory(
     });
   }
   const totalIdentities = identities.size;
-  const selected = [...identities.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .slice(0, T3_PLACEMENT_MAX_IDENTITIES)
-    .map(([, value]) => value);
+  const selected: T3PlacementIdentity[] = [];
+  const encoder = new TextEncoder();
+  let requestBytes = encoder.encode(JSON.stringify({ identities: selected })).byteLength;
+  for (const [, value] of [...identities.entries()].sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  )) {
+    if (selected.length === T3_PLACEMENT_MAX_IDENTITIES) break;
+    const nextBytes =
+      requestBytes +
+      encoder.encode(JSON.stringify(value)).byteLength +
+      (selected.length > 0 ? 1 : 0);
+    if (nextBytes > T3_PLACEMENT_MAX_REQUEST_BYTES) break;
+    selected.push(value);
+    requestBytes = nextBytes;
+  }
   return {
     coverage: totalIdentities > selected.length ? "partial" : "complete",
     identities: selected,
