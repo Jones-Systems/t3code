@@ -46,6 +46,7 @@ const providerInstanceId = ProviderInstanceId.make("codex");
 const projectId = ProjectId.make("project-startup-orphan");
 const threadId = ThreadId.make("thread-startup-orphan");
 const stoppedBindingThreadId = ThreadId.make("thread-startup-orphan-stopped-binding");
+const stoppedBindingWorktreePath = "/tmp/startup-orphan-project/stopped-binding";
 const resumeCursor = { schemaVersion: 1, sessionId: "provider-session-before-restart" };
 const stoppedBindingResumeCursor = {
   schemaVersion: 1,
@@ -209,7 +210,7 @@ it.effect(
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "full-access",
           branch: null,
-          worktreePath: null,
+          worktreePath: stoppedBindingWorktreePath,
           createdAt,
         });
         yield* engine.dispatch({

@@ -225,6 +225,10 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.succeed(Stream.empty),
         latestSequence: Effect.succeed(0),
+        acquireWorktreeOwnership: () => Effect.die("unused"),
+        releaseWorktreeOwnership: () => Effect.die("unused"),
+        listWorktreeOwnershipLeases: Effect.succeed([]),
+        getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
       } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
       Effect.provide(NodeServices.layer),
     );
@@ -279,6 +283,10 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.succeed(Stream.empty),
         latestSequence: Effect.succeed(0),
+        acquireWorktreeOwnership: () => Effect.die("unused"),
+        releaseWorktreeOwnership: () => Effect.die("unused"),
+        listWorktreeOwnershipLeases: Effect.succeed([]),
+        getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
       } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
       Effect.provide(NodeServices.layer),
     );
@@ -342,6 +350,10 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.succeed(Stream.empty),
         latestSequence: Effect.succeed(0),
+        acquireWorktreeOwnership: () => Effect.die("unused"),
+        releaseWorktreeOwnership: () => Effect.die("unused"),
+        listWorktreeOwnershipLeases: Effect.succeed([]),
+        getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
       } satisfies OrchestrationEngine.OrchestrationEngineService["Service"]),
       Effect.provideService(Crypto.Crypto, {
         ...crypto,
