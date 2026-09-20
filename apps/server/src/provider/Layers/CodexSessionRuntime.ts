@@ -39,6 +39,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
+import type { ProcessAttribution } from "../../resourceTelemetry/ProcessAttribution.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
@@ -166,6 +167,7 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly processAttribution?: ProcessAttribution["Service"];
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -179,6 +181,21 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
   readonly interactionMode?: ProviderInteractionMode;
 }
+
+export const registerCodexAppServerProcess = Effect.fn("registerCodexAppServerProcess")(
+  function* (input: {
+    readonly pid: number;
+    readonly threadId: ThreadId;
+    readonly processAttribution?: ProcessAttribution["Service"];
+  }) {
+    if (!input.processAttribution) return;
+    yield* input.processAttribution.registerProviderRoot({
+      pid: input.pid,
+      threadId: input.threadId,
+      provider: PROVIDER,
+    });
+  },
+);
 
 export interface CodexThreadTurnSnapshot {
   readonly id: TurnId;
@@ -1222,6 +1239,12 @@ export const makeCodexSessionRuntime = (
             }),
         ),
       );
+
+    yield* registerCodexAppServerProcess({
+      pid: Number(child.pid),
+      threadId: options.threadId,
+      ...(options.processAttribution ? { processAttribution: options.processAttribution } : {}),
+    });
 
     const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
       Layer.build,
