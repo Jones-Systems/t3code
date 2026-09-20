@@ -66,6 +66,7 @@ import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
+  CODEX_INTERRUPT_TIMEOUT_MS,
   describeMcpElicitation,
   isCodexModelSelectionAvailable,
   makeCodexSessionRuntime,
@@ -2146,7 +2147,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const boundedInterrupt = (session: CodexAdapterSessionContext, nativeTurnId: TurnId) =>
     session.runtime
       .interruptTurn(nativeTurnId)
-      .pipe(Effect.timeoutOption("5 seconds"), Effect.ignore);
+      .pipe(Effect.timeoutOption(CODEX_INTERRUPT_TIMEOUT_MS), Effect.ignore);
 
   const emitSessionContainmentError = (
     session: CodexAdapterSessionContext,
@@ -2204,7 +2205,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   ) {
     const interrupt = yield* session.runtime
       .interruptTurn(nativeTurnId)
-      .pipe(Effect.timeoutOption("5 seconds"), Effect.result);
+      .pipe(Effect.timeoutOption(CODEX_INTERRUPT_TIMEOUT_MS), Effect.result);
     if (interrupt._tag === "Failure" || interrupt.success._tag === "None") return false;
     const confirmed = yield* Deferred.await(terminal).pipe(
       Effect.timeoutOption(CODEX_INTERRUPT_CONFIRM_TIMEOUT),
@@ -3062,6 +3063,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     requireSession(threadId).pipe(
       Effect.flatMap((session) =>
         Effect.gen(function* () {
+          // Stop owns goal pausing; recovery/new-input helpers call the
+          // raw runtime interrupt and must remain goal-neutral.
+          yield* session.runtime.pauseActiveGoal;
           let effectiveTurnId = turnId;
           let shouldInterrupt = true;
           let terminal: Deferred.Deferred<void> | undefined;
@@ -3106,7 +3110,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }
             }),
           );
-          if (shouldInterrupt) {
+          if (!shouldInterrupt) {
+            // Recovery owns the pending root's exact late-start containment,
+            // but existing children need a bounded best-effort interrupt now.
+            yield* session.runtime.interruptChildTurns;
+          } else {
             if (!effectiveTurnId) {
               yield* session.runtime.interruptTurn();
               return;
