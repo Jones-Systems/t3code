@@ -11,6 +11,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   GitCommandError,
+  VcsPrimaryCheckoutCheckpointError,
   VcsProcessExitError,
   type VcsSwitchRefInput,
   type VcsSwitchRefResult,
@@ -708,10 +709,28 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       return path.isAbsolute(gitCommonDir) ? gitCommonDir : path.resolve(cwd, gitCommonDir);
     });
 
+  const resolveGitDir = (cwd: string) =>
+    Effect.gen(function* () {
+      const result = yield* execute({
+        operation: "GitVcsDriver.checkpoints.resolveGitDir",
+        cwd,
+        args: ["rev-parse", "--git-dir"],
+      });
+      const gitDir = result.stdout.trim();
+      return path.isAbsolute(gitDir) ? gitDir : path.resolve(cwd, gitDir);
+    });
+
   const checkpoints: VcsDriver.VcsCheckpointOps = {
     captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
       const operation = "GitVcsDriver.checkpoints.captureCheckpoint";
       const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
+      const gitDir = yield* resolveGitDir(input.cwd);
+      if (path.normalize(gitDir) === path.normalize(gitCommonDir)) {
+        return yield* new VcsPrimaryCheckoutCheckpointError({
+          operation,
+          cwd: input.cwd,
+        });
+      }
       const tempIndexPath = path.join(
         gitCommonDir,
         `t3-checkpoint-index-${NodeCrypto.randomUUID()}`,
