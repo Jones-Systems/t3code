@@ -4499,6 +4499,7 @@ describe("ClaudeAdapterLive", () => {
       yield* adapter.startSession({
         threadId: RESUME_THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeGeneration: "runtime-generation-1",
         resumeCursor: {
           threadId: RESUME_THREAD_ID,
           resume: durableSessionId,
@@ -4551,6 +4552,32 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
 
       const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const configured = runtimeEvents.find(
+        (event) => event.type === "session.configured" && event.payload.identity !== undefined,
+      );
+      assert.equal(configured?.type, "session.configured");
+      if (configured?.type === "session.configured") {
+        assert.equal(configured.runtimeGeneration, "runtime-generation-1");
+        assert.deepEqual(configured.payload.identity, {
+          backend: {
+            status: "unavailable",
+            reason: "The SDK init message does not identify the effective model backend.",
+          },
+          model: {
+            status: "observed",
+            value: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+            sourceEvent: "claude.system:init",
+          },
+          account: {
+            status: "unavailable",
+            reason: "The SDK init message does not bind an account to this runtime.",
+          },
+          serviceTier: {
+            status: "unavailable",
+            reason: "The SDK init message does not report a service tier.",
+          },
+        });
+      }
       const threadStartedEvents = runtimeEvents.filter((event) => event.type === "thread.started");
       assert.equal(threadStartedEvents.length, 1);
       const threadStarted = threadStartedEvents[0];

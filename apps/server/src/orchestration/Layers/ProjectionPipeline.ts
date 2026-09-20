@@ -1254,6 +1254,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         runtimeMode: event.payload.session.runtimeMode,
         activeTurnId: event.payload.session.activeTurnId,
         lastError: event.payload.session.lastError,
+        runtimeIdentity: event.payload.session.runtimeIdentity ?? null,
         updatedAt: event.payload.session.updatedAt,
       });
     });

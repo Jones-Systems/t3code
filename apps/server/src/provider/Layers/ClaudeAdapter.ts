@@ -283,6 +283,7 @@ function rememberPendingTaskModel(
 
 interface ClaudeSessionContext {
   session: ProviderSession;
+  readonly runtimeGeneration: string | undefined;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
@@ -1785,8 +1786,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const nextEventId = Effect.map(randomUUIDv4, (id) => EventId.make(id));
   const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
 
-  const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
+  const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const runtimeGeneration = sessions.get(event.threadId)?.runtimeGeneration;
+    return Queue.offer(runtimeEventQueue, {
+      ...event,
+      providerInstanceId: boundInstanceId,
+      ...(runtimeGeneration ? { runtimeGeneration } : {}),
+    }).pipe(Effect.asVoid);
+  };
 
   const logNativeSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
@@ -3195,6 +3202,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           type: "session.configured",
           payload: {
             config: message as Record<string, unknown>,
+            identity: {
+              backend: {
+                status: "unavailable",
+                reason: "The SDK init message does not identify the effective model backend.",
+              },
+              model: {
+                status: "observed",
+                value: message.model,
+                sourceEvent: "claude.system:init",
+              },
+              account: {
+                status: "unavailable",
+                reason: "The SDK init message does not bind an account to this runtime.",
+              },
+              serviceTier: {
+                status: "unavailable",
+                reason: "The SDK init message does not report a service tier.",
+              },
+            },
           },
         });
         return;
@@ -4475,6 +4501,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const context: ClaudeSessionContext = {
         session,
+        runtimeGeneration: input.runtimeGeneration,
         promptQueue,
         query: queryRuntime,
         streamFiber: undefined,

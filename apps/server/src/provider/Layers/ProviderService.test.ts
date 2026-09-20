@@ -1204,6 +1204,13 @@ routing.layer("ProviderServiceLive routing", (it) => {
       routing.codex.startSession.mockClear();
       routing.codex.sendTurn.mockClear();
 
+      const recoveryEventFiber = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.raw?.source === "t3.provider-service.recovery"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+
       yield* provider.sendTurn({
         threadId: session.threadId,
         input: "after-stop",
@@ -1211,6 +1218,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
       });
 
       assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      const recoveryEvent = yield* Fiber.join(recoveryEventFiber);
+      assert.equal(recoveryEvent._tag, "Some");
       const resumedStartInput = routing.codex.startSession.mock.calls[0]?.[0];
       assert.equal(typeof resumedStartInput === "object" && resumedStartInput !== null, true);
       if (resumedStartInput && typeof resumedStartInput === "object") {
@@ -1218,14 +1227,59 @@ routing.layer("ProviderServiceLive routing", (it) => {
           provider?: string;
           cwd?: string;
           resumeCursor?: unknown;
+          runtimeGeneration?: string;
           threadId?: string;
         };
         assert.equal(startPayload.provider, "codex");
         assert.equal(startPayload.cwd, "/tmp/project");
         assert.deepEqual(startPayload.resumeCursor, session.resumeCursor);
+        assert.equal(
+          startPayload.runtimeGeneration,
+          Option.getOrThrow(recoveryEvent).runtimeGeneration,
+        );
         assert.equal(startPayload.threadId, session.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("does not publish a recovery boundary when adapter restart fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-failed-recovery-generation");
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-failed-recovery",
+        runtimeMode: "full-access",
+      });
+      yield* provider.stopSession({ threadId });
+      routing.codex.startSession.mockImplementationOnce(
+        () =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "startSession",
+              detail: "simulated recovery failure",
+            }),
+          ) as never,
+      );
+
+      const recoveryEventFiber = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.raw?.source === "t3.provider-service.recovery"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      const result = yield* provider
+        .sendTurn({ threadId, input: "resume", attachments: [] })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      yield* Effect.yieldNow;
+      assert.equal(recoveryEventFiber.pollUnsafe(), undefined);
+      yield* Fiber.interrupt(recoveryEventFiber);
     }),
   );
 
