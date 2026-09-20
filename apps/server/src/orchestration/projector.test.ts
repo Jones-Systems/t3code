@@ -6,6 +6,7 @@ import {
   ThreadId,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
+import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -36,6 +37,19 @@ function makeEvent(input: {
     metadata: {},
     payload: input.payload as never,
   } as OrchestrationEvent;
+}
+
+function projectEvents(
+  model: ReturnType<typeof createEmptyReadModel>,
+  events: ReadonlyArray<OrchestrationEvent>,
+) {
+  return Effect.gen(function* () {
+    let current = model;
+    for (const event of events) {
+      current = yield* projectEvent(current, event);
+    }
+    return current;
+  });
 }
 
 describe("orchestration projector", () => {
@@ -354,9 +368,8 @@ describe("orchestration projector", () => {
     expect(settledThread?.latestTurn?.completedAt).toBe(settledAt);
     expect(afterLegacyReady.threads[0]?.latestTurn?.state).toBe("completed");
 
-    const afterNewTurn = await Effect.runPromise(
-      projectEvent(
-        afterReady,
+    const afterLateCheckpoint = await Effect.runPromise(
+      projectEvents(afterReady, [
         makeEvent({
           sequence: 4,
           type: "thread.session-set",
@@ -378,11 +391,6 @@ describe("orchestration projector", () => {
             },
           },
         }),
-      ),
-    );
-    const afterLateCheckpoint = await Effect.runPromise(
-      projectEvent(
-        afterNewTurn,
         makeEvent({
           sequence: 5,
           type: "thread.turn-diff-completed",
@@ -401,7 +409,7 @@ describe("orchestration projector", () => {
             completedAt: "2026-02-23T08:02:01.000Z",
           },
         }),
-      ),
+      ]),
     );
     expect(afterLateCheckpoint.threads[0]?.latestTurn?.turnId).toBe("turn-2");
     expect(afterLateCheckpoint.threads[0]?.updatedAt).toBe("2026-02-23T08:02:01.000Z");
@@ -412,9 +420,8 @@ describe("orchestration projector", () => {
     const updatedAt = "2026-02-23T08:00:05.000Z";
     const model = createEmptyReadModel(createdAt);
 
-    const afterCreate = await Effect.runPromise(
-      projectEvent(
-        model,
+    const afterUpdate = await Effect.runPromise(
+      projectEvents(model, [
         makeEvent({
           sequence: 1,
           type: "thread.created",
@@ -437,12 +444,6 @@ describe("orchestration projector", () => {
             updatedAt: createdAt,
           },
         }),
-      ),
-    );
-
-    const afterUpdate = await Effect.runPromise(
-      projectEvent(
-        afterCreate,
         makeEvent({
           sequence: 2,
           type: "thread.runtime-mode-set",
@@ -456,22 +457,21 @@ describe("orchestration projector", () => {
             updatedAt,
           },
         }),
-      ),
+      ]),
     );
 
     expect(afterUpdate.threads[0]?.runtimeMode).toBe("approval-required");
     expect(afterUpdate.threads[0]?.updatedAt).toBe(updatedAt);
   });
 
-  it("marks assistant messages completed with non-streaming updates", async () => {
-    const createdAt = "2026-02-23T09:00:00.000Z";
-    const deltaAt = "2026-02-23T09:00:01.000Z";
-    const completeAt = "2026-02-23T09:00:03.500Z";
-    const model = createEmptyReadModel(createdAt);
+  effectIt("marks assistant messages completed with non-streaming updates", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-02-23T09:00:00.000Z";
+      const deltaAt = "2026-02-23T09:00:01.000Z";
+      const completeAt = "2026-02-23T09:00:03.500Z";
+      const model = createEmptyReadModel(createdAt);
 
-    const afterCreate = await Effect.runPromise(
-      projectEvent(
-        model,
+      const afterStarting = yield* projectEvents(model, [
         makeEvent({
           sequence: 1,
           type: "thread.created",
@@ -494,12 +494,6 @@ describe("orchestration projector", () => {
             updatedAt: createdAt,
           },
         }),
-      ),
-    );
-
-    const afterPriorRunning = await Effect.runPromise(
-      projectEvent(
-        afterCreate,
         makeEvent({
           sequence: 2,
           type: "thread.session-set",
@@ -521,11 +515,6 @@ describe("orchestration projector", () => {
             },
           },
         }),
-      ),
-    );
-    const afterPriorSettled = await Effect.runPromise(
-      projectEvent(
-        afterPriorRunning,
         makeEvent({
           sequence: 3,
           type: "thread.session-set",
@@ -551,11 +540,6 @@ describe("orchestration projector", () => {
             },
           },
         }),
-      ),
-    );
-    const afterStarting = await Effect.runPromise(
-      projectEvent(
-        afterPriorSettled,
         makeEvent({
           sequence: 4,
           type: "thread.session-set",
@@ -577,11 +561,9 @@ describe("orchestration projector", () => {
             },
           },
         }),
-      ),
-    );
-    const settlementFirstAt = "2026-02-23T09:00:01.500Z";
-    const afterSettlementFirst = await Effect.runPromise(
-      projectEvent(
+      ]);
+      const settlementFirstAt = "2026-02-23T09:00:01.500Z";
+      const afterSettlementFirst = yield* projectEvent(
         afterStarting,
         makeEvent({
           sequence: 5,
@@ -609,19 +591,16 @@ describe("orchestration projector", () => {
             },
           },
         }),
-      ),
-    );
-    expect(afterSettlementFirst.threads[0]?.latestTurn).toMatchObject({
-      turnId: "turn-settlement-first",
-      state: "completed",
-      requestedAt: settlementFirstAt,
-      startedAt: settlementFirstAt,
-      completedAt: settlementFirstAt,
-      assistantMessageId: null,
-    });
-    const afterCheckpoint = await Effect.runPromise(
-      projectEvent(
-        afterStarting,
+      );
+      expect(afterSettlementFirst.threads[0]?.latestTurn).toMatchObject({
+        turnId: "turn-settlement-first",
+        state: "completed",
+        requestedAt: settlementFirstAt,
+        startedAt: settlementFirstAt,
+        completedAt: settlementFirstAt,
+        assistantMessageId: null,
+      });
+      const afterComplete = yield* projectEvents(afterStarting, [
         makeEvent({
           sequence: 6,
           type: "thread.turn-diff-completed",
@@ -640,12 +619,6 @@ describe("orchestration projector", () => {
             completedAt: deltaAt,
           },
         }),
-      ),
-    );
-
-    const afterDelta = await Effect.runPromise(
-      projectEvent(
-        afterCheckpoint,
         makeEvent({
           sequence: 7,
           type: "thread.message-sent",
@@ -664,12 +637,6 @@ describe("orchestration projector", () => {
             updatedAt: deltaAt,
           },
         }),
-      ),
-    );
-
-    const afterComplete = await Effect.runPromise(
-      projectEvent(
-        afterDelta,
         makeEvent({
           sequence: 8,
           type: "thread.message-sent",
@@ -688,20 +655,18 @@ describe("orchestration projector", () => {
             updatedAt: completeAt,
           },
         }),
-      ),
-    );
+      ]);
 
-    const message = afterComplete.threads[0]?.messages[0];
-    expect(message?.id).toBe("assistant:msg-1");
-    expect(message?.text).toBe("hello");
-    expect(message?.streaming).toBe(false);
-    expect(message?.updatedAt).toBe(completeAt);
-    expect(afterComplete.threads[0]?.latestTurn?.state).toBe("running");
-    expect(afterComplete.threads[0]?.latestTurn?.assistantMessageId).toBe("assistant:msg-1");
-    expect(afterComplete.threads[0]?.checkpoints[0]?.assistantMessageId).toBe("assistant:msg-1");
+      const message = afterComplete.threads[0]?.messages[0];
+      expect(message?.id).toBe("assistant:msg-1");
+      expect(message?.text).toBe("hello");
+      expect(message?.streaming).toBe(false);
+      expect(message?.updatedAt).toBe(completeAt);
+      expect(afterComplete.threads[0]?.latestTurn?.state).toBe("running");
+      expect(afterComplete.threads[0]?.latestTurn?.assistantMessageId).toBe("assistant:msg-1");
+      expect(afterComplete.threads[0]?.checkpoints[0]?.assistantMessageId).toBe("assistant:msg-1");
 
-    const afterSettlement = await Effect.runPromise(
-      projectEvent(
+      const afterSettlement = yield* projectEvent(
         afterComplete,
         makeEvent({
           sequence: 9,
@@ -728,11 +693,11 @@ describe("orchestration projector", () => {
             },
           },
         }),
-      ),
-    );
-    expect(afterSettlement.threads[0]?.latestTurn?.state).toBe("completed");
-    expect(afterSettlement.threads[0]?.latestTurn?.assistantMessageId).toBe("assistant:msg-1");
-  });
+      );
+      expect(afterSettlement.threads[0]?.latestTurn?.state).toBe("completed");
+      expect(afterSettlement.threads[0]?.latestTurn?.assistantMessageId).toBe("assistant:msg-1");
+    }),
+  );
 
   it("prunes reverted turn messages from in-memory thread snapshot", async () => {
     const createdAt = "2026-02-23T10:00:00.000Z";
