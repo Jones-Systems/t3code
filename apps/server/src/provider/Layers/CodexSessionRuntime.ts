@@ -53,6 +53,12 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const CODEX_CHILD_INTERRUPT_TIMEOUT_MS = 10_000;
+const CODEX_ROOT_INTERRUPT_TIMEOUT_MS = 3_000;
+// Adapter containment must leave the root its full request budget after the
+// child fleet expires, with headroom for scheduling and request setup.
+export const CODEX_INTERRUPT_TIMEOUT_MS =
+  CODEX_CHILD_INTERRUPT_TIMEOUT_MS + CODEX_ROOT_INTERRUPT_TIMEOUT_MS + 1_000;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "missing thread",
@@ -228,7 +234,8 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
-  | CodexSessionRuntimeThreadIdMissingError;
+  | CodexSessionRuntimeThreadIdMissingError
+  | CodexSessionRuntimeInterruptTimeoutError;
 
 export function isCodexModelSelectionAvailable(
   models: ReadonlyArray<EffectCodexSchema.V2ModelListResponse__Model>,
@@ -282,6 +289,18 @@ export class CodexSessionRuntimeThreadIdMissingError extends Schema.TaggedErrorC
 ) {
   override get message(): string {
     return `Codex session is missing a provider thread id for ${this.threadId}`;
+  }
+}
+
+export class CodexSessionRuntimeInterruptTimeoutError extends Schema.TaggedErrorClass<CodexSessionRuntimeInterruptTimeoutError>()(
+  "CodexSessionRuntimeInterruptTimeoutError",
+  {
+    threadId: Schema.String,
+    turnId: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Codex did not acknowledge interruption of turn ${this.turnId} within ${CODEX_ROOT_INTERRUPT_TIMEOUT_MS}ms; the turn may still be running.`;
   }
 }
 
@@ -2340,7 +2359,7 @@ export const makeCodexSessionRuntime = (
             })
             .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
         { concurrency: 8, discard: true },
-      ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
+      ).pipe(Effect.timeoutOption(CODEX_CHILD_INTERRUPT_TIMEOUT_MS), Effect.ignore);
     });
 
     return {
@@ -2449,10 +2468,21 @@ export const makeCodexSessionRuntime = (
           if (!effectiveTurnId) {
             return;
           }
-          yield* client.request("turn/interrupt", {
-            threadId: providerThreadId,
-            turnId: effectiveTurnId,
-          });
+          yield* client
+            .request("turn/interrupt", {
+              threadId: providerThreadId,
+              turnId: effectiveTurnId,
+            })
+            .pipe(
+              Effect.timeoutOrElse({
+                duration: CODEX_ROOT_INTERRUPT_TIMEOUT_MS,
+                orElse: () =>
+                  new CodexSessionRuntimeInterruptTimeoutError({
+                    threadId: providerThreadId,
+                    turnId: effectiveTurnId,
+                  }),
+              }),
+            );
         }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;

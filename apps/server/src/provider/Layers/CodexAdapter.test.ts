@@ -43,6 +43,7 @@ import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   type CodexSessionRuntimeOptions,
+  CodexSessionRuntimeInterruptTimeoutError,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
@@ -148,7 +149,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.listModelsImpl());
   }
 
-  interruptTurn(turnId?: TurnId) {
+  interruptTurn(turnId?: TurnId): ReturnType<CodexSessionRuntimeShape["interruptTurn"]> {
     return Effect.promise(() => this.interruptTurnImpl(turnId));
   }
 
@@ -725,6 +726,28 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       yield* adapter.interruptTurn(asThreadId("thread-1"));
 
       NodeAssert.deepStrictEqual(callOrder, ["pause-goal", "interrupt:omitted"]);
+    }),
+  );
+
+  it.effect("reports a typed root timeout as failed Stop instead of success", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const timeout = new CodexSessionRuntimeInterruptTimeoutError({
+        threadId: "provider-thread-1",
+        turnId: "hanging-root",
+      });
+      vi.spyOn(runtime, "interruptTurn").mockReturnValue(Effect.fail(timeout));
+
+      const result = yield* adapter.interruptTurn(asThreadId("thread-1")).pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterRequestError");
+      if (result.failure._tag !== "ProviderAdapterRequestError") return;
+      NodeAssert.equal(result.failure.method, "turn/interrupt");
+      NodeAssert.equal(result.failure.cause, timeout);
+      NodeAssert.match(result.failure.detail, /may still be running/);
+      NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
     }),
   );
 
@@ -1348,6 +1371,55 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       yield* Fiber.join(explicitFiber);
       NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 3);
       NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 0);
+      yield* Fiber.interrupt(drainFiber);
+    }),
+  );
+
+  it.effect("lets recovery Stop reach the root after the child fleet exhausts its deadline", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const drainFiber = yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkChild);
+      let turnNumber = 0;
+      runtime.sendTurnImpl.mockImplementation(() =>
+        Promise.resolve({
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(`deadline-turn-${turnNumber++}`),
+        }),
+      );
+      const initial = yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "keep working",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "medium" },
+        ]),
+        attachments: [],
+      });
+      yield* runtime.emit(capacityErrorEvent("deadline-initial-error", initial.turnId));
+      yield* runtime.emit(turnCompletedEvent("deadline-initial-completed", initial.turnId));
+      yield* TestClock.adjust("15 seconds");
+      yield* Effect.yieldNow;
+      const interruptedRoots: Array<TurnId | undefined> = [];
+      vi.spyOn(runtime, "interruptTurn").mockImplementation((turnId) =>
+        Effect.gen(function* () {
+          NodeAssert.ok(turnId);
+          yield* Effect.sleep("10 seconds");
+          interruptedRoots.push(turnId);
+          yield* Effect.sleep("2 seconds");
+          yield* runtime.emit(
+            turnCompletedEvent("deadline-recovery-completed", turnId, "failed", "other"),
+          );
+        }),
+      );
+      const stopFiber = yield* adapter.interruptTurn(asThreadId("thread-1")).pipe(Effect.forkChild);
+      yield* TestClock.adjust("5 seconds");
+      NodeAssert.deepStrictEqual(interruptedRoots, []);
+      yield* TestClock.adjust("7 seconds");
+      yield* Fiber.join(stopFiber);
+      NodeAssert.deepStrictEqual(interruptedRoots, [asTurnId("deadline-turn-1")]);
+      NodeAssert.equal(runtime.pauseActiveGoalImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 0);
+      yield* TestClock.adjust("5 minutes");
+      NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
       yield* Fiber.interrupt(drainFiber);
     }),
   );

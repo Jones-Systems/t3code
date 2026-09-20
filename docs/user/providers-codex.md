@@ -61,8 +61,10 @@ Selecting **Stop** pauses an active native Codex goal before interrupting the cu
 its sub-agents. This prevents the goal from immediately starting another continuation. Stop
 also pauses the goal when an automatic capacity retry is waiting to start.
 
-If Codex cannot read or pause the goal, T3 Code still interrupts the turn. The goal may remain
-active in that case. Threads without an active goal keep their ordinary Stop behavior.
+If Codex cannot read or pause the goal, T3 Code still attempts to interrupt the turn. The goal may
+remain active in that case. Threads without an active goal keep their ordinary Stop behavior.
+If Codex does not acknowledge the root turn's interrupt request within three seconds after
+sub-agent interruption, Stop reports an error; the turn may still be running.
 
 ## Sub-agent models
 

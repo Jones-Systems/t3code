@@ -649,6 +649,84 @@ describe("CodexSessionRuntime collab integration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  for (const childCount of [0, 33]) {
+    it.live(
+      `fails a hanging root interrupt after a bounded request with ${childCount} hanging children`,
+      () =>
+        Effect.gen(function* () {
+          const scratchRoot = NodeFS.mkdtempSync(
+            NodePath.join(NodeOS.tmpdir(), "t3-codex-interrupt-"),
+          );
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => NodeFS.rmSync(scratchRoot, { recursive: true, force: true })),
+          );
+          const uniqueScriptPath = NodePath.join(scratchRoot, "script.json");
+          const children = Array.from(
+            { length: childCount },
+            (_, index) => `deadline-child-${index}`,
+          );
+          const rootTurnId = "hanging-root-turn";
+          const script = {
+            rootThreadId: ROOT,
+            holdTurnOpen: true,
+            turnIds: [rootTurnId],
+            hangInterruptsFor: [...children, ROOT],
+            notifications: children.flatMap((childId) => [
+              capturedStartedActivity(childId),
+              {
+                method: "turn/started",
+                params: {
+                  threadId: childId,
+                  turn: { id: `${childId}-turn`, status: "inProgress", items: [] },
+                },
+              },
+            ]),
+          };
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          NodeFS.writeFileSync(uniqueScriptPath, JSON.stringify(script), "utf8");
+          const runtime = yield* makeCodexSessionRuntime({
+            threadId: ThreadId.make(`thread-hanging-root-${childCount}`),
+            binaryPath: peerPath,
+            cwd: scratchRoot,
+            runtimeMode: "full-access",
+            environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: uniqueScriptPath },
+          });
+          const childrenStarted = yield* runtime.events.pipe(
+            Stream.filter((event) => event.method === "collabAgent/turnStarted"),
+            Stream.take(childCount),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+          yield* runtime.start();
+          yield* runtime.sendTurn({ input: "keep working" });
+          yield* Fiber.join(childrenStarted);
+
+          const result = yield* runtime
+            .interruptTurn()
+            .pipe(Effect.result, Effect.timeout("15 seconds"));
+          assert.equal(result._tag, "Failure");
+          if (result._tag !== "Failure") return;
+          assert.equal(result.failure._tag, "CodexSessionRuntimeInterruptTimeoutError");
+          if (result.failure._tag !== "CodexSessionRuntimeInterruptTimeoutError") return;
+          assert.equal(result.failure.threadId, ROOT);
+          assert.equal(result.failure.turnId, rootTurnId);
+          assert.match(result.failure.message, /may still be running/);
+          assert.equal((yield* runtime.getSession).activeTurnId, rootTurnId);
+          const interrupted = NodeFS.readFileSync(`${uniqueScriptPath}.interrupts`, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { threadId: string; turnId: string });
+          assert.deepEqual(interrupted.at(-1), { threadId: ROOT, turnId: rootTurnId });
+          if (childCount > 0) {
+            // Four batches start before the fleet expires; the fifth never starts.
+            assert.equal(interrupted.length, 33);
+            assert.isFalse(interrupted.some((request) => request.threadId === children.at(-1)));
+          }
+          yield* runtime.close;
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   it.live("pauses an active goal and keeps it paused across a runtime restart", () =>
     Effect.gen(function* () {
       const scratchRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-goal-"));
