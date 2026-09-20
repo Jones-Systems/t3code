@@ -272,76 +272,139 @@ describe("orchestration projector", () => {
       ),
     );
 
-    const settledAt = "2026-02-23T08:01:00.000Z";
-    const [afterRunning, afterReady] = await Effect.runPromise(
-      Effect.flatMap(
-        projectEvent(
-          afterCreate,
-          makeEvent({
-            sequence: 2,
-            type: "thread.session-set",
-            aggregateKind: "thread",
-            aggregateId: "thread-1",
-            occurredAt: startedAt,
-            commandId: "cmd-running",
-            payload: {
+    const afterRunning = await Effect.runPromise(
+      projectEvent(
+        afterCreate,
+        makeEvent({
+          sequence: 2,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: startedAt,
+          commandId: "cmd-running",
+          payload: {
+            threadId: "thread-1",
+            session: {
               threadId: "thread-1",
-              session: {
-                threadId: "thread-1",
-                status: "running",
-                providerName: "codex",
-                providerSessionId: "session-1",
-                providerThreadId: "provider-thread-1",
-                runtimeMode: "approval-required",
-                activeTurnId: "turn-1",
-                lastError: null,
-                updatedAt: startedAt,
-              },
+              status: "running",
+              providerName: "codex",
+              providerSessionId: "session-1",
+              providerThreadId: "provider-thread-1",
+              runtimeMode: "approval-required",
+              activeTurnId: "turn-1",
+              lastError: null,
+              updatedAt: startedAt,
             },
-          }),
-        ),
-        (running) =>
-          Effect.map(
-            projectEvent(
-              running,
-              makeEvent({
-                sequence: 3,
-                type: "thread.session-set",
-                aggregateKind: "thread",
-                aggregateId: "thread-1",
-                occurredAt: settledAt,
-                commandId: "cmd-ready",
-                payload: {
-                  threadId: "thread-1",
-                  session: {
-                    threadId: "thread-1",
-                    status: "ready",
-                    providerName: "codex",
-                    providerSessionId: "session-1",
-                    providerThreadId: "provider-thread-1",
-                    runtimeMode: "approval-required",
-                    activeTurnId: null,
-                    lastError: null,
-                    updatedAt: settledAt,
-                  },
-                },
-              }),
-            ),
-            (ready) => [running, ready] as const,
-          ),
+          },
+        }),
       ),
+    );
+    const settledAt = "2026-02-23T08:01:00.000Z";
+    const readyEvent = (
+      turnSettlement:
+        | null
+        | undefined
+        | { turnId: string; state: "completed"; completedAt: string },
+    ) =>
+      makeEvent({
+        sequence: 3,
+        type: "thread.session-set",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: settledAt,
+        commandId: "cmd-ready",
+        payload: {
+          threadId: "thread-1",
+          ...(turnSettlement !== undefined ? { turnSettlement } : {}),
+          session: {
+            threadId: "thread-1",
+            status: "ready",
+            providerName: "codex",
+            providerSessionId: "session-1",
+            providerThreadId: "provider-thread-1",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: settledAt,
+          },
+        },
+      });
+    const afterStatusOnly = await Effect.runPromise(projectEvent(afterRunning, readyEvent(null)));
+    const afterReady = await Effect.runPromise(
+      projectEvent(
+        afterStatusOnly,
+        readyEvent({ turnId: "turn-1", state: "completed", completedAt: settledAt }),
+      ),
+    );
+    const afterLegacyReady = await Effect.runPromise(
+      projectEvent(afterRunning, readyEvent(undefined)),
     );
 
     const thread = afterRunning.threads[0];
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
     expect(thread?.session?.status).toBe("running");
 
-    // Leaving the "running" session status settles the running turn with the
-    // session timestamp as the turn end.
+    expect(afterStatusOnly.threads[0]?.latestTurn?.state).toBe("running");
+    expect(afterStatusOnly.threads[0]?.latestTurn?.completedAt).toBeNull();
+
+    // The attributed settlement, not readiness alone, settles the turn.
     const settledThread = afterReady.threads[0];
     expect(settledThread?.latestTurn?.turnId).toBe("turn-1");
     expect(settledThread?.latestTurn?.state).toBe("completed");
     expect(settledThread?.latestTurn?.completedAt).toBe(settledAt);
+    expect(afterLegacyReady.threads[0]?.latestTurn?.state).toBe("completed");
+
+    const afterNewTurn = await Effect.runPromise(
+      projectEvent(
+        afterReady,
+        makeEvent({
+          sequence: 4,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T08:02:00.000Z",
+          commandId: "cmd-new-turn",
+          payload: {
+            threadId: "thread-1",
+            turnSettlement: null,
+            session: {
+              threadId: "thread-1",
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: "turn-2",
+              lastError: null,
+              updatedAt: "2026-02-23T08:02:00.000Z",
+            },
+          },
+        }),
+      ),
+    );
+    const afterLateCheckpoint = await Effect.runPromise(
+      projectEvent(
+        afterNewTurn,
+        makeEvent({
+          sequence: 5,
+          type: "thread.turn-diff-completed",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T08:02:01.000Z",
+          commandId: "cmd-late-checkpoint",
+          payload: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            checkpointTurnCount: 1,
+            checkpointRef: "refs/t3/checkpoints/thread-1/turn/1",
+            status: "ready",
+            files: [],
+            assistantMessageId: null,
+            completedAt: "2026-02-23T08:02:01.000Z",
+          },
+        }),
+      ),
+    );
+    expect(afterLateCheckpoint.threads[0]?.latestTurn?.turnId).toBe("turn-2");
+    expect(afterLateCheckpoint.threads[0]?.updatedAt).toBe("2026-02-23T08:02:01.000Z");
   });
 
   it("updates canonical thread runtime mode from thread.runtime-mode-set", async () => {
@@ -434,11 +497,157 @@ describe("orchestration projector", () => {
       ),
     );
 
-    const afterDelta = await Effect.runPromise(
+    const afterPriorRunning = await Effect.runPromise(
       projectEvent(
         afterCreate,
         makeEvent({
           sequence: 2,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-prior-running",
+          payload: {
+            threadId: "thread-1",
+            turnSettlement: null,
+            session: {
+              threadId: "thread-1",
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: "turn-prior",
+              lastError: null,
+              updatedAt: createdAt,
+            },
+          },
+        }),
+      ),
+    );
+    const afterPriorSettled = await Effect.runPromise(
+      projectEvent(
+        afterPriorRunning,
+        makeEvent({
+          sequence: 3,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-prior-settled",
+          payload: {
+            threadId: "thread-1",
+            turnSettlement: {
+              turnId: "turn-prior",
+              state: "completed",
+              completedAt: createdAt,
+            },
+            session: {
+              threadId: "thread-1",
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: createdAt,
+            },
+          },
+        }),
+      ),
+    );
+    const afterStarting = await Effect.runPromise(
+      projectEvent(
+        afterPriorSettled,
+        makeEvent({
+          sequence: 4,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: deltaAt,
+          commandId: "cmd-starting",
+          payload: {
+            threadId: "thread-1",
+            turnSettlement: null,
+            session: {
+              threadId: "thread-1",
+              status: "starting",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: deltaAt,
+            },
+          },
+        }),
+      ),
+    );
+    const settlementFirstAt = "2026-02-23T09:00:01.500Z";
+    const afterSettlementFirst = await Effect.runPromise(
+      projectEvent(
+        afterStarting,
+        makeEvent({
+          sequence: 5,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: settlementFirstAt,
+          commandId: "cmd-settlement-first",
+          payload: {
+            threadId: "thread-1",
+            turnSettlement: {
+              turnId: "turn-settlement-first",
+              state: "completed",
+              completedAt: settlementFirstAt,
+              recoversMissingStart: true,
+            },
+            session: {
+              threadId: "thread-1",
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: settlementFirstAt,
+            },
+          },
+        }),
+      ),
+    );
+    expect(afterSettlementFirst.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-settlement-first",
+      state: "completed",
+      requestedAt: settlementFirstAt,
+      startedAt: settlementFirstAt,
+      completedAt: settlementFirstAt,
+      assistantMessageId: null,
+    });
+    const afterCheckpoint = await Effect.runPromise(
+      projectEvent(
+        afterStarting,
+        makeEvent({
+          sequence: 6,
+          type: "thread.turn-diff-completed",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: deltaAt,
+          commandId: "cmd-checkpoint",
+          payload: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            checkpointTurnCount: 1,
+            checkpointRef: "refs/t3/checkpoints/thread-1/turn/1",
+            status: "ready",
+            files: [],
+            assistantMessageId: null,
+            completedAt: deltaAt,
+          },
+        }),
+      ),
+    );
+
+    const afterDelta = await Effect.runPromise(
+      projectEvent(
+        afterCheckpoint,
+        makeEvent({
+          sequence: 7,
           type: "thread.message-sent",
           aggregateKind: "thread",
           aggregateId: "thread-1",
@@ -462,7 +671,7 @@ describe("orchestration projector", () => {
       projectEvent(
         afterDelta,
         makeEvent({
-          sequence: 3,
+          sequence: 8,
           type: "thread.message-sent",
           aggregateKind: "thread",
           aggregateId: "thread-1",
@@ -487,6 +696,42 @@ describe("orchestration projector", () => {
     expect(message?.text).toBe("hello");
     expect(message?.streaming).toBe(false);
     expect(message?.updatedAt).toBe(completeAt);
+    expect(afterComplete.threads[0]?.latestTurn?.state).toBe("running");
+    expect(afterComplete.threads[0]?.latestTurn?.assistantMessageId).toBe("assistant:msg-1");
+    expect(afterComplete.threads[0]?.checkpoints[0]?.assistantMessageId).toBe("assistant:msg-1");
+
+    const afterSettlement = await Effect.runPromise(
+      projectEvent(
+        afterComplete,
+        makeEvent({
+          sequence: 9,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: completeAt,
+          commandId: "cmd-settle",
+          payload: {
+            threadId: "thread-1",
+            turnSettlement: {
+              turnId: "turn-1",
+              state: "completed",
+              completedAt: completeAt,
+            },
+            session: {
+              threadId: "thread-1",
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: completeAt,
+            },
+          },
+        }),
+      ),
+    );
+    expect(afterSettlement.threads[0]?.latestTurn?.state).toBe("completed");
+    expect(afterSettlement.threads[0]?.latestTurn?.assistantMessageId).toBe("assistant:msg-1");
   });
 
   it("prunes reverted turn messages from in-memory thread snapshot", async () => {
@@ -702,6 +947,8 @@ describe("orchestration projector", () => {
     ).toEqual([{ id: "activity-1", turnId: "turn-1" }]);
     expect(thread?.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount)).toEqual([1]);
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
+    expect(thread?.latestTurn?.state).toBe("running");
+    expect(thread?.latestTurn?.completedAt).toBeNull();
   });
 
   it("does not fallback-retain messages tied to removed turn IDs", async () => {
