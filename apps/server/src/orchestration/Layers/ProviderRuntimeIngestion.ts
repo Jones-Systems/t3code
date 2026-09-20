@@ -16,8 +16,11 @@ import {
   type OrchestrationCheckpointSummary,
   type OrchestrationProposedPlan,
   type OrchestrationThread,
+  type OrchestrationThreadShell,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
+  type ProviderInstanceId,
+  type RuntimeIdentityAttestation,
   RuntimeRequestId,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
@@ -105,6 +108,57 @@ const TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY = 10_000;
 const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+
+function eventMatchesAttestedRuntime(
+  thread: OrchestrationThreadShell,
+  event: ProviderRuntimeEvent,
+): event is ProviderRuntimeEvent & { readonly providerInstanceId: ProviderInstanceId } {
+  const session = thread.session;
+  const requested = session?.runtimeIdentity?.requested;
+  return (
+    event.providerInstanceId !== undefined &&
+    event.runtimeGeneration !== undefined &&
+    session?.providerName === event.provider &&
+    session.providerInstanceId === event.providerInstanceId &&
+    requested?.providerDriver === event.provider &&
+    requested.providerInstanceId === event.providerInstanceId &&
+    session.runtimeIdentity?.runtimeGeneration === event.runtimeGeneration
+  );
+}
+
+function unobservedRuntimeIdentity(): RuntimeIdentityAttestation["observed"] {
+  return {
+    backend: { status: "unknown" },
+    model: { status: "unknown" },
+    account: {
+      status: "unavailable",
+      reason: "No supported provider event safely binds an account to this runtime.",
+    },
+    serviceTier: { status: "unknown" },
+  };
+}
+
+function runtimeIdentityForLifecycle(
+  thread: OrchestrationThreadShell,
+  event: ProviderRuntimeEvent,
+) {
+  const identity = thread.session?.runtimeIdentity;
+  const isRecoveryBoundary =
+    event.type === "session.started" &&
+    event.runtimeGeneration !== undefined &&
+    event.providerInstanceId !== undefined &&
+    event.provider === thread.session?.providerName &&
+    event.providerInstanceId === thread.session.providerInstanceId &&
+    event.raw?.source === "t3.provider-service.recovery" &&
+    event.raw.method === "session/recovered";
+  return isRecoveryBoundary && identity !== undefined
+    ? {
+        runtimeGeneration: event.runtimeGeneration,
+        requested: identity.requested,
+        observed: unobservedRuntimeIdentity(),
+      }
+    : identity;
+}
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
@@ -1697,6 +1751,7 @@ const make = Effect.gen(function* () {
               : status === "ready"
                 ? null
                 : (thread.session?.lastError ?? null);
+        const runtimeIdentity = runtimeIdentityForLifecycle(thread, event);
 
         if (shouldApplyThreadLifecycle) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
@@ -1733,11 +1788,87 @@ const make = Effect.gen(function* () {
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
               lastError,
+              ...(runtimeIdentity !== undefined ? { runtimeIdentity } : {}),
               updatedAt: now,
             },
             createdAt: now,
           });
         }
+      }
+
+      if (
+        event.type === "session.configured" &&
+        event.payload.identity !== undefined &&
+        eventMatchesAttestedRuntime(thread, event)
+      ) {
+        const previousSession = thread.session;
+        const previousIdentity = previousSession?.runtimeIdentity;
+        if (previousSession == null || previousIdentity === undefined) {
+          return;
+        }
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: yield* providerCommandId(event, "runtime-identity-session-set"),
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: previousSession?.status ?? "ready",
+            providerName: event.provider,
+            providerInstanceId: event.providerInstanceId,
+            runtimeMode: previousSession.runtimeMode,
+            activeTurnId: previousSession.activeTurnId,
+            lastError: previousSession.lastError,
+            runtimeIdentity: {
+              runtimeGeneration: event.runtimeGeneration,
+              requested: previousIdentity.requested,
+              observed: event.payload.identity,
+            },
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+      }
+
+      if (
+        event.type === "model.rerouted" &&
+        event.provider === "codex" &&
+        event.raw?.source === "codex.app-server.notification" &&
+        event.raw.method === "model/rerouted" &&
+        eventMatchesAttestedRuntime(thread, event)
+      ) {
+        const previousSession = thread.session;
+        const identity = previousSession?.runtimeIdentity;
+        if (previousSession == null || identity === undefined) {
+          return;
+        }
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: yield* providerCommandId(event, "runtime-reroute-identity-session-set"),
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: previousSession?.status ?? "ready",
+            providerName: event.provider,
+            providerInstanceId: event.providerInstanceId,
+            runtimeMode: previousSession.runtimeMode,
+            activeTurnId: previousSession.activeTurnId,
+            lastError: previousSession.lastError,
+            runtimeIdentity: {
+              runtimeGeneration: event.runtimeGeneration,
+              requested: identity.requested,
+              observed: {
+                ...identity.observed,
+                model: {
+                  status: "observed",
+                  value: event.payload.toModel,
+                  sourceEvent: event.raw.method,
+                },
+              },
+            },
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
       }
 
       const assistantDelta =
@@ -1984,6 +2115,9 @@ const make = Effect.gen(function* () {
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: eventTurnId ?? null,
               lastError: runtimeErrorMessage,
+              ...(thread.session?.runtimeIdentity !== undefined
+                ? { runtimeIdentity: thread.session.runtimeIdentity }
+                : {}),
               updatedAt: now,
             },
             createdAt: now,

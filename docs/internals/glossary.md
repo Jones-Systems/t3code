@@ -101,6 +101,13 @@ The backend agent runtime that actually performs work. Six drivers ship built in
 
 The live provider-backed runtime attached to a thread. Session shape is in [the orchestration contracts][1], and lifecycle is managed in [ProviderService.ts][14].
 
+#### Runtime identity attestation
+
+The requested provider route beside the identity a provider runtime authoritatively reports. Each
+observed backend, model, account, or service-tier dimension is explicitly `observed`, `unknown`, or
+`unavailable`; configuration and adapter echoes remain request evidence, not observation. See the
+[provider runtime identity work note][27].
+
 #### Runtime mode
 
 The safety/access mode for a thread or session. [The contracts][1] define four values: `approval-required`, `auto-accept-edits`, `auto`, and `full-access`. See [permission modes][18].
@@ -209,3 +216,4 @@ ships T3 Code already matching it.
 [24]: ./overview.md
 [25]: ../../apps/server/src/environmentTheme.ts
 [26]: ../user/environment-theme.md
+[27]: ./provider-runtime-identity.md
