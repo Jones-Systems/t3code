@@ -295,6 +295,7 @@ describe("complete Workstream detail loading", () => {
     const result = await loadCompleteWorkstreamDetail(loaders, { wait });
 
     expect(result.detail).toBe(detail);
+    expect(result.history.coverage).toBe("complete");
     expect(calls.memberships).toEqual([undefined, "stale", undefined]);
     for (const name of ["detail", "declarations", "edges", "history", "references"] as const)
       expect(calls[name]).toHaveLength(2);
