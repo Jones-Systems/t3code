@@ -77,6 +77,7 @@ const runReconciliation = (input: {
   readonly providerService?: ProviderService.ProviderService["Service"];
   readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
   readonly dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"];
+  readonly acquireWorktreeOwnership?: OrchestrationEngine.OrchestrationEngineService["Service"]["acquireWorktreeOwnership"];
 }) =>
   ServerRuntimeStartup.reconcileProviderSessions.pipe(
     Effect.provideService(
@@ -94,6 +95,22 @@ const runReconciliation = (input: {
       streamDomainEvents: Stream.empty,
       subscribeDomainEvents: Effect.succeed(Stream.empty),
       latestSequence: Effect.succeed(0),
+      acquireWorktreeOwnership:
+        input.acquireWorktreeOwnership ??
+        ((threadId) =>
+          Effect.succeed({
+            resourcePath: `/workspace/${threadId}`,
+            leaseId: `lease-${threadId}`,
+            ownerThreadId: threadId,
+            ownerIncarnation: `event-${threadId}`,
+            branch: null,
+            acquiredAtMs: 0,
+            renewedAtMs: 0,
+            expiresAtMs: 300_000,
+          })),
+      releaseWorktreeOwnership: () => Effect.die("unused"),
+      listWorktreeOwnershipLeases: Effect.succeed([]),
+      getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
     }),
     Effect.provide(NodeServices.layer),
   );
@@ -458,10 +475,24 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
   const dispatched: OrchestrationCommand[] = [];
   const bindingReads: ThreadId[] = [];
   const upserts: ProviderSessionDirectory.ProviderRuntimeBinding[] = [];
+  const ownershipAcquisitions: ThreadId[] = [];
 
   return runReconciliation({
     threads: [starting, running, staleActiveTurn, archived, live, settled],
     liveThreadIds: [live.id],
+    acquireWorktreeOwnership: (threadId) =>
+      Effect.sync(() => ownershipAcquisitions.push(threadId)).pipe(
+        Effect.as({
+          resourcePath: `/workspace/${threadId}`,
+          leaseId: `lease-${threadId}`,
+          ownerThreadId: threadId,
+          ownerIncarnation: `event-${threadId}`,
+          branch: null,
+          acquiredAtMs: 0,
+          renewedAtMs: 0,
+          expiresAtMs: 300_000,
+        }),
+      ),
     directory: {
       getBinding: (candidate) =>
         Effect.sync(() => bindingReads.push(candidate)).pipe(
@@ -493,6 +524,7 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
     Effect.tap(() =>
       Effect.sync(() => {
         const orphanIds = [starting.id, running.id, staleActiveTurn.id, archived.id];
+        assert.deepStrictEqual(ownershipAcquisitions, [live.id]);
         assert.deepStrictEqual(bindingReads, orphanIds);
         assert.deepStrictEqual(
           dispatched.map((command) => command.type === "thread.session.set" && command.threadId),
@@ -523,6 +555,51 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
               : { activeTurnId: null, unrelated: binding.threadId },
           );
           assert.deepStrictEqual(binding.resumeCursor, { cursor: binding.threadId });
+        }
+      }),
+    ),
+  );
+});
+
+it.effect("stops and settles a live session whose ownership cannot be recovered", () => {
+  const live = makeThread("thread-live-conflict", "running", TurnId.make("turn-live-conflict"));
+  const stopped: ThreadId[] = [];
+  const dispatched: OrchestrationCommand[] = [];
+  const conflict = new OrchestrationCommandInvariantError({
+    commandType: "worktree.ownership.acquire",
+    detail: "simulated ownership conflict",
+  });
+
+  return runReconciliation({
+    threads: [live],
+    liveThreadIds: [live.id],
+    acquireWorktreeOwnership: () => Effect.fail(conflict),
+    providerService: {
+      ...makeProviderService([live.id]),
+      stopSession: ({ threadId }) =>
+        Effect.sync(() => {
+          stopped.push(threadId);
+        }),
+    },
+    directory: {
+      getBinding: () => Effect.die("unused"),
+      upsert: () => Effect.die("unused"),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.die("unused"),
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: dispatched.length })),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.deepStrictEqual(stopped, [live.id]);
+        assert.equal(dispatched.length, 1);
+        const command = dispatched[0];
+        assert.equal(command?.type, "thread.session.set");
+        if (command?.type === "thread.session.set") {
+          assert.equal(command.session.status, "error");
+          assert.equal(command.session.activeTurnId, null);
         }
       }),
     ),
@@ -657,6 +734,10 @@ it.effect("does not fail startup when the live provider session inventory cannot
       streamDomainEvents: Stream.empty,
       subscribeDomainEvents: Effect.succeed(Stream.empty),
       latestSequence: Effect.succeed(0),
+      acquireWorktreeOwnership: () => Effect.die("unused"),
+      releaseWorktreeOwnership: () => Effect.die("unused"),
+      listWorktreeOwnershipLeases: Effect.succeed([]),
+      getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
     }),
     Effect.provide(NodeServices.layer),
     Effect.tap(() => Effect.sync(() => assert.equal(queried, false))),

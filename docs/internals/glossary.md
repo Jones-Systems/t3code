@@ -29,6 +29,10 @@ The root filesystem path for a project. In [the orchestration model][1], it is t
 
 A Git worktree used as an isolated workspace for a thread. If a thread has a `worktreePath` in [the contracts][1], it runs there instead of in the main working tree. Git operations live behind the VCS driver contract in `apps/server/src/vcs/VcsDriver.ts`, implemented by [GitVcsDriverCore.ts][3].
 
+#### Worktree ownership lease
+
+The exclusive, server-owned right for one thread incarnation to run native mutators in a canonical checkout root. Duplicate thread metadata and read-only access remain valid; a second mutating owner is rejected until cleanup releases the first lease. Expiry reports lost renewal but never proves the prior writer stopped. See [worktree-ownership-leases.md][27].
+
 ### Thread timeline
 
 #### Thread
@@ -209,3 +213,4 @@ ships T3 Code already matching it.
 [24]: ./overview.md
 [25]: ../../apps/server/src/environmentTheme.ts
 [26]: ../user/environment-theme.md
+[27]: ./worktree-ownership-leases.md
