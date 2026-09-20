@@ -40,6 +40,24 @@ Right-click a pull request link in a thread and choose **Link to thread** to sho
 in the sidebar. The thread settles when the linked pull request merges if **Auto-settle merged
 threads** is enabled. Right-click the same link and choose **Unlink from thread** to remove it.
 
+## Workstream lifecycle and thread settlement
+
+An owner-wide workstream has its own lifecycle: planned, active, paused, completed, deferred, or
+abandoned. Completion is confirmed only by the owner registry's explicit lifecycle declaration.
+A turn ending, a member being marked completed, a pull request becoming green or merging, and a T3
+thread being settled are evidence or separate actions; none changes the workstream lifecycle.
+The compact list marks a completed summary as needing verification until you open it and T3 loads
+the complete matching lifecycle history.
+
+Member disposition records what happened to one attached resource. **Request T3 thread settlement**
+and **Request T3 thread restore** are separate requests to the environment that owns that thread.
+They are available only for an attested T3 reference, and their receipt can be denied, unsupported,
+failed, or unresolved. Owner statements add context but have no lifecycle or execution effect. The
+workstream detail keeps those facts separate from its owner-declared lifecycle so a finished turn
+or delivered pull request does not imply that the larger effort is complete.
+Connections with read-only Workstream permission can inspect this evidence but do not receive
+lifecycle, membership, statement, refresh, relationship, or settlement controls.
+
 On web and desktop, drag a pinned thread to change its position. On mobile, open the thread's menu
 and choose **Move up** or **Move down**. The order is stored by the server and appears on your
 other connected devices.

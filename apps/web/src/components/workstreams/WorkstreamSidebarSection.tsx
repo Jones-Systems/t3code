@@ -7,6 +7,7 @@ import {
 import {
   orderWorkstreamMetadata,
   planWorkstreamOwnerOrder,
+  resolveWorkstreamCompletionAuthority,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -68,6 +69,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
     };
   }, [bindingKey]);
   if (!data) return null;
+  const canWrite = data.binding.permissions.includes("workstreams:write");
 
   const showDetail = (workstreamId: string) => {
     detailRequest.current?.abort();
@@ -118,6 +120,10 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
     return value;
   };
   const invoke = (action: WorkstreamCommand["action"]) => {
+    if (!canWrite) {
+      setCommandError("Workstream write authority is required for this action.");
+      return;
+    }
     void run(action).catch((cause: unknown) => {
       setCommandError(cause instanceof Error ? cause.message : "Workstream command failed.");
     });
@@ -171,6 +177,8 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
   const references = new Map(
     detail?.references.items.map((reference) => [reference.native_reference_id, reference]) ?? [],
   );
+  const completionAuthority =
+    workstream && detail ? resolveWorkstreamCompletionAuthority(workstream, detail.history) : null;
 
   return (
     <section aria-label="Owner Workstreams" className="border-b border-sidebar-border/60 px-2 pb-2">
@@ -189,18 +197,25 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
         {items.map((item, index) => (
           <li
             className="flex min-h-8 items-center gap-1 rounded-md hover:bg-sidebar-row-hover"
-            draggable
+            draggable={canWrite}
             key={item.workstreamId}
-            onDragStart={() => setDragging(item.workstreamId)}
-            onDragOver={(event) => event.preventDefault()}
+            onDragStart={() => {
+              if (canWrite) setDragging(item.workstreamId);
+            }}
+            onDragOver={(event) => {
+              if (canWrite) event.preventDefault();
+            }}
             onDrop={(event) => {
+              if (!canWrite) return;
               event.preventDefault();
               if (dragging) reorder(dragging, index);
               setDragging(null);
             }}
           >
-            <GripVerticalIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-            {editing === item.workstreamId ? (
+            {canWrite ? (
+              <GripVerticalIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+            ) : null}
+            {canWrite && editing === item.workstreamId ? (
               <Input
                 aria-label="Workstream name"
                 autoFocus
@@ -225,39 +240,49 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                 type="button"
               >
                 {item.name}{" "}
-                <span className="text-[10px] text-muted-foreground">{item.lifecycle}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {item.lifecycle === "completed"
+                    ? selected !== item.workstreamId || completionAuthority === null
+                      ? "completed — open to verify"
+                      : completionAuthority.state === "owner-declared"
+                        ? "completed — owner-declared"
+                        : "completed — unverified"
+                    : item.lifecycle}
+                </span>
               </button>
             )}
-            <Menu>
-              <MenuTrigger
-                aria-label={`Actions for ${item.name}`}
-                render={<Button size="icon-micro" variant="ghost-muted" />}
-              >
-                <MoreHorizontalIcon />
-              </MenuTrigger>
-              <MenuPopup align="end">
-                <MenuItem
-                  onClick={() => {
-                    setName(item.name);
-                    setEditing(item.workstreamId);
-                  }}
+            {canWrite ? (
+              <Menu>
+                <MenuTrigger
+                  aria-label={`Actions for ${item.name}`}
+                  render={<Button size="icon-micro" variant="ghost-muted" />}
                 >
-                  Rename
-                </MenuItem>
-                <MenuItem
-                  disabled={index === 0}
-                  onClick={() => reorder(item.workstreamId, index - 1)}
-                >
-                  <ChevronUpIcon /> Move up
-                </MenuItem>
-                <MenuItem
-                  disabled={index === items.length - 1}
-                  onClick={() => reorder(item.workstreamId, index + 1)}
-                >
-                  <ChevronDownIcon /> Move down
-                </MenuItem>
-              </MenuPopup>
-            </Menu>
+                  <MoreHorizontalIcon />
+                </MenuTrigger>
+                <MenuPopup align="end">
+                  <MenuItem
+                    onClick={() => {
+                      setName(item.name);
+                      setEditing(item.workstreamId);
+                    }}
+                  >
+                    Rename
+                  </MenuItem>
+                  <MenuItem
+                    disabled={index === 0}
+                    onClick={() => reorder(item.workstreamId, index - 1)}
+                  >
+                    <ChevronUpIcon /> Move up
+                  </MenuItem>
+                  <MenuItem
+                    disabled={index === items.length - 1}
+                    onClick={() => reorder(item.workstreamId, index + 1)}
+                  >
+                    <ChevronDownIcon /> Move down
+                  </MenuItem>
+                </MenuPopup>
+              </Menu>
+            ) : null}
           </li>
         ))}
       </ul>
@@ -266,7 +291,8 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
           <div className="flex items-center gap-2">
             <strong className="min-w-0 flex-1 truncate">{workstream.name}</strong>
             <select
-              aria-label="Workstream lifecycle"
+              aria-label="Owner-declared workstream lifecycle"
+              disabled={!canWrite}
               value={workstream.lifecycle}
               onChange={(event) =>
                 update(selectedMetadata, {
@@ -281,6 +307,33 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
               )}
             </select>
           </div>
+          {completionAuthority ? (
+            <div
+              aria-label="Workstream completion authority"
+              className="space-y-1 rounded border p-2"
+            >
+              <div>
+                Completion:{" "}
+                {completionAuthority.state === "owner-declared"
+                  ? `owner-declared by ${completionAuthority.declaration.actor.principal_id}`
+                  : completionAuthority.state === "unverified"
+                    ? `unverified owner declaration (${completionAuthority.reason.replaceAll("-", " ")})`
+                    : "not declared"}
+              </div>
+              {completionAuthority.state === "owner-declared" ? (
+                <div className="text-muted-foreground">
+                  Revision {completionAuthority.declaration.revision} · registry version{" "}
+                  {completionAuthority.declaration.registry_version} · recorded{" "}
+                  {completionAuthority.declaration.recorded_at} · command{" "}
+                  {completionAuthority.declaration.command_id}
+                </div>
+              ) : null}
+              <p className="text-muted-foreground">
+                Terminal turns, member disposition, pull request status, and T3 thread settlement
+                are separate evidence. None completes this workstream.
+              </p>
+            </div>
+          ) : null}
           <label className="block">
             Target Workstream{" "}
             <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
@@ -305,7 +358,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                     {label} · {membership.kind} · {membership.closed ? "removed" : "current"}
                   </span>
                   <div className="flex flex-wrap gap-1">
-                    {!membership.closed && membership.kind === "primary" && target ? (
+                    {canWrite && !membership.closed && membership.kind === "primary" && target ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -323,7 +376,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                         Move
                       </Button>
                     ) : null}
-                    {!membership.closed && target ? (
+                    {canWrite && !membership.closed && target ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -339,7 +392,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                         Link
                       </Button>
                     ) : null}
-                    {!membership.closed ? (
+                    {canWrite && !membership.closed ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -355,7 +408,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                         {membership.kind === "secondary" ? "Unlink" : "Remove"}
                       </Button>
                     ) : null}
-                    {!membership.closed ? (
+                    {canWrite && !membership.closed ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -370,27 +423,54 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                           })
                         }
                       >
-                        Mark completed
+                        Record member completed
                       </Button>
                     ) : null}
                     {reference?.identity.provider === "t3" ? (
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() =>
-                          invoke({
-                            operation: "request_native_t3_settlement",
-                            native_reference_id: reference.native_reference_id,
-                            expected_attestation_version:
-                              reference.registration.attestation_version,
-                            native_action: "settle",
-                          })
-                        }
-                      >
-                        Settle in T3
-                      </Button>
+                      !canWrite ? (
+                        <span className="text-muted-foreground">
+                          T3 settlement unavailable: write authority is required.
+                        </span>
+                      ) : reference.registration.state === "attested" ? (
+                        <>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() =>
+                              invoke({
+                                operation: "request_native_t3_settlement",
+                                native_reference_id: reference.native_reference_id,
+                                expected_attestation_version:
+                                  reference.registration.attestation_version,
+                                native_action: "settle",
+                              })
+                            }
+                          >
+                            Request T3 thread settlement
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() =>
+                              invoke({
+                                operation: "request_native_t3_settlement",
+                                native_reference_id: reference.native_reference_id,
+                                expected_attestation_version:
+                                  reference.registration.attestation_version,
+                                native_action: "unsettle",
+                              })
+                            }
+                          >
+                            Request T3 thread restore
+                          </Button>
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          T3 settlement unavailable: reference is {reference.registration.state}.
+                        </span>
+                      )
                     ) : null}
-                    {membership.closed ? (
+                    {canWrite && membership.closed ? (
                       <Button
                         size="xs"
                         variant="ghost"
@@ -422,73 +502,81 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                         PR #{reference.pr_locator.number} ·{" "}
                         {pullRequestStatus[reference.native_reference_id] ?? "loading"}
                       </a>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => {
-                          void (async () => {
-                            const value = await loadReference(reference.native_reference_id);
-                            if (!value.latest_observation) return;
-                            await run({
-                              operation: "refresh_linked_pr",
-                              workstream_id: workstream.workstream_id,
-                              expected_version: workstream.version,
-                              membership_id: membership.membership_id,
-                              expected_observation_version:
-                                value.latest_observation.observation_version,
+                      {canWrite ? (
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          onClick={() => {
+                            void (async () => {
+                              const value = await loadReference(reference.native_reference_id);
+                              if (!value.latest_observation) return;
+                              await run({
+                                operation: "refresh_linked_pr",
+                                workstream_id: workstream.workstream_id,
+                                expected_version: workstream.version,
+                                membership_id: membership.membership_id,
+                                expected_observation_version:
+                                  value.latest_observation.observation_version,
+                              });
+                              const refreshed = await loadReference(reference.native_reference_id);
+                              setPullRequestStatus((current) => ({
+                                ...current,
+                                [reference.native_reference_id]:
+                                  refreshed.latest_observation?.last_success?.state ??
+                                  refreshed.latest_observation?.outcome ??
+                                  "unknown",
+                              }));
+                            })().catch((cause: unknown) => {
+                              setCommandError(
+                                cause instanceof Error ? cause.message : "PR refresh failed.",
+                              );
                             });
-                            const refreshed = await loadReference(reference.native_reference_id);
-                            setPullRequestStatus((current) => ({
-                              ...current,
-                              [reference.native_reference_id]:
-                                refreshed.latest_observation?.last_success?.state ??
-                                refreshed.latest_observation?.outcome ??
-                                "unknown",
-                            }));
-                          })().catch((cause: unknown) => {
-                            setCommandError(
-                              cause instanceof Error ? cause.message : "PR refresh failed.",
-                            );
-                          });
-                        }}
-                      >
-                        Refresh status
-                      </Button>
+                          }}
+                        >
+                          Refresh status
+                        </Button>
+                      ) : null}
                     </div>
                   ) : null}
                 </li>
               );
             })}
           </ul>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (!declarationText.trim()) return;
-              const latest = detail.declarations.items.toSorted(
-                (a, b) => b.revision - a.revision,
-              )[0];
-              invoke({
-                operation: "set_declaration",
-                workstream_id: workstream.workstream_id,
-                expected_version: workstream.version,
-                declaration_id: latest?.declaration_id ?? null,
-                expected_revision: latest?.revision ?? 0,
-                text: declarationText.trim(),
-              });
-              setDeclarationText("");
-            }}
-          >
-            <Input
-              aria-label="Lifecycle declaration"
-              nativeInput
-              value={declarationText}
-              onChange={(event) => setDeclarationText(event.target.value)}
-            />
-            <Button size="xs" type="submit">
-              Record declaration
-            </Button>
-          </form>
-          <ul aria-label="Declarations">
+          {canWrite ? (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!declarationText.trim()) return;
+                const latest = detail.declarations.items.toSorted(
+                  (a, b) => b.revision - a.revision,
+                )[0];
+                invoke({
+                  operation: "set_declaration",
+                  workstream_id: workstream.workstream_id,
+                  expected_version: workstream.version,
+                  declaration_id: latest?.declaration_id ?? null,
+                  expected_revision: latest?.revision ?? 0,
+                  text: declarationText.trim(),
+                });
+                setDeclarationText("");
+              }}
+            >
+              <Input
+                aria-label="Owner statement"
+                nativeInput
+                value={declarationText}
+                onChange={(event) => setDeclarationText(event.target.value)}
+              />
+              <Button size="xs" type="submit">
+                Record statement
+              </Button>
+            </form>
+          ) : null}
+          <p className="text-muted-foreground">
+            Owner statements add context only; they do not change lifecycle or grant execution
+            authority.
+          </p>
+          <ul aria-label="Owner statements">
             {detail.declarations.items.map((entry) => (
               <li key={`${entry.declaration_id}:${entry.revision}`}>
                 {entry.state}: {entry.text}
@@ -503,7 +591,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
               </li>
             ))}
           </ul>
-          {target ? (
+          {canWrite && target ? (
             <div className="flex gap-1">
               <Button
                 size="xs"

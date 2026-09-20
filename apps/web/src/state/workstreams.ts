@@ -131,7 +131,10 @@ export interface WorkstreamDetailView {
   readonly memberships: WorkstreamMembershipPage;
   readonly declarations: WorkstreamDeclarationPage;
   readonly edges: WorkstreamEdgePage;
-  readonly history: WorkstreamHistoryPage;
+  readonly history: WorkstreamHistoryPage & {
+    readonly coverage: "complete";
+    readonly next_cursor: null;
+  };
   readonly references: WorkstreamReferencePage;
 }
 
@@ -210,7 +213,17 @@ export async function loadCompleteWorkstreamDetail(
     ) {
       throw new Error("Workstream detail changed while it was loading; reload it.");
     }
-    return { detail, memberships, declarations, edges, history, references };
+    if (history.next_cursor !== null) {
+      throw new Error("Workstream history load did not prove complete coverage.");
+    }
+    return {
+      detail,
+      memberships,
+      declarations,
+      edges,
+      history: { ...history, next_cursor: null, coverage: "complete" },
+      references,
+    };
   }, options);
 }
 
