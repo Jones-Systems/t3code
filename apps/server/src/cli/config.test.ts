@@ -18,6 +18,7 @@ import {
 import * as NetService from "@t3tools/shared/Net";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths, ensureServerDirectories } from "../config.ts";
+import { defaultNativeStoreAuthorityStateDir } from "../environment/nativeStoreAuthorityPath.ts";
 import { resolveServerConfig } from "./config.ts";
 
 const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
@@ -134,7 +135,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServePort: 443,
       });
       assert.equal(resolved.stateDir, join(baseDir, "userdata"));
-      assert.equal(resolved.authorityStateDir, join(baseDir, "native-store-authority"));
+      assert.equal(resolved.authorityStateDir, defaultNativeStoreAuthorityStateDir(baseDir));
     }),
   );
 
@@ -205,7 +206,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServePort: 8443,
       });
       assert.equal(resolved.dbPath, join(baseDir, "userdata", "state.sqlite"));
-      assert.equal(resolved.authorityStateDir, join(baseDir, "native-store-authority"));
+      assert.equal(resolved.authorityStateDir, defaultNativeStoreAuthorityStateDir(baseDir));
     }),
   );
 
@@ -444,7 +445,6 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       for (const directory of [
         customCwd,
         resolved.stateDir,
-        resolved.authorityStateDir,
         resolved.logsDir,
         resolved.providerLogsDir,
         resolved.terminalLogsDir,
@@ -455,6 +455,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       ]) {
         expect(yield* fs.exists(directory)).toBe(true);
       }
+      expect(yield* fs.exists(resolved.authorityStateDir)).toBe(false);
       expect(resolved.cwd).toBe(path.resolve(customCwd));
     }),
   );

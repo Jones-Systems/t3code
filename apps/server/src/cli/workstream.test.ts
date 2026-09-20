@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration exercises the filesystem boundary.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
@@ -17,26 +18,44 @@ import {
   fenceNativeStoreAuthority,
   initializeNativeStoreAuthority,
 } from "../environment/nativeStoreAuthorityPersistence.ts";
+import { nativeStoreAuthorityBaseDirFingerprint } from "../environment/nativeStoreAuthorityPath.ts";
 import { workstreamCommand } from "./workstream.ts";
 
 const runtimeLayer = Layer.mergeAll(
   NodeServices.layer,
-  NetService.layer,
+  Layer.succeed(NetService.NetService, {
+    findAvailablePort: () => Effect.succeed(3773),
+  } as unknown as NetService.NetService["Service"]),
   TestConsole.layer,
-  ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
 );
 
-const runEnroll = (baseDir: string) =>
+const runEnroll = (baseDir: string, authorityStateDir: string) =>
   Command.runWith(workstreamCommand, { version: "0.0.0" })([
     "authority",
     "enroll",
     "--base-dir",
     baseDir,
-  ]);
+  ]).pipe(
+    Effect.provide(
+      ConfigProvider.layer(
+        ConfigProvider.fromEnv({
+          env: { T3CODE_NATIVE_AUTHORITY_STATE_DIR: authorityStateDir },
+        }),
+      ),
+    ),
+  );
 
 const writeEnvironment = (baseDir: string, environmentId: string) => {
-  NodeFS.mkdirSync(NodePath.join(baseDir, "userdata"), { recursive: true });
-  NodeFS.writeFileSync(NodePath.join(baseDir, "userdata", "environment-id"), `${environmentId}\n`);
+  const stateDir = NodePath.join(baseDir, "userdata");
+  NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  NodeFS.chmodSync(stateDir, 0o700);
+  NodeFS.writeFileSync(NodePath.join(stateDir, "environment-id"), `${environmentId}\n`);
+  const database = new NodeSqlite.DatabaseSync(NodePath.join(stateDir, "state.sqlite"));
+  try {
+    database.exec("CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY)");
+  } finally {
+    database.close();
+  }
 };
 
 const writeLauncherState = (baseDir: string, protocol = SERVICE_LAUNCHER_PROTOCOL) => {
@@ -51,35 +70,64 @@ const writeLauncherState = (baseDir: string, protocol = SERVICE_LAUNCHER_PROTOCO
 it.effect("enrolls idempotently only with a current launcher and reports blocked states", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-workstream-enroll-cli-" });
+    const scratch = yield* fs.makeTempDirectoryScoped({ prefix: "t3-workstream-enroll-cli-" });
+    const root = NodePath.join(scratch, "base");
+    const authorityStateDir = NodePath.join(scratch, "authority");
     writeEnvironment(root, "environment-enroll");
 
-    const missingLauncher = yield* runEnroll(root).pipe(Effect.flip);
+    const missingLauncher = yield* runEnroll(root, authorityStateDir).pipe(Effect.flip);
     expect(String(missingLauncher)).toContain("service launcher must be upgraded");
 
     writeLauncherState(root);
-    yield* runEnroll(root);
-    yield* runEnroll(root);
+    yield* runEnroll(root, authorityStateDir);
+    yield* runEnroll(root, authorityStateDir);
     expect(
       (yield* TestConsole.logLines).filter(
         (line): line is string => typeof line === "string" && line.includes("Enrolled"),
       ),
     ).toHaveLength(2);
 
-    fenceNativeStoreAuthority(NodePath.join(root, "native-store-authority"), "environment-enroll");
-    const fenced = yield* runEnroll(root).pipe(Effect.flip);
-    expect(String(fenced)).toContain("remains fenced");
+    fenceNativeStoreAuthority(
+      authorityStateDir,
+      "123e4567-e89b-42d3-a456-426614174000",
+      "environment-enroll",
+      nativeStoreAuthorityBaseDirFingerprint(root),
+    );
+    const fenced = yield* runEnroll(root, authorityStateDir).pipe(Effect.flip);
+    expect(String(fenced)).toContain("active restore barrier");
 
-    const mismatchRoot = yield* fs.makeTempDirectoryScoped({
+    const unenrolledScratch = yield* fs.makeTempDirectoryScoped({
+      prefix: "t3-workstream-enroll-restore-barrier-cli-",
+    });
+    const unenrolledRoot = NodePath.join(unenrolledScratch, "base");
+    const unenrolledAuthorityStateDir = NodePath.join(unenrolledScratch, "authority");
+    writeEnvironment(unenrolledRoot, "environment-unenrolled");
+    writeLauncherState(unenrolledRoot);
+    fenceNativeStoreAuthority(
+      unenrolledAuthorityStateDir,
+      "123e4567-e89b-42d3-a456-426614174001",
+      "environment-unenrolled",
+      nativeStoreAuthorityBaseDirFingerprint(unenrolledRoot),
+    );
+    const restorePending = yield* runEnroll(unenrolledRoot, unenrolledAuthorityStateDir).pipe(
+      Effect.flip,
+    );
+    expect(String(restorePending)).toContain("active restore barrier");
+
+    const mismatchScratch = yield* fs.makeTempDirectoryScoped({
       prefix: "t3-workstream-enroll-mismatch-cli-",
     });
+    const mismatchRoot = NodePath.join(mismatchScratch, "base");
+    const mismatchAuthorityStateDir = NodePath.join(mismatchScratch, "authority");
     writeEnvironment(mismatchRoot, "environment-current");
     writeLauncherState(mismatchRoot);
     initializeNativeStoreAuthority(
-      NodePath.join(mismatchRoot, "native-store-authority"),
+      mismatchAuthorityStateDir,
+      NodePath.join(mismatchRoot, "userdata", "state.sqlite"),
       "environment-other",
+      nativeStoreAuthorityBaseDirFingerprint(mismatchRoot),
     );
-    const mismatch = yield* runEnroll(mismatchRoot).pipe(Effect.flip);
+    const mismatch = yield* runEnroll(mismatchRoot, mismatchAuthorityStateDir).pipe(Effect.flip);
     expect(String(mismatch)).toContain("environment changed");
   }).pipe(Effect.provide(runtimeLayer)),
 );

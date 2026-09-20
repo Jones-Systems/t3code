@@ -37,6 +37,21 @@ it("keeps systemd pinned to the stable launcher rather than a versioned server",
   expect(unit).not.toContain("versions/1.2.3");
 });
 
+it("propagates an explicit native authority path to systemd", () => {
+  const unit = BootService.renderBootServiceUnit({
+    nodePath: "/usr/bin/node",
+    launcherPath: "/home/theo/.t3/runtime/service-launcher.mjs",
+    baseDir: "/home/theo/.t3",
+    authorityStateDir: "/var/lib/t3code/native-authority",
+    logPath: "/home/theo/.t3/userdata/logs/boot-service.log",
+    unitPath: "/home/theo/.config/systemd/user/t3code.service",
+  });
+
+  expect(unit).toContain(
+    "Environment=T3CODE_NATIVE_AUTHORITY_STATE_DIR=/var/lib/t3code/native-authority",
+  );
+});
+
 it("survives the kernel OOM-killing a greedy agent child", () => {
   const unit = BootService.renderBootServiceUnit({
     nodePath: "/usr/bin/node",
@@ -53,6 +68,7 @@ const macPlan = {
   nodePath: "/opt/homebrew/bin/node",
   launcherPath: "/Users/theo/.t3/runtime/service-launcher.mjs",
   baseDir: "/Users/theo/.t3",
+  authorityStateDir: "/Users/theo/Library/Application Support/T3 Code/native-authority",
   logPath: "/Users/theo/.t3/userdata/logs/boot-service.log",
   unitPath: "/Users/theo/Library/LaunchAgents/com.t3tools.t3code.service.plist",
 };
@@ -66,6 +82,14 @@ it("keeps launchd pinned to the stable launcher rather than a versioned server",
   expect(plist).toContain("<string>/opt/homebrew/bin/node</string>");
   expect(plist).toContain("<string>/Users/theo/.t3/runtime/service-launcher.mjs</string>");
   expect(plist).not.toContain("versions/1.2.3");
+});
+
+it("propagates an explicit native authority path to launchd", () => {
+  const plist = BootService.renderBootServicePlist(macPlan, macRenderOptions);
+
+  expect(plist).toContain(
+    "<key>T3CODE_NATIVE_AUTHORITY_STATE_DIR</key>\n    <string>/Users/theo/Library/Application Support/T3 Code/native-authority</string>",
+  );
 });
 
 it("preserves the installer's provider search path in the launch agent", () => {

@@ -1,6 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import * as Effect from "effect/Effect";
+import type { WorkstreamReferenceDetail } from "@t3tools/contracts";
 
 import {
   WORKSTREAM_CONTRACT_FAMILY,
@@ -108,10 +109,42 @@ export const makeSyntheticWorkstreamTransport = (
         context,
         workstream:
           SYNTHETIC_WORKSTREAMS.find((item) => item.workstream_id === workstreamId) ??
-          SYNTHETIC_WORKSTREAMS[0],
+          SYNTHETIC_WORKSTREAMS[0]!,
       }),
     listReferences: () => Effect.succeed({ context, items: [], next_cursor: null }),
-    getReference: () => Effect.succeed({ context, reference: null, latest_observation: null }),
+    getReference: () =>
+      Effect.succeed({
+        context,
+        reference: {
+          native_reference_id: "reference-fixture",
+          owner_id: context.owner_id,
+          identity: {
+            provider: "github",
+            source_instance_id: "github-public",
+            resource_kind: "pull_request",
+            id_kind: "external",
+            native_id: "jones-systems/t3code#1",
+            account_provenance: { kind: "not_account_scoped" },
+          },
+          pr_locator: {
+            host: "github.com",
+            repository_owner: "jones-systems",
+            repository_name: "t3code",
+            number: 1,
+          },
+          registration: {
+            state: "verification-pending",
+            attestation_version: 1,
+            attested_at: null,
+            expires_at: null,
+            evidence: null,
+          },
+          created_at: "2026-09-12T12:00:00Z",
+          created_by: { principal_id: "principal-fixture" },
+          created_registry_version: 1,
+        },
+        latest_observation: null,
+      } satisfies WorkstreamReferenceDetail),
     listMemberships: () => Effect.succeed({ context, items: [], next_cursor: null }),
     listDeclarations: () => Effect.succeed({ context, items: [], next_cursor: null }),
     listEdges: () => Effect.succeed({ context, items: [], next_cursor: null }),

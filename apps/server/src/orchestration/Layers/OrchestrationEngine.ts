@@ -29,6 +29,7 @@ import {
   orchestrationCommandsTotal,
   orchestrationCommandDuration,
 } from "../../observability/Metrics.ts";
+import * as NativeStoreAuthority from "../../environment/NativeStoreAuthority.ts";
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
@@ -89,6 +90,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const crypto = yield* Crypto.Crypto;
+  const nativeStoreAuthority = Option.getOrUndefined(
+    yield* Effect.serviceOption(NativeStoreAuthority.NativeStoreAuthority),
+  );
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   let commandReadModel = createEmptyReadModel(yield* nowIso);
@@ -261,6 +265,24 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 status: "accepted",
                 error: null,
               });
+
+              if (nativeStoreAuthority !== undefined) {
+                yield* nativeStoreAuthority
+                  .prepareOrchestrationCommit(
+                    commandReadModel.snapshotSequence,
+                    lastSavedEvent.sequence,
+                  )
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationCommandInvariantError({
+                          commandType: envelope.command.type,
+                          detail: "Failed to advance native store authority.",
+                          cause,
+                        }),
+                    ),
+                  );
+              }
 
               return {
                 committedEvents,

@@ -20,6 +20,7 @@ import {
   compareExactServiceVersions,
   decodeServiceLauncherChildMessage,
   isExactServiceVersion,
+  isServiceUpdateId,
   parseServiceState,
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
@@ -29,6 +30,7 @@ import {
 import {
   advanceNativeStoreAuthorityForBaseDir,
   fenceNativeStoreAuthorityForBaseDir,
+  nativeStoreAuthorityStateDirForBaseDir,
 } from "./environment/nativeStoreAuthorityPersistence.ts";
 import { isEntrypoint } from "./entrypoint.ts";
 
@@ -58,11 +60,80 @@ const runtimePaths = (baseDir: string, version: string) => {
 const DB_FILE_SUFFIXES = ["", "-wal", "-shm"] as const;
 const RESTORE_MARKER = ".restore-pending";
 
-const databaseBackupDir = (baseDir: string, updateId: string) =>
-  NodePath.join(baseDir, "runtime", "db-backup", updateId);
+const assertSafeUpdateId = (updateId: string): void => {
+  if (!isServiceUpdateId(updateId)) {
+    throw new Error("Service update ID is not a launcher-generated UUID.");
+  }
+};
+
+const databaseBackupDir = (baseDir: string, updateId: string) => {
+  assertSafeUpdateId(updateId);
+  return NodePath.join(baseDir, "runtime", "db-backup", updateId);
+};
 
 const databaseBackupFile = (backupDir: string, suffix: (typeof DB_FILE_SUFFIXES)[number]) =>
   NodePath.join(backupDir, suffix === "" ? "database" : `database${suffix}`);
+
+const expectedUid = (): number | undefined =>
+  typeof process.getuid === "function" ? process.getuid() : undefined;
+
+const assertOwnedRegularFile = async (filePath: string, label: string): Promise<void> => {
+  let stat: NodeFS.Stats;
+  try {
+    stat = await NodeFSP.lstat(filePath);
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return;
+    throw new Error(`${label} is unavailable.`, { cause });
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`${label} must be an owned regular file.`);
+  }
+  const uid = expectedUid();
+  if (uid !== undefined && stat.uid !== uid) {
+    throw new Error(`${label} is not owner-controlled.`);
+  }
+};
+
+const assertOwnedDirectory = async (directory: string, label: string): Promise<void> => {
+  let stat: NodeFS.Stats;
+  try {
+    stat = await NodeFSP.lstat(directory);
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return;
+    throw new Error(`${label} is unavailable.`, { cause });
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`${label} must be an owned directory.`);
+  }
+  const uid = expectedUid();
+  if (uid !== undefined && stat.uid !== uid) {
+    throw new Error(`${label} is not owner-controlled.`);
+  }
+};
+
+const replaceOwnedFile = async (
+  sourcePath: string,
+  destinationPath: string,
+  label: string,
+): Promise<void> => {
+  await assertOwnedRegularFile(sourcePath, `${label} source`);
+  await assertOwnedDirectory(NodePath.dirname(destinationPath), `${label} destination directory`);
+  await assertOwnedRegularFile(destinationPath, `${label} destination`);
+  const temporaryPath = `${destinationPath}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`;
+  try {
+    await NodeFSP.copyFile(sourcePath, temporaryPath, NodeFS.constants.COPYFILE_EXCL);
+    await syncFile(temporaryPath);
+    await NodeFSP.rename(temporaryPath, destinationPath);
+    await syncDirectory(NodePath.dirname(destinationPath));
+  } finally {
+    await NodeFSP.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+};
+
+const removeOwnedFile = async (filePath: string, label: string): Promise<void> => {
+  await assertOwnedRegularFile(filePath, label);
+  await NodeFSP.rm(filePath, { force: true });
+};
 
 export const configuredDatabasePathForBaseDir = (baseDir: string): string =>
   NodePath.resolve(baseDir, "userdata", "state.sqlite");
@@ -110,16 +181,26 @@ async function syncDirectory(directory: string): Promise<void> {
  */
 async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate): Promise<void> {
   validateDatabasePathForBaseDir(baseDir, pending.dbPath);
+  await assertOwnedRegularFile(pending.dbPath, "Native database");
   const backupDir = databaseBackupDir(baseDir, pending.id);
-  if (await pathExists(backupDir)) return;
+  await assertOwnedDirectory(NodePath.dirname(backupDir), "Native database backup root");
+  if (await pathExists(backupDir)) {
+    await assertOwnedDirectory(backupDir, "Native database backup directory");
+    return;
+  }
 
   const stagingDir = `${backupDir}.staging`;
   await NodeFSP.rm(stagingDir, { recursive: true, force: true });
   await NodeFSP.mkdir(stagingDir, { recursive: true, mode: 0o700 });
+  await assertOwnedDirectory(stagingDir, "Native database backup staging directory");
   try {
     for (const suffix of DB_FILE_SUFFIXES) {
       const source = `${pending.dbPath}${suffix}`;
-      if (suffix !== "" && !(await pathExists(source))) continue;
+      if (!(await pathExists(source))) {
+        if (suffix !== "") continue;
+        throw new Error("Native database is missing.");
+      }
+      await assertOwnedRegularFile(source, "Native database source");
       const destination = databaseBackupFile(stagingDir, suffix);
       await NodeFSP.copyFile(source, destination);
       await syncFile(destination);
@@ -156,33 +237,38 @@ async function markDatabaseRestorePending(backupDir: string): Promise<void> {
 async function restoreDatabaseBackup(
   baseDir: string,
   pending: PendingServiceUpdate,
+  authorityStateDir: string,
 ): Promise<void> {
   validateDatabasePathForBaseDir(baseDir, pending.dbPath);
   const backupDir = databaseBackupDir(baseDir, pending.id);
+  await assertOwnedDirectory(NodePath.dirname(backupDir), "Native database backup root");
   if (!(await pathExists(backupDir))) {
     throw new Error("Cannot rollback while the native database backup is missing.");
   }
+  await assertOwnedDirectory(backupDir, "Native database backup directory");
+  await assertOwnedRegularFile(pending.dbPath, "Native database destination");
   // Persist restore intent before fencing so recovery cannot restart or commit
   // a trial while the native authority remains fenced.
   await markDatabaseRestorePending(backupDir);
-  fenceNativeStoreAuthorityForBaseDir(baseDir);
+  fenceNativeStoreAuthorityForBaseDir(baseDir, pending.id, authorityStateDir);
   for (const suffix of DB_FILE_SUFFIXES) {
     const target = `${pending.dbPath}${suffix}`;
     const source = databaseBackupFile(backupDir, suffix);
     if (await pathExists(source)) {
-      await NodeFSP.copyFile(source, target);
-      await syncFile(target);
+      await replaceOwnedFile(source, target, "Native database restore");
     } else {
-      await NodeFSP.rm(target, { force: true });
+      await removeOwnedFile(target, "Native database sidecar");
     }
   }
   await syncDirectory(NodePath.dirname(pending.dbPath));
-  advanceNativeStoreAuthorityForBaseDir(baseDir, pending.dbPath);
+  advanceNativeStoreAuthorityForBaseDir(baseDir, pending.dbPath, pending.id, authorityStateDir);
 }
 
 async function discardDatabaseBackup(baseDir: string, updateId: string): Promise<void> {
   const backupDir = databaseBackupDir(baseDir, updateId);
+  await assertOwnedDirectory(NodePath.dirname(backupDir), "Native database backup root");
   if (!(await pathExists(backupDir))) return;
+  await assertOwnedDirectory(backupDir, "Native database backup directory");
   await NodeFSP.rm(backupDir, { recursive: true, force: true });
   await syncDirectory(NodePath.dirname(backupDir));
 }
@@ -286,6 +372,7 @@ const stopMarkerPath = (baseDir: string) =>
 
 export class Launcher {
   readonly #baseDir: string;
+  readonly #authorityStateDir: string;
   readonly #statePath: string;
   #state: ServiceState;
   #child: ManagedChild | null = null;
@@ -296,8 +383,13 @@ export class Launcher {
   #done = false;
   readonly #completion = Promise.withResolvers<void>();
 
-  constructor(baseDir: string, state: ServiceState) {
+  constructor(
+    baseDir: string,
+    state: ServiceState,
+    authorityStateDir = nativeStoreAuthorityStateDirForBaseDir(baseDir),
+  ) {
     this.#baseDir = baseDir;
+    this.#authorityStateDir = authorityStateDir;
     this.#statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
     this.#state = state;
   }
@@ -398,7 +490,7 @@ export class Launcher {
       return;
     }
     if (!(await pathExists(databaseBackupDir(this.#baseDir, update.id)))) {
-      fenceNativeStoreAuthorityForBaseDir(this.#baseDir);
+      fenceNativeStoreAuthorityForBaseDir(this.#baseDir, update.id, this.#authorityStateDir);
       throw new Error("Cannot recover a trial-ready update without its database backup.");
     }
     if (!(await runtimeExists(this.#baseDir, update.targetVersion))) {
@@ -652,7 +744,7 @@ export class Launcher {
       this.#child = null;
       await terminateChild(child.process);
     }
-    await restoreDatabaseBackup(this.#baseDir, pending);
+    await restoreDatabaseBackup(this.#baseDir, pending, this.#authorityStateDir);
     const outcome = terminalUpdate({ pending, status, reason });
     const next: ServiceState = {
       ...this.#state,

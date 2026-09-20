@@ -55,6 +55,8 @@ export interface BootServicePlan {
   readonly nodePath: string;
   readonly launcherPath: string;
   readonly baseDir: string;
+  /** Optional explicit native authority path; propagated to the standalone launcher. */
+  readonly authorityStateDir?: string;
   readonly logPath: string;
   readonly unitPath: string;
 }
@@ -72,6 +74,11 @@ export function renderBootServiceUnit(plan: BootServicePlan): string {
     "Type=simple",
     "WorkingDirectory=%h",
     `Environment=T3CODE_HOME=${quoteSystemdValue(plan.baseDir)}`,
+    ...(plan.authorityStateDir === undefined
+      ? []
+      : [
+          `Environment=T3CODE_NATIVE_AUTHORITY_STATE_DIR=${quoteSystemdValue(plan.authorityStateDir)}`,
+        ]),
     `Environment=${BOOT_SERVICE_UNIT_ENV}=${BOOT_SERVICE_UNIT_FILE}`,
     `ExecStart=${quoteSystemdValue(plan.nodePath)} ${quoteSystemdValue(plan.launcherPath)}`,
     // Let the launcher mark an explicit stop before it signals the server.
@@ -133,6 +140,12 @@ export function renderBootServicePlist(
     `    <string>${escapeXmlText(options.environmentPath)}</string>`,
     `    <key>T3CODE_HOME</key>`,
     `    <string>${escapeXmlText(plan.baseDir)}</string>`,
+    ...(plan.authorityStateDir === undefined
+      ? []
+      : [
+          `    <key>T3CODE_NATIVE_AUTHORITY_STATE_DIR</key>`,
+          `    <string>${escapeXmlText(plan.authorityStateDir)}</string>`,
+        ]),
     `    <key>${BOOT_SERVICE_UNIT_ENV}</key>`,
     `    <string>${BOOT_SERVICE_PLIST_FILE}</string>`,
     `  </dict>`,
@@ -499,6 +512,7 @@ export interface BootServiceHost {
 
 export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   readonly baseDir: string;
+  readonly authorityStateDir?: string;
   readonly logsDir: string;
   readonly cliVersion: string;
   readonly host?: BootServiceHost;
@@ -564,6 +578,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     nodePath: host.execPath,
     launcherPath,
     baseDir: input.baseDir,
+    ...(input.authorityStateDir === undefined
+      ? {}
+      : { authorityStateDir: input.authorityStateDir }),
     logPath,
     unitPath,
   };
@@ -870,6 +887,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
 
 export const layer = (input: {
   readonly baseDir: string;
+  readonly authorityStateDir?: string;
   readonly logsDir: string;
   readonly cliVersion: string;
   readonly host?: BootServiceHost;
