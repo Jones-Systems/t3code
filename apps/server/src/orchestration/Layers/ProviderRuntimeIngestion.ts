@@ -1587,6 +1587,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.started" ||
         event.type === "turn.started" ||
         event.type === "turn.completed" ||
+        event.type === "turn.aborted" ||
         isCompactedThreadState
           ? yield* projectionTurnRepository.getPendingTurnStartByThreadId({
               threadId: thread.id,
@@ -1617,13 +1618,21 @@ const make = Effect.gen(function* () {
         }
         switch (event.type) {
           case "session.exited":
-            return true;
+            // A turnless exit may update session availability, but cannot be
+            // attributed to whichever turn happens to be active. A targeted
+            // stale exit must not stop a newer active turn.
+            return (
+              eventTurnId === undefined ||
+              activeTurnId === null ||
+              sameId(activeTurnId, eventTurnId)
+            );
           case "session.started":
           case "thread.started":
             return true;
           case "turn.started":
             return !conflictsWithActiveTurn || conflictingTurnStartIsPendingTurnStart;
           case "turn.completed":
+          case "turn.aborted":
             if (conflictsWithActiveTurn || missingTurnForActiveTurn) {
               return false;
             }
@@ -1654,7 +1663,8 @@ const make = Effect.gen(function* () {
         event.type === "session.exited" ||
         event.type === "thread.started" ||
         event.type === "turn.started" ||
-        event.type === "turn.completed"
+        event.type === "turn.completed" ||
+        event.type === "turn.aborted"
       ) {
         const status = (() => {
           switch (event.type) {
@@ -1670,6 +1680,8 @@ const make = Effect.gen(function* () {
               return normalizeRuntimeTurnState(event.payload.state) === "failed"
                 ? "error"
                 : "ready";
+            case "turn.aborted":
+              return "ready";
             case "session.started":
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
@@ -1680,7 +1692,9 @@ const make = Effect.gen(function* () {
         const nextActiveTurnId =
           event.type === "turn.started"
             ? (eventTurnId ?? null)
-            : event.type === "turn.completed" || event.type === "session.exited"
+            : event.type === "turn.completed" ||
+                event.type === "turn.aborted" ||
+                event.type === "session.exited"
               ? null
               : event.type === "session.state.changed" &&
                   !sessionStatusAllowsActiveTurn(
@@ -1699,6 +1713,39 @@ const make = Effect.gen(function* () {
                 : (thread.session?.lastError ?? null);
 
         if (shouldApplyThreadLifecycle) {
+          const turnSettlement = (() => {
+            if (eventTurnId === undefined) {
+              return undefined;
+            }
+            if (event.type === "turn.aborted" || event.type === "session.exited") {
+              return {
+                turnId: eventTurnId,
+                state: "interrupted" as const,
+                completedAt: now,
+                ...(activeTurnId === null && thread.session?.status === "starting"
+                  ? { recoversMissingStart: true }
+                  : {}),
+              };
+            }
+            if (event.type !== "turn.completed") {
+              return undefined;
+            }
+            const state = normalizeRuntimeTurnState(event.payload.state);
+            return {
+              turnId: eventTurnId,
+              state:
+                state === "failed"
+                  ? ("error" as const)
+                  : state === "completed"
+                    ? ("completed" as const)
+                    : ("interrupted" as const),
+              completedAt: now,
+              ...(activeTurnId === null && thread.session?.status === "starting"
+                ? { recoversMissingStart: true }
+                : {}),
+            };
+          })();
+
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
             yield* markSourceProposedPlanImplemented(
               acceptedTurnStartedSourcePlan.sourceThreadId,
@@ -1735,6 +1782,7 @@ const make = Effect.gen(function* () {
               lastError,
               updatedAt: now,
             },
+            ...(turnSettlement !== undefined ? { turnSettlement } : {}),
             createdAt: now,
           });
         }
@@ -1922,8 +1970,26 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (event.type === "turn.completed" || event.type === "session.exited") {
-        const turnId = toTurnId(event.turnId);
+      const sessionStateClearsActiveTurn =
+        event.type === "session.state.changed" &&
+        !sessionStatusAllowsActiveTurn(
+          orchestrationSessionStatusFromRuntimeState(event.payload.state),
+        );
+      if (
+        event.type === "turn.completed" ||
+        event.type === "turn.aborted" ||
+        event.type === "session.exited" ||
+        sessionStateClearsActiveTurn
+      ) {
+        // A turnless exit does not settle a turn, but the already-projected
+        // active turn may still identify buffered text that must become
+        // durable before the session-wide cache sweep.
+        const turnId =
+          toTurnId(event.turnId) ??
+          ((event.type === "session.exited" || sessionStateClearsActiveTurn) &&
+          shouldApplyThreadLifecycle
+            ? (activeTurnId ?? undefined)
+            : undefined);
         if (turnId) {
           const detailedThread = yield* getLoadedThreadDetail();
           const messages = detailedThread?.messages ?? [];
@@ -1959,7 +2025,7 @@ const make = Effect.gen(function* () {
         }
       }
 
-      if (event.type === "session.exited") {
+      if (event.type === "session.exited" && shouldApplyThreadLifecycle) {
         yield* clearTurnStateForSession(thread.id);
       }
 
@@ -2051,7 +2117,7 @@ const make = Effect.gen(function* () {
       // Events carrying a turn id that conflicts with the active turn are
       // stale (superseded turn) and must neither overwrite nor clear the
       // active turn's progress; session.exited always clears.
-      if (event.type === "session.exited") {
+      if (event.type === "session.exited" && shouldApplyThreadLifecycle) {
         threadPlanProgress.clearThreadPlanProgress(thread.id);
       } else if (!conflictsWithActiveTurn) {
         if (event.type === "turn.plan.updated") {
@@ -2092,7 +2158,9 @@ const make = Effect.gen(function* () {
           break;
         }
         case "session.exited":
-          threadBackgroundLiveness.clearThreadLiveness(thread.id);
+          if (shouldApplyThreadLifecycle) {
+            threadBackgroundLiveness.clearThreadLiveness(thread.id);
+          }
           break;
         default:
           break;
