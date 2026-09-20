@@ -1,6 +1,6 @@
 # R02 native process attribution work note
 
-Status: implementation and independent review verified; publication pending
+Status: published for review
 
 ## Scope
 
@@ -53,4 +53,10 @@ scope. No signal or cleanup behavior changes.
   implementation now rejects every sampled start bucket newer than registration
   and tests the same-second, +1 second, and +2 second boundaries. The review's
   live-only surface and runtime cleanup observations are documented and covered.
-- Pending commit, normal push, non-draft pull request, and required checks.
+- Implementation commit `63288c84c8775c5a2f42fef83dec9568cbfe363f` was
+  pushed normally on `audit/r02-native-process-attribution-20260920`.
+- Non-draft pull request
+  [Jones-Systems/t3code#13](https://github.com/Jones-Systems/t3code/pull/13)
+  is open against `main` and linked to the native T3 thread.
+- Every reported check on the implementation commit passed; the repository
+  reports no separately configured required-check subset for this branch.
