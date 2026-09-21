@@ -116,6 +116,62 @@ function containsText(node: unknown, text: string): boolean {
 describe("Workstream sidebar binding cancellation", () => {
   afterEach(() => hooks.reset());
 
+  it.each([
+    ["registry", { registryId: "registry-replaced" }],
+    [
+      "contract",
+      {
+        contractManifest:
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as typeof binding.contractManifest,
+      },
+    ],
+  ])("cannot commit deferred detail after a %s-only binding change", async (_name, change) => {
+    let resolveDetail!: (value: WorkstreamDetailView) => void;
+    const pendingDetail = new Promise<WorkstreamDetailView>((resolve) => {
+      resolveDetail = resolve;
+    });
+    const loadDetail = vi.fn(
+      (_workstreamId: string, _options?: { readonly signal?: AbortSignal }) => pendingDetail,
+    );
+    let controller: WorkstreamListView = {
+      placementInventory: { coverage: "complete", identities: [], json: "[]", totalIdentities: 0 },
+      placements: null,
+      data,
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+      submit: vi.fn(),
+      loadDetail,
+      loadReference: vi.fn(),
+    };
+
+    hooks.beginRender();
+    const initial = WorkstreamSidebarSection({ controller });
+    const alpha = visitElements(
+      initial,
+      (element) => element.type === "button" && containsText(element, "Alpha"),
+    ) as ReactElement<{ onClick: () => void }> | undefined;
+    alpha?.props.onClick();
+    const signal = loadDetail.mock.calls[0]?.[1]?.signal;
+    expect(signal?.aborted).toBe(false);
+
+    controller = {
+      ...controller,
+      data: { ...data, binding: { ...binding, ...change } },
+    };
+    hooks.beginRender();
+    WorkstreamSidebarSection({ controller });
+    expect(signal?.aborted).toBe(true);
+
+    resolveDetail(detailWithReference);
+    await pendingDetail;
+    await Promise.resolve();
+
+    hooks.beginRender();
+    const current = WorkstreamSidebarSection({ controller });
+    expect(containsText(current, "Alpha detail")).toBe(false);
+  });
+
   it("cannot commit detail from a replaced non-null authorization snapshot", async () => {
     let resolveDetail!: (value: WorkstreamDetailView) => void;
     const pendingDetail = new Promise<WorkstreamDetailView>((resolve) => {

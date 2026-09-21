@@ -61,7 +61,7 @@ export function appendWorkstreamListResult(
   current: T3WorkstreamListResult,
   next: T3WorkstreamListResult,
 ): T3WorkstreamListResult {
-  if (bindingKey(current.binding) !== bindingKey(next.binding)) {
+  if (workstreamBindingKey(current.binding) !== workstreamBindingKey(next.binding)) {
     throw new Error("Workstream list binding changed during pagination.");
   }
   return {
@@ -73,7 +73,19 @@ export function appendWorkstreamListResult(
   };
 }
 
-const bindingKey = (binding: T3WorkstreamBinding): string =>
+type WorkstreamBindingIdentity = Pick<
+  T3WorkstreamBinding,
+  | "registryId"
+  | "ownerId"
+  | "principalId"
+  | "authorizationRevision"
+  | "serverGeneration"
+  | "registryVersion"
+  | "contractVersion"
+  | "contractManifest"
+>;
+
+export const workstreamBindingKey = (binding: WorkstreamBindingIdentity): string =>
   [
     binding.registryId,
     binding.ownerId,
@@ -90,12 +102,12 @@ export class LiveWorkstreamMetadataCache {
   #entry: { readonly key: string; readonly value: T3WorkstreamListResult } | null = null;
 
   read(binding: T3WorkstreamBinding): T3WorkstreamListResult | null {
-    return this.#entry?.key === bindingKey(binding) ? this.#entry.value : null;
+    return this.#entry?.key === workstreamBindingKey(binding) ? this.#entry.value : null;
   }
 
   write(value: T3WorkstreamListResult): void {
     this.#entry = {
-      key: bindingKey(value.binding),
+      key: workstreamBindingKey(value.binding),
       value: { ...value, items: [...value.items] },
     };
   }

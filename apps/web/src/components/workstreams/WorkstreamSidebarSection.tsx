@@ -7,6 +7,7 @@ import {
 import {
   orderWorkstreamMetadata,
   planWorkstreamOwnerOrder,
+  workstreamBindingKey,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -44,15 +45,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
   const detailRequest = useRef<AbortController | null>(null);
   const manualRefreshRequest = useRef<AbortController | null>(null);
   const items = useMemo(() => orderWorkstreamMetadata(data?.items ?? []), [data]);
-  const bindingKey = data
-    ? JSON.stringify([
-        data.binding.ownerId,
-        data.binding.principalId,
-        data.binding.authorizationRevision,
-        data.binding.serverGeneration,
-        data.binding.registryVersion,
-      ])
-    : null;
+  const bindingKey = data ? workstreamBindingKey(data.binding) : null;
   const bindingKeyRef = useRef(bindingKey);
 
   useLayoutEffect(() => {

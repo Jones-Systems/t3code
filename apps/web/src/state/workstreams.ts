@@ -25,6 +25,7 @@ import {
   type WorkstreamDtoPage,
   loadLiveT3Placements,
   type LiveT3Placements,
+  workstreamBindingKey,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -344,12 +345,24 @@ export function useWorkstreams(
   const [revision, setRevision] = useState(0);
   const generation = useRef(0);
   const listRequest = useRef<AbortController | null>(null);
+  const commandRequests = useRef(new Set<AbortController>());
+  const currentBindingKey = data ? workstreamBindingKey(data.binding) : null;
+  const currentBindingKeyRef = useRef(currentBindingKey);
+  currentBindingKeyRef.current = currentBindingKey;
   const refresh = useCallback(() => {
     listRequest.current?.abort();
     generation.current += 1;
     setPlacements(null);
     setRevision((value) => value + 1);
   }, []);
+
+  useEffect(() => {
+    const requests = commandRequests.current;
+    return () => {
+      for (const controller of requests) controller.abort();
+      requests.clear();
+    };
+  }, [currentBindingKey]);
 
   useEffect(() => {
     listRequest.current?.abort();
@@ -424,35 +437,55 @@ export function useWorkstreams(
 
   const submit = useCallback(
     async (command: WorkstreamCommand) => {
+      const startedBindingKey = currentBindingKey;
+      if (startedBindingKey === null) throw new Error("Workstream binding is unavailable.");
+      const controller = new AbortController();
+      commandRequests.current.add(controller);
+      const assertCurrentBinding = () => {
+        if (currentBindingKeyRef.current !== startedBindingKey && !controller.signal.aborted)
+          controller.abort();
+        controller.signal.throwIfAborted();
+      };
       try {
-        let receipt = await request((client) =>
-          client.workstreams.submit({ headers: {}, payload: { command } }),
+        let receipt = await request(
+          (client) => client.workstreams.submit({ headers: {}, payload: { command } }),
+          controller.signal,
         );
+        assertCurrentBinding();
         // Pending effects reconcile through the exact GET route; commands are never resubmitted.
         while (receipt.state === "pending" || receipt.state === "unresolved") {
           const retryAfterSeconds = receipt.retry_after_seconds;
-          await new Promise<void>((resolve) => {
-            const timer = window.setTimeout(
-              resolve,
-              Math.min(30_000, Math.max(250, retryAfterSeconds * 1_000)),
-            );
-            void timer;
-          });
-          receipt = await request((client) =>
-            client.workstreams.command({ headers: {}, params: { commandId: command.command_id } }),
+          await waitForRetry(
+            Math.min(30_000, Math.max(250, retryAfterSeconds * 1_000)),
+            controller.signal,
           );
+          assertCurrentBinding();
+          receipt = await request(
+            (client) =>
+              client.workstreams.command({
+                headers: {},
+                params: { commandId: command.command_id },
+              }),
+            controller.signal,
+          );
+          assertCurrentBinding();
         }
+        assertCurrentBinding();
         refresh();
         return receipt;
       } catch (cause) {
-        generation.current += 1;
-        setPlacements(null);
-        metadataCache.purgeAuthorization();
-        setData(null);
+        if (!controller.signal.aborted && currentBindingKeyRef.current === startedBindingKey) {
+          generation.current += 1;
+          setPlacements(null);
+          metadataCache.purgeAuthorization();
+          setData(null);
+        }
         throw cause;
+      } finally {
+        commandRequests.current.delete(controller);
       }
     },
-    [refresh],
+    [currentBindingKey, refresh],
   );
 
   const loadDetail = useCallback(
