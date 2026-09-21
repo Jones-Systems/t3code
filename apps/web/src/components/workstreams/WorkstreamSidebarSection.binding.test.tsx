@@ -472,7 +472,7 @@ describe("Workstream sidebar binding cancellation", () => {
     expect(JSON.stringify(hooks.snapshot())).not.toContain("command-a");
   });
 
-  it("keeps a multi-step reorder in one binding operation until every step settles", async () => {
+  it("continues a multi-step reorder after rerendering at its accepted registry version", async () => {
     let resolveSecond!: (value: unknown) => void;
     const second = new Promise((resolve) => {
       resolveSecond = resolve;
@@ -496,9 +496,24 @@ describe("Workstream sidebar binding cancellation", () => {
         effects: { workstream_versions: [{ workstream_id: "ws-b", version: 10 }] },
       },
     ];
+    let controller!: WorkstreamListView;
+    let rerenderedAtAcceptedVersion = false;
     const submitStep = vi.fn(async (_command: unknown) => {
       const value = stepReceipts.shift();
-      return await Promise.resolve(value);
+      const receipt = await Promise.resolve(value);
+      if (!rerenderedAtAcceptedVersion) {
+        rerenderedAtAcceptedVersion = true;
+        controller = {
+          ...controller,
+          data: {
+            ...controller.data!,
+            binding: { ...controller.data!.binding, registryVersion: 12 },
+          },
+        };
+        hooks.beginRender();
+        WorkstreamSidebarSection({ controller });
+      }
+      return receipt;
     });
     const runBindingOperation = vi.fn(async (operation: (submit: typeof submitStep) => unknown) => {
       const value = await operation(submitStep);
@@ -510,7 +525,7 @@ describe("Workstream sidebar binding cancellation", () => {
       { ...data.items[0]!, workstreamId: "ws-b", name: "Beta", sortOrder: 1 },
       { ...data.items[0]!, workstreamId: "ws-c", name: "Gamma", sortOrder: 2 },
     ];
-    const controller = {
+    controller = {
       placementInventory: { coverage: "complete", identities: [], json: "[]", totalIdentities: 0 },
       placements: null,
       data: { ...data, items },

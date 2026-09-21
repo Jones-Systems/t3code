@@ -155,7 +155,6 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
       for (const step of plan) {
         if (step.item.sortOrder === step.sortOrder) continue;
         const id = await commandId();
-        if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
         const value = await submitStep({
           command_id: id,
           expected_server_generation: data.binding.serverGeneration,
@@ -170,7 +169,6 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
             sort_order: step.sortOrder,
           },
         });
-        if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
         latestReceipt = value;
         if (value.state !== "committed") return value;
         registryVersion = value.registry_version;
