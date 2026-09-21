@@ -7,6 +7,7 @@ import {
   LiveWorkstreamMetadataCache,
   orderWorkstreamMetadata,
   planWorkstreamOwnerOrder,
+  workstreamBindingKey,
 } from "./live.ts";
 
 const item = (workstreamId: string, sortOrder: number): T3WorkstreamMetadata => ({
@@ -34,6 +35,21 @@ const binding: T3WorkstreamBinding = {
 };
 
 describe("live Workstream DTO projection", () => {
+  it("keys every canonical binding identity field", () => {
+    const key = workstreamBindingKey(binding);
+    for (const changed of [
+      { registryId: "registry-replaced" },
+      { ownerId: "owner-replaced" },
+      { principalId: "principal-replaced" },
+      { authorizationRevision: 2 },
+      { serverGeneration: 8 },
+      { registryVersion: 12 },
+      { contractVersion: "workstreams/replaced" as never },
+      { contractManifest: "replaced" as never },
+    ])
+      expect(workstreamBindingKey({ ...binding, ...changed })).not.toBe(key);
+  });
+
   it("uses ASCII IDs for ties and plans the complete final order", () => {
     const items = [item("z", 4), item("a", 4), item("m", 9)];
     expect(orderWorkstreamMetadata(items).map((value) => value.workstreamId)).toEqual([

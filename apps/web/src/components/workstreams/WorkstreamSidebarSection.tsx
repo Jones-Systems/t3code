@@ -7,11 +7,12 @@ import {
 import {
   orderWorkstreamMetadata,
   planWorkstreamOwnerOrder,
+  workstreamBindingKey,
 } from "@t3tools/client-runtime/state/workstreams";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { ChevronDownIcon, ChevronUpIcon, GripVerticalIcon, MoreHorizontalIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { runtime } from "../../lib/runtime";
 import type { WorkstreamListView } from "../../state/workstreams";
@@ -27,8 +28,11 @@ const commandId = () =>
     ),
   );
 
+const bindingSuperseded = Symbol("binding superseded");
+
 export function WorkstreamSidebarSection(props: { readonly controller: WorkstreamListView }) {
-  const { data, submit, loadDetail, loadReference, refresh } = props.controller;
+  const { data, placementInventory, submit, runBindingOperation, loadDetail, loadReference } =
+    props.controller;
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [dragging, setDragging] = useState<string | null>(null);
@@ -39,53 +43,92 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
   const [pullRequestStatus, setPullRequestStatus] = useState<Record<string, string>>({});
   const [commandError, setCommandError] = useState<string | null>(null);
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof loadDetail>> | null>(null);
+  const detailRequest = useRef<AbortController | null>(null);
+  const manualRefreshRequest = useRef<AbortController | null>(null);
   const items = useMemo(() => orderWorkstreamMetadata(data?.items ?? []), [data]);
+  const bindingKey = data ? workstreamBindingKey(data.binding) : null;
+  const bindingKeyRef = useRef(bindingKey);
 
-  useEffect(() => {
-    if (!data) {
-      setDetail(null);
-      setReceipt(null);
+  useLayoutEffect(() => {
+    bindingKeyRef.current = bindingKey;
+    detailRequest.current?.abort();
+    detailRequest.current = null;
+    manualRefreshRequest.current?.abort();
+    manualRefreshRequest.current = null;
+    setDetail(null);
+    setPullRequestStatus({});
+    setReceipt(null);
+    if (bindingKey === null) {
       setSelected(null);
     }
-  }, [data]);
+    return () => {
+      detailRequest.current?.abort();
+      detailRequest.current = null;
+      manualRefreshRequest.current?.abort();
+      manualRefreshRequest.current = null;
+    };
+  }, [bindingKey]);
   if (!data) return null;
 
   const showDetail = (workstreamId: string) => {
+    detailRequest.current?.abort();
+    const controller = new AbortController();
+    detailRequest.current = controller;
+    const startedBindingKey = bindingKey;
     setSelected(workstreamId);
+    setDetail(null);
+    setPullRequestStatus({});
     setTargetId(items.find((item) => item.workstreamId !== workstreamId)?.workstreamId ?? "");
-    void loadDetail(workstreamId).then(
+    void loadDetail(workstreamId, { signal: controller.signal }).then(
       (value) => {
+        if (controller.signal.aborted || bindingKeyRef.current !== startedBindingKey) return;
         setDetail(value);
         for (const reference of value.references.items) {
           if (!reference.pr_locator) continue;
-          void loadReference(reference.native_reference_id).then((result) => {
-            setPullRequestStatus((current) => ({
-              ...current,
-              [reference.native_reference_id]:
-                result.latest_observation?.last_success?.state ??
-                result.latest_observation?.outcome ??
-                "not refreshed",
-            }));
-          });
+          void loadReference(reference.native_reference_id, { signal: controller.signal }).then(
+            (result) => {
+              if (controller.signal.aborted || bindingKeyRef.current !== startedBindingKey) return;
+              setPullRequestStatus((current) => ({
+                ...current,
+                [reference.native_reference_id]:
+                  result.latest_observation?.last_success?.state ??
+                  result.latest_observation?.outcome ??
+                  "not refreshed",
+              }));
+            },
+            () => undefined,
+          );
         }
       },
-      () => setDetail(null),
+      () => {
+        if (!controller.signal.aborted && bindingKeyRef.current === startedBindingKey)
+          setDetail(null);
+      },
     );
   };
-  const run = async (action: WorkstreamCommand["action"], registryVersion?: number) => {
+  const run = async (
+    action: WorkstreamCommand["action"],
+    registryVersion?: number,
+    startedBindingKey = bindingKey,
+  ) => {
+    const id = await commandId();
+    if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
     const value = await submit({
-      command_id: await commandId(),
+      command_id: id,
       expected_server_generation: data.binding.serverGeneration,
       expected_registry_version: registryVersion ?? data.binding.registryVersion,
       action,
     });
+    if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
     setReceipt(value);
     setCommandError(null);
-    if (selected) void loadDetail(selected).then(setDetail, () => setDetail(null));
+    if (selected) showDetail(selected);
     return value;
   };
   const invoke = (action: WorkstreamCommand["action"]) => {
-    void run(action).catch((cause: unknown) => {
+    const startedBindingKey = bindingKey;
+    void run(action, undefined, startedBindingKey).catch((cause: unknown) => {
+      if (cause === bindingSuperseded || bindingKeyRef.current !== startedBindingKey) return;
       setCommandError(cause instanceof Error ? cause.message : "Workstream command failed.");
     });
   };
@@ -103,14 +146,20 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
       sort_order: item.sortOrder,
     });
   const reorder = (sourceId: string, targetIndex: number) => {
-    void (async () => {
+    const startedBindingKey = bindingKey;
+    void runBindingOperation(async (submitStep) => {
       const plan = planWorkstreamOwnerOrder(items, sourceId, targetIndex);
       let registryVersion = data.binding.registryVersion;
+      let latestReceipt: WorkstreamReceipt | null = null;
       const versions = new Map(items.map((item) => [item.workstreamId, item.version]));
       for (const step of plan) {
         if (step.item.sortOrder === step.sortOrder) continue;
-        const value = await run(
-          {
+        const id = await commandId();
+        const value = await submitStep({
+          command_id: id,
+          expected_server_generation: data.binding.serverGeneration,
+          expected_registry_version: registryVersion,
+          action: {
             operation: "update_workstream",
             workstream_id: step.item.workstreamId,
             expected_version: versions.get(step.item.workstreamId) ?? step.item.version,
@@ -119,17 +168,25 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
             progress: step.item.progress,
             sort_order: step.sortOrder,
           },
-          registryVersion,
-        );
-        if (value.state !== "committed") return;
+        });
+        latestReceipt = value;
+        if (value.state !== "committed") return value;
         registryVersion = value.registry_version;
         for (const version of value.effects.workstream_versions)
           versions.set(version.workstream_id, version.version);
       }
-    })().catch((cause: unknown) => {
-      setCommandError(cause instanceof Error ? cause.message : "Workstream reorder failed.");
-      refresh();
-    });
+      return latestReceipt;
+    })
+      .then((value) => {
+        if (value === null || bindingKeyRef.current !== startedBindingKey) return;
+        setReceipt(value);
+        setCommandError(null);
+        if (selected) showDetail(selected);
+      })
+      .catch((cause: unknown) => {
+        if (cause === bindingSuperseded || bindingKeyRef.current !== startedBindingKey) return;
+        setCommandError(cause instanceof Error ? cause.message : "Workstream reorder failed.");
+      });
   };
 
   const workstream = detail?.detail.workstream;
@@ -144,6 +201,13 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
       <div className="flex h-8 items-center px-1 text-xs font-medium text-sidebar-muted-foreground">
         Workstreams
       </div>
+      {placementInventory.coverage === "partial" ? (
+        <p className="px-1 pb-1 text-xs text-sidebar-muted-foreground">
+          Thread placement lookup scope is partial (
+          {placementInventory.identities.length.toLocaleString()} of{" "}
+          {placementInventory.totalIdentities.toLocaleString()} identities selected).
+        </p>
+      ) : null}
       {commandError ? <p className="px-1 pb-1 text-xs text-destructive">{commandError}</p> : null}
       <ul className="space-y-0.5">
         {items.map((item, index) => (
@@ -386,18 +450,40 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                         size="xs"
                         variant="ghost"
                         onClick={() => {
+                          manualRefreshRequest.current?.abort();
+                          const controller = new AbortController();
+                          manualRefreshRequest.current = controller;
+                          const startedBindingKey = bindingKey;
                           void (async () => {
-                            const value = await loadReference(reference.native_reference_id);
-                            if (!value.latest_observation) return;
-                            await run({
-                              operation: "refresh_linked_pr",
-                              workstream_id: workstream.workstream_id,
-                              expected_version: workstream.version,
-                              membership_id: membership.membership_id,
-                              expected_observation_version:
-                                value.latest_observation.observation_version,
+                            const value = await loadReference(reference.native_reference_id, {
+                              signal: controller.signal,
                             });
-                            const refreshed = await loadReference(reference.native_reference_id);
+                            if (
+                              controller.signal.aborted ||
+                              bindingKeyRef.current !== startedBindingKey
+                            )
+                              return;
+                            if (!value.latest_observation) return;
+                            await run(
+                              {
+                                operation: "refresh_linked_pr",
+                                workstream_id: workstream.workstream_id,
+                                expected_version: workstream.version,
+                                membership_id: membership.membership_id,
+                                expected_observation_version:
+                                  value.latest_observation.observation_version,
+                              },
+                              undefined,
+                              startedBindingKey,
+                            );
+                            const refreshed = await loadReference(reference.native_reference_id, {
+                              signal: controller.signal,
+                            });
+                            if (
+                              controller.signal.aborted ||
+                              bindingKeyRef.current !== startedBindingKey
+                            )
+                              return;
                             setPullRequestStatus((current) => ({
                               ...current,
                               [reference.native_reference_id]:
@@ -405,11 +491,22 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                                 refreshed.latest_observation?.outcome ??
                                 "unknown",
                             }));
-                          })().catch((cause: unknown) => {
-                            setCommandError(
-                              cause instanceof Error ? cause.message : "PR refresh failed.",
-                            );
-                          });
+                          })()
+                            .catch((cause: unknown) => {
+                              if (
+                                cause === bindingSuperseded ||
+                                controller.signal.aborted ||
+                                bindingKeyRef.current !== startedBindingKey
+                              )
+                                return;
+                              setCommandError(
+                                cause instanceof Error ? cause.message : "PR refresh failed.",
+                              );
+                            })
+                            .finally(() => {
+                              if (manualRefreshRequest.current === controller)
+                                manualRefreshRequest.current = null;
+                            });
                         }}
                       >
                         Refresh status
