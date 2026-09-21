@@ -42,6 +42,25 @@ vi.mock("react", async (importOriginal) => {
 
 vi.mock("../lib/runtime", () => ({ runPrimaryHttp: runtime.runPrimaryHttp }));
 
+vi.mock("@t3tools/client-runtime/state/workstreams", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@t3tools/client-runtime/state/workstreams")>();
+  return {
+    ...actual,
+    loadLiveT3Placements: async (metadata: T3WorkstreamListResult) => ({
+      context: {
+        owner_id: metadata.binding.ownerId,
+        principal_id: metadata.binding.principalId,
+        authorization_revision: metadata.binding.authorizationRevision,
+        server_generation: metadata.binding.serverGeneration,
+        registry_version: metadata.binding.registryVersion,
+      },
+      items: [],
+      trustedEnvironments: [],
+      readiness: "trust-provider-required" as const,
+    }),
+  };
+});
+
 import { useWorkstreams } from "./workstreams";
 
 const binding = (overrides: Partial<T3WorkstreamBinding> = {}): T3WorkstreamBinding => ({
@@ -137,6 +156,36 @@ async function initialController() {
     controller.error ?? JSON.stringify(hooks.snapshot()),
   ).toBe(11);
   return controller;
+}
+
+async function initialPlacementController(
+  nativeThreads: readonly { readonly environmentId: string; readonly id: string }[] = [],
+) {
+  runtime.responses.push(Promise.resolve(list(binding())));
+  hooks.beginRender();
+  useWorkstreams(true, nativeThreads);
+  await flush();
+  hooks.beginRender();
+  const controller = useWorkstreams(true, nativeThreads);
+  expect(
+    controller.data?.binding.registryVersion,
+    controller.error ?? JSON.stringify(hooks.snapshot()),
+  ).toBe(11);
+  return controller;
+}
+
+async function reloadForNativeIdentity(
+  nativeThreads: readonly { readonly environmentId: string; readonly id: string }[],
+  nextBinding: T3WorkstreamBinding,
+) {
+  runtime.responses.push(Promise.resolve(list(nextBinding)));
+  hooks.beginRender();
+  useWorkstreams(true, nativeThreads);
+  await flush();
+  hooks.beginRender();
+  const rebound = useWorkstreams(true, nativeThreads);
+  expect(rebound.data?.binding).toEqual(nextBinding);
+  return rebound;
 }
 
 async function replaceBinding(
@@ -257,5 +306,72 @@ describe("Workstream command binding ownership", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("continues an operation when an identity reload observes its accepted registry version", async () => {
+    const controller = await initialPlacementController();
+    const continueOperation = deferred<void>();
+    const secondResponse = deferred<WorkstreamReceipt>();
+    const secondCommand = {
+      ...command,
+      command_id: "command-b",
+      expected_registry_version: 12,
+    } as WorkstreamCommand;
+    runtime.responses.push(Promise.resolve(committed));
+    const operation = controller.runBindingOperation(async (submit) => {
+      const first = await submit(command);
+      await continueOperation.promise;
+      const second = await submit(secondCommand);
+      return [first, second] as const;
+    });
+    await flush();
+    expect(runtime.runPrimaryHttp).toHaveBeenCalledTimes(2);
+
+    const nativeThreads = [{ environmentId: "environment", id: "thread" }];
+    await reloadForNativeIdentity(nativeThreads, binding({ registryVersion: 12 }));
+    expect(runtime.runPrimaryHttp).toHaveBeenCalledTimes(3);
+
+    runtime.responses.push(secondResponse.promise);
+    continueOperation.resolve();
+    await flush();
+    expect(runtime.runPrimaryHttp).toHaveBeenCalledTimes(4);
+    secondResponse.resolve({
+      ...committed,
+      command_id: "command-b",
+      registry_version: 13,
+    } as unknown as WorkstreamReceipt);
+    await expect(operation).resolves.toMatchObject([
+      { command_id: "command-a", registry_version: 12 },
+      { command_id: "command-b", registry_version: 13 },
+    ]);
+    expect(runtime.runPrimaryHttp).toHaveBeenCalledTimes(4);
+  });
+
+  it("cancels an operation when an identity reload observes an unaccepted registry version", async () => {
+    const controller = await initialPlacementController();
+    const continueOperation = deferred<void>();
+    runtime.responses.push(Promise.resolve(committed));
+    const operation = controller.runBindingOperation(async (submit) => {
+      await submit(command);
+      await continueOperation.promise;
+      return submit({
+        ...command,
+        command_id: "command-b",
+        expected_registry_version: 12,
+      } as WorkstreamCommand);
+    });
+    await flush();
+
+    const nativeThreads = [{ environmentId: "environment", id: "thread" }];
+    const external = binding({ registryVersion: 13 });
+    let rebound = await reloadForNativeIdentity(nativeThreads, external);
+    continueOperation.resolve();
+    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    await flush();
+
+    hooks.beginRender();
+    rebound = useWorkstreams(true, nativeThreads);
+    expect(rebound.data?.binding).toEqual(external);
+    expect(runtime.runPrimaryHttp).toHaveBeenCalledTimes(3);
   });
 });

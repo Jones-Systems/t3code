@@ -249,6 +249,11 @@ interface PlacementCandidate {
   readonly identity: T3PlacementIdentity;
 }
 
+interface BindingOperationRequest {
+  readonly controller: AbortController;
+  readonly acceptedBindingKeys: Set<string>;
+}
+
 const addBoundedPlacementCandidate = (
   heap: PlacementCandidate[],
   candidate: PlacementCandidate,
@@ -370,7 +375,7 @@ export function useWorkstreams(
   const [revision, setRevision] = useState(0);
   const generation = useRef(0);
   const listRequest = useRef<AbortController | null>(null);
-  const commandRequests = useRef(new Set<AbortController>());
+  const commandRequests = useRef(new Set<BindingOperationRequest>());
   const currentBindingKey = data ? workstreamBindingKey(data.binding) : null;
   const currentBindingKeyRef = useRef(currentBindingKey);
   currentBindingKeyRef.current = currentBindingKey;
@@ -382,12 +387,22 @@ export function useWorkstreams(
   }, []);
 
   useEffect(() => {
+    for (const operation of commandRequests.current) {
+      if (
+        (currentBindingKey === null || !operation.acceptedBindingKeys.has(currentBindingKey)) &&
+        !operation.controller.signal.aborted
+      )
+        operation.controller.abort();
+    }
+  }, [currentBindingKey]);
+
+  useEffect(() => {
     const requests = commandRequests.current;
     return () => {
-      for (const controller of requests) controller.abort();
+      for (const operation of requests) operation.controller.abort();
       requests.clear();
     };
-  }, [currentBindingKey]);
+  }, []);
 
   useEffect(() => {
     listRequest.current?.abort();
@@ -464,16 +479,29 @@ export function useWorkstreams(
     async <A>(
       operation: (submit: (command: WorkstreamCommand) => Promise<WorkstreamReceipt>) => Promise<A>,
     ) => {
-      const startedBindingKey = currentBindingKey;
-      if (startedBindingKey === null) throw new Error("Workstream binding is unavailable.");
+      const startedBinding = data?.binding;
+      if (startedBinding === undefined) throw new Error("Workstream binding is unavailable.");
       const controller = new AbortController();
-      commandRequests.current.add(controller);
+      const operationRequest: BindingOperationRequest = {
+        controller,
+        acceptedBindingKeys: new Set([workstreamBindingKey(startedBinding)]),
+      };
+      commandRequests.current.add(operationRequest);
       let commandAttempted = false;
       let refreshAfterOperation = false;
+      const currentBindingIsAccepted = () => {
+        const key = currentBindingKeyRef.current;
+        return key !== null && operationRequest.acceptedBindingKeys.has(key);
+      };
       const assertCurrentBinding = () => {
-        if (currentBindingKeyRef.current !== startedBindingKey && !controller.signal.aborted)
-          controller.abort();
+        if (!currentBindingIsAccepted() && !controller.signal.aborted) controller.abort();
         controller.signal.throwIfAborted();
+      };
+      const acceptReceiptBinding = (receipt: WorkstreamReceipt) => {
+        if (receipt.state !== "committed") return;
+        operationRequest.acceptedBindingKeys.add(
+          workstreamBindingKey({ ...startedBinding, registryVersion: receipt.registry_version }),
+        );
       };
       const submitCommand = async (command: WorkstreamCommand) => {
         assertCurrentBinding();
@@ -482,6 +510,7 @@ export function useWorkstreams(
           (client) => client.workstreams.submit({ headers: {}, payload: { command } }),
           controller.signal,
         );
+        acceptReceiptBinding(receipt);
         assertCurrentBinding();
         // Pending effects reconcile through the exact GET route; commands are never resubmitted.
         while (receipt.state === "pending" || receipt.state === "unresolved") {
@@ -499,6 +528,7 @@ export function useWorkstreams(
               }),
             controller.signal,
           );
+          acceptReceiptBinding(receipt);
           assertCurrentBinding();
         }
         return receipt;
@@ -509,7 +539,7 @@ export function useWorkstreams(
         refreshAfterOperation = true;
         return value;
       } catch (cause) {
-        if (!controller.signal.aborted && currentBindingKeyRef.current === startedBindingKey) {
+        if (!controller.signal.aborted && currentBindingIsAccepted()) {
           generation.current += 1;
           setPlacements(null);
           metadataCache.purgeAuthorization();
@@ -518,16 +548,12 @@ export function useWorkstreams(
         }
         throw cause;
       } finally {
-        commandRequests.current.delete(controller);
-        if (
-          refreshAfterOperation &&
-          !controller.signal.aborted &&
-          currentBindingKeyRef.current === startedBindingKey
-        )
+        commandRequests.current.delete(operationRequest);
+        if (refreshAfterOperation && !controller.signal.aborted && currentBindingIsAccepted())
           refresh();
       }
     },
-    [currentBindingKey, refresh],
+    [data?.binding, refresh],
   );
   const submit = useCallback(
     (command: WorkstreamCommand) => runBindingOperation((submitCommand) => submitCommand(command)),
