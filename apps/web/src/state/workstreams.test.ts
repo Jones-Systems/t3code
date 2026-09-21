@@ -117,6 +117,47 @@ describe("complete Workstream list loading", () => {
       ).byteLength,
     ).toBeGreaterThan(T3_PLACEMENT_MAX_REQUEST_BYTES);
   });
+
+  it("keeps a deterministic 1,000-identity selection for a large reversed inventory", () => {
+    const threads = Array.from({ length: 100_001 }, (_, index) => ({
+      environmentId: `environment-${String(index % 7).padStart(2, "0")}`,
+      id: `thread-${String(index).padStart(6, "0")}`,
+    }));
+    const inventory = nativePlacementInventory([...threads].reverse());
+    const ordered = nativePlacementInventory(threads);
+
+    expect(inventory).toEqual(ordered);
+    expect(inventory.identities).toHaveLength(1_000);
+    expect(inventory.totalIdentities).toBe(100_001);
+    expect(inventory.coverage).toBe("partial");
+  });
+
+  it("never sorts more placement candidates than the identity cap", () => {
+    const originalSort = Array.prototype.sort;
+    const sortedLengths: number[] = [];
+    const sort = vi.spyOn(Array.prototype, "sort").mockImplementation(function (
+      this: unknown[],
+      compareFn?: (a: unknown, b: unknown) => number,
+    ) {
+      sortedLengths.push(this.length);
+      if (this.length > 1_000) throw new Error(`sorted ${this.length} placement candidates`);
+      return originalSort.call(this, compareFn);
+    });
+
+    try {
+      const inventory = nativePlacementInventory(
+        Array.from({ length: 20_000 }, (_, index) => ({
+          environmentId: "environment",
+          id: String(20_000 - index),
+        })),
+      );
+      expect(inventory.totalIdentities).toBe(20_000);
+      expect(inventory.identities).toHaveLength(1_000);
+      expect(sortedLengths).toEqual([1_000]);
+    } finally {
+      sort.mockRestore();
+    }
+  });
   it("loads across page boundaries before exposing an owner list", async () => {
     const cursors: Array<string | undefined> = [];
     const result = await loadCompleteWorkstreamList(async (cursor) => {

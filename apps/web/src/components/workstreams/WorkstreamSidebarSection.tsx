@@ -27,6 +27,8 @@ const commandId = () =>
     ),
   );
 
+const bindingSuperseded = Symbol("binding superseded");
+
 export function WorkstreamSidebarSection(props: { readonly controller: WorkstreamListView }) {
   const { data, placementInventory, submit, loadDetail, loadReference, refresh } = props.controller;
   const [editing, setEditing] = useState<string | null>(null);
@@ -40,6 +42,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
   const [commandError, setCommandError] = useState<string | null>(null);
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof loadDetail>> | null>(null);
   const detailRequest = useRef<AbortController | null>(null);
+  const manualRefreshRequest = useRef<AbortController | null>(null);
   const items = useMemo(() => orderWorkstreamMetadata(data?.items ?? []), [data]);
   const bindingKey = data
     ? JSON.stringify([
@@ -56,15 +59,19 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
     bindingKeyRef.current = bindingKey;
     detailRequest.current?.abort();
     detailRequest.current = null;
+    manualRefreshRequest.current?.abort();
+    manualRefreshRequest.current = null;
     setDetail(null);
     setPullRequestStatus({});
+    setReceipt(null);
     if (bindingKey === null) {
-      setReceipt(null);
       setSelected(null);
     }
     return () => {
       detailRequest.current?.abort();
       detailRequest.current = null;
+      manualRefreshRequest.current?.abort();
+      manualRefreshRequest.current = null;
     };
   }, [bindingKey]);
   if (!data) return null;
@@ -105,20 +112,29 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
       },
     );
   };
-  const run = async (action: WorkstreamCommand["action"], registryVersion?: number) => {
+  const run = async (
+    action: WorkstreamCommand["action"],
+    registryVersion?: number,
+    startedBindingKey = bindingKey,
+  ) => {
+    const id = await commandId();
+    if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
     const value = await submit({
-      command_id: await commandId(),
+      command_id: id,
       expected_server_generation: data.binding.serverGeneration,
       expected_registry_version: registryVersion ?? data.binding.registryVersion,
       action,
     });
+    if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
     setReceipt(value);
     setCommandError(null);
     if (selected) showDetail(selected);
     return value;
   };
   const invoke = (action: WorkstreamCommand["action"]) => {
-    void run(action).catch((cause: unknown) => {
+    const startedBindingKey = bindingKey;
+    void run(action, undefined, startedBindingKey).catch((cause: unknown) => {
+      if (cause === bindingSuperseded || bindingKeyRef.current !== startedBindingKey) return;
       setCommandError(cause instanceof Error ? cause.message : "Workstream command failed.");
     });
   };
@@ -136,6 +152,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
       sort_order: item.sortOrder,
     });
   const reorder = (sourceId: string, targetIndex: number) => {
+    const startedBindingKey = bindingKey;
     void (async () => {
       const plan = planWorkstreamOwnerOrder(items, sourceId, targetIndex);
       let registryVersion = data.binding.registryVersion;
@@ -153,6 +170,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
             sort_order: step.sortOrder,
           },
           registryVersion,
+          startedBindingKey,
         );
         if (value.state !== "committed") return;
         registryVersion = value.registry_version;
@@ -160,6 +178,7 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
           versions.set(version.workstream_id, version.version);
       }
     })().catch((cause: unknown) => {
+      if (cause === bindingSuperseded || bindingKeyRef.current !== startedBindingKey) return;
       setCommandError(cause instanceof Error ? cause.message : "Workstream reorder failed.");
       refresh();
     });
@@ -426,18 +445,40 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                         size="xs"
                         variant="ghost"
                         onClick={() => {
+                          manualRefreshRequest.current?.abort();
+                          const controller = new AbortController();
+                          manualRefreshRequest.current = controller;
+                          const startedBindingKey = bindingKey;
                           void (async () => {
-                            const value = await loadReference(reference.native_reference_id);
-                            if (!value.latest_observation) return;
-                            await run({
-                              operation: "refresh_linked_pr",
-                              workstream_id: workstream.workstream_id,
-                              expected_version: workstream.version,
-                              membership_id: membership.membership_id,
-                              expected_observation_version:
-                                value.latest_observation.observation_version,
+                            const value = await loadReference(reference.native_reference_id, {
+                              signal: controller.signal,
                             });
-                            const refreshed = await loadReference(reference.native_reference_id);
+                            if (
+                              controller.signal.aborted ||
+                              bindingKeyRef.current !== startedBindingKey
+                            )
+                              return;
+                            if (!value.latest_observation) return;
+                            await run(
+                              {
+                                operation: "refresh_linked_pr",
+                                workstream_id: workstream.workstream_id,
+                                expected_version: workstream.version,
+                                membership_id: membership.membership_id,
+                                expected_observation_version:
+                                  value.latest_observation.observation_version,
+                              },
+                              undefined,
+                              startedBindingKey,
+                            );
+                            const refreshed = await loadReference(reference.native_reference_id, {
+                              signal: controller.signal,
+                            });
+                            if (
+                              controller.signal.aborted ||
+                              bindingKeyRef.current !== startedBindingKey
+                            )
+                              return;
                             setPullRequestStatus((current) => ({
                               ...current,
                               [reference.native_reference_id]:
@@ -445,11 +486,22 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
                                 refreshed.latest_observation?.outcome ??
                                 "unknown",
                             }));
-                          })().catch((cause: unknown) => {
-                            setCommandError(
-                              cause instanceof Error ? cause.message : "PR refresh failed.",
-                            );
-                          });
+                          })()
+                            .catch((cause: unknown) => {
+                              if (
+                                cause === bindingSuperseded ||
+                                controller.signal.aborted ||
+                                bindingKeyRef.current !== startedBindingKey
+                              )
+                                return;
+                              setCommandError(
+                                cause instanceof Error ? cause.message : "PR refresh failed.",
+                              );
+                            })
+                            .finally(() => {
+                              if (manualRefreshRequest.current === controller)
+                                manualRefreshRequest.current = null;
+                            });
                         }}
                       >
                         Refresh status

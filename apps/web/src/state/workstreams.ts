@@ -41,6 +41,7 @@ const request = <A, E>(run: (client: PrimaryClient) => Effect.Effect<A, E>, sign
 const metadataCache = new LiveWorkstreamMetadataCache();
 const isCursorStale = Schema.is(EnvironmentHttpConflictError);
 const CURSOR_RESTART_ATTEMPTS = 3;
+const EMPTY_NATIVE_THREADS: readonly { readonly environmentId: string; readonly id: string }[] = [];
 
 const isRestartableCursorStale = (cause: unknown): boolean =>
   isCursorStale(cause) && cause.message === "workstream_cursor_stale";
@@ -239,24 +240,66 @@ export interface NativePlacementInventory {
   readonly totalIdentities: number;
 }
 
+interface PlacementCandidate {
+  readonly key: string;
+  readonly identity: T3PlacementIdentity;
+}
+
+const addBoundedPlacementCandidate = (
+  heap: PlacementCandidate[],
+  candidate: PlacementCandidate,
+): void => {
+  const replacingMaximum = heap.length === T3_PLACEMENT_MAX_IDENTITIES;
+  if (replacingMaximum && candidate.key >= heap[0]!.key) return;
+  if (replacingMaximum) heap[0] = candidate;
+  else heap.push(candidate);
+
+  if (!replacingMaximum) {
+    let index = heap.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (heap[parent]!.key >= heap[index]!.key) break;
+      [heap[parent], heap[index]] = [heap[index]!, heap[parent]!];
+      index = parent;
+    }
+    return;
+  }
+
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    if (left >= heap.length) return;
+    const right = left + 1;
+    const child = right < heap.length && heap[right]!.key > heap[left]!.key ? right : left;
+    if (heap[index]!.key >= heap[child]!.key) return;
+    [heap[index], heap[child]] = [heap[child]!, heap[index]!];
+    index = child;
+  }
+};
+
 export function nativePlacementInventory(
   nativeThreads: readonly { readonly environmentId: string; readonly id: string }[],
 ): NativePlacementInventory {
-  const identities = new Map<string, T3PlacementIdentity>();
+  const identityKeys = new Set<string>();
+  const candidates: PlacementCandidate[] = [];
   for (const thread of nativeThreads) {
-    identities.set(JSON.stringify([thread.environmentId, thread.id]), {
-      source_instance_id: thread.environmentId,
-      native_thread_id: thread.id,
+    const key = JSON.stringify([thread.environmentId, thread.id]);
+    if (identityKeys.has(key)) continue;
+    identityKeys.add(key);
+    addBoundedPlacementCandidate(candidates, {
+      key,
+      identity: {
+        source_instance_id: thread.environmentId,
+        native_thread_id: thread.id,
+      },
     });
   }
-  const totalIdentities = identities.size;
+  const totalIdentities = identityKeys.size;
   const selected: T3PlacementIdentity[] = [];
   const encoder = new TextEncoder();
   let requestBytes = encoder.encode(JSON.stringify({ identities: selected })).byteLength;
-  for (const [, value] of [...identities.entries()].sort(([a], [b]) =>
-    a < b ? -1 : a > b ? 1 : 0,
-  )) {
-    if (selected.length === T3_PLACEMENT_MAX_IDENTITIES) break;
+  candidates.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  for (const { identity: value } of candidates) {
     const nextBytes =
       requestBytes +
       encoder.encode(JSON.stringify(value)).byteLength +
@@ -281,9 +324,15 @@ export function nativePlacementInventoryJson(
 
 export function useWorkstreams(
   placementsEnabled = true,
-  nativeThreads: readonly { readonly environmentId: string; readonly id: string }[] = [],
+  nativeThreads: readonly {
+    readonly environmentId: string;
+    readonly id: string;
+  }[] = EMPTY_NATIVE_THREADS,
 ): WorkstreamListView {
-  const inventory = nativePlacementInventory(placementsEnabled ? nativeThreads : []);
+  const inventory = useMemo(
+    () => nativePlacementInventory(placementsEnabled ? nativeThreads : EMPTY_NATIVE_THREADS),
+    [placementsEnabled, nativeThreads],
+  );
   const identities = useMemo(
     () => JSON.parse(inventory.json) as readonly T3PlacementIdentity[],
     [inventory.json],

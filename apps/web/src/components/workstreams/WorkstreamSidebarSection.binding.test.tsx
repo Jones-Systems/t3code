@@ -243,4 +243,164 @@ describe("Workstream sidebar binding cancellation", () => {
     expect(containsText(current, "loading")).toBe(true);
     expect(loadReference).toHaveBeenCalledTimes(2);
   });
+
+  it("cancels a pending manual PR refresh when the binding changes", async () => {
+    let resolveReference!: (value: unknown) => void;
+    const pendingReference = new Promise((resolve) => {
+      resolveReference = resolve;
+    });
+    const loadDetail = vi.fn(async () => detailWithReference);
+    const loadReference = vi
+      .fn()
+      .mockResolvedValueOnce({
+        latest_observation: { observation_version: 1, last_success: { state: "OPEN" } },
+      })
+      .mockImplementationOnce(() => pendingReference);
+    const submit = vi.fn();
+    let controller = {
+      placementInventory: {
+        coverage: "complete" as const,
+        identities: [],
+        json: "[]",
+        totalIdentities: 0,
+      },
+      placements: null,
+      data,
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+      submit,
+      loadDetail,
+      loadReference,
+    } as WorkstreamListView;
+
+    hooks.beginRender();
+    const initial = WorkstreamSidebarSection({ controller });
+    const alpha = visitElements(
+      initial,
+      (element) => element.type === "button" && containsText(element, "Alpha"),
+    ) as ReactElement<{ onClick: () => void }> | undefined;
+    alpha?.props.onClick();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    hooks.beginRender();
+    const detailed = WorkstreamSidebarSection({ controller });
+    const refreshStatus = visitElements(
+      detailed,
+      (element) =>
+        element.props.children === "Refresh status" && typeof element.props.onClick === "function",
+    ) as ReactElement<{ onClick: () => void }> | undefined;
+    expect(refreshStatus).toBeDefined();
+    const automaticSignal = loadReference.mock.calls[0]?.[1]?.signal;
+    refreshStatus?.props.onClick();
+    const signal = loadReference.mock.calls
+      .map((call) => call[1]?.signal)
+      .find((candidate) => candidate !== undefined && candidate !== automaticSignal);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+
+    controller = {
+      ...controller,
+      data: {
+        ...data,
+        binding: { ...binding, authorizationRevision: 2, registryVersion: 12 },
+      },
+    };
+    hooks.beginRender();
+    WorkstreamSidebarSection({ controller });
+    expect(signal?.aborted).toBe(true);
+
+    resolveReference({
+      latest_observation: { observation_version: 1, last_success: { state: "OPEN" } },
+    });
+    await pendingReference;
+    await Promise.resolve();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("does not commit command UI after its binding is replaced", async () => {
+    let resolveSubmit!: (value: unknown) => void;
+    const pendingSubmit = new Promise((resolve) => {
+      resolveSubmit = resolve;
+    });
+    const loadDetail = vi.fn(async () => detailWithReference);
+    const controllerBase = {
+      placementInventory: {
+        coverage: "complete" as const,
+        identities: [],
+        json: "[]",
+        totalIdentities: 0,
+      },
+      placements: null,
+      data,
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+      submit: vi.fn(() => pendingSubmit),
+      loadDetail,
+      loadReference: vi.fn(async () => ({ latest_observation: null })),
+    } as unknown as WorkstreamListView;
+    let controller = controllerBase;
+
+    hooks.beginRender();
+    const initial = WorkstreamSidebarSection({ controller });
+    const alpha = visitElements(
+      initial,
+      (element) => element.type === "button" && containsText(element, "Alpha"),
+    ) as ReactElement<{ onClick: () => void }> | undefined;
+    alpha?.props.onClick();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    hooks.beginRender();
+    const detailed = WorkstreamSidebarSection({ controller });
+    const lifecycle = visitElements(
+      detailed,
+      (element) =>
+        element.type === "select" && element.props["aria-label"] === "Workstream lifecycle",
+    ) as ReactElement<{ onChange: (event: { target: { value: string } }) => void }> | undefined;
+    expect(lifecycle).toBeDefined();
+    lifecycle?.props.onChange({ target: { value: "paused" } });
+    await vi.waitFor(() => expect(controller.submit).toHaveBeenCalledTimes(1));
+
+    controller = {
+      ...controller,
+      data: {
+        ...data,
+        binding: { ...binding, authorizationRevision: 2, registryVersion: 12 },
+      },
+    };
+    hooks.beginRender();
+    WorkstreamSidebarSection({ controller });
+
+    resolveSubmit({
+      command_id: "command-a",
+      operation: "update_workstream",
+      accepted_at: "2026-09-12T12:00:00Z",
+      state: "committed",
+      completed_at: "2026-09-12T12:00:01Z",
+      registry_version: 12,
+      changed: true,
+      effects: {
+        workstream_versions: [{ workstream_id: "ws-a", version: 2 }],
+        native_reference_id: null,
+        membership_ids: [],
+        declaration_id: null,
+        declaration_revision: null,
+        edge_id: null,
+        observation: null,
+        registration: null,
+        lifecycle_declaration: null,
+        coordination_disposition: null,
+        native_settlement: null,
+      },
+    });
+    await pendingSubmit;
+    await Promise.resolve();
+
+    expect(controller.submit).toHaveBeenCalledTimes(1);
+    expect(loadDetail).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(hooks.snapshot())).not.toContain("command-a");
+  });
 });
