@@ -3,7 +3,7 @@
   "groups": [
     {
       "group_id": "t3-workstream-placements",
-      "command": "node_modules/.bin/vp test run apps/server/src/workstreams/WorkstreamPlacements.test.ts apps/server/src/workstreams/ControlPlaneWorkstreamTransport.test.ts apps/server/src/workstreams/WorkstreamGateway.test.ts apps/server/src/workstreams/http.test.ts packages/client-runtime/src/state/workstreams/placements.test.ts packages/client-runtime/src/state/workstreams/live.test.ts apps/web/src/state/workstreams.test.ts apps/web/src/state/workstreams.binding.test.ts apps/web/src/components/workstreams/nativeThreadGrouping.test.ts",
+      "command": "node_modules/.bin/vp test run apps/server/src/workstreams/WorkstreamPlacements.test.ts apps/server/src/workstreams/ControlPlaneWorkstreamTransport.test.ts apps/server/src/workstreams/WorkstreamGateway.test.ts apps/server/src/workstreams/http.test.ts packages/client-runtime/src/state/workstreams/placements.test.ts packages/client-runtime/src/state/workstreams/live.test.ts apps/web/src/state/workstreams.test.ts apps/web/src/state/workstreams.binding.test.ts apps/web/src/components/workstreams/nativeThreadGrouping.test.ts apps/web/src/components/workstreams/WorkstreamSidebarSection.test.tsx apps/web/src/components/workstreams/WorkstreamSidebarSection.binding.test.tsx",
       "modules": [
         "apps/server/src/workstreams/WorkstreamPlacements.test.ts",
         "apps/server/src/workstreams/ControlPlaneWorkstreamTransport.test.ts",
@@ -13,16 +13,27 @@
         "packages/client-runtime/src/state/workstreams/live.test.ts",
         "apps/web/src/state/workstreams.test.ts",
         "apps/web/src/state/workstreams.binding.test.ts",
-        "apps/web/src/components/workstreams/nativeThreadGrouping.test.ts"
+        "apps/web/src/components/workstreams/nativeThreadGrouping.test.ts",
+        "apps/web/src/components/workstreams/WorkstreamSidebarSection.test.tsx",
+        "apps/web/src/components/workstreams/WorkstreamSidebarSection.binding.test.tsx"
       ],
       "scope": [
         "packages/contracts/src/workstreamPlacements.ts",
         "packages/contracts/src/environmentHttp.ts",
         "apps/server/src/workstreams/**",
         "packages/client-runtime/src/state/workstreams/**",
+        "apps/web/src/lib/runtime.ts",
         "apps/web/src/state/workstreams.ts",
+        "apps/web/src/state/workstreams.test.ts",
+        "apps/web/src/state/workstreams.binding.test.ts",
         "apps/web/src/components/workstreams/nativeThreadGrouping.ts",
-        "apps/web/src/components/Sidebar.tsx"
+        "apps/web/src/components/workstreams/nativeThreadGrouping.test.ts",
+        "apps/web/src/components/workstreams/WorkstreamSidebarSection.tsx",
+        "apps/web/src/components/workstreams/WorkstreamSidebarSection.test.tsx",
+        "apps/web/src/components/workstreams/WorkstreamSidebarSection.binding.test.tsx",
+        "apps/web/src/components/Sidebar.tsx",
+        "apps/web/src/test/reactHookHarness.ts",
+        "tests/check-groups.json"
       ]
     }
   ]

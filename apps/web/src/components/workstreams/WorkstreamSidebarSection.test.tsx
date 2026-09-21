@@ -42,6 +42,7 @@ vi.mock("../../state/workstreams", () => ({
       stale: false,
     },
     submit: vi.fn(),
+    runBindingOperation: vi.fn(),
     loadDetail: vi.fn(),
     loadReference: vi.fn(),
   }),

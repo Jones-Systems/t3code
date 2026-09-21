@@ -113,6 +113,13 @@ function containsText(node: unknown, text: string): boolean {
   return Object.values(node.props).some((value) => containsText(value, text));
 }
 
+function findElement(
+  node: unknown,
+  predicate: (element: ReactElement<Record<string, unknown>>) => boolean,
+) {
+  return visitElements(node, predicate) as ReactElement<Record<string, unknown>> | undefined;
+}
+
 describe("Workstream sidebar binding cancellation", () => {
   afterEach(() => hooks.reset());
 
@@ -141,6 +148,7 @@ describe("Workstream sidebar binding cancellation", () => {
       loading: false,
       refresh: vi.fn(),
       submit: vi.fn(),
+      runBindingOperation: vi.fn(),
       loadDetail,
       loadReference: vi.fn(),
     };
@@ -189,6 +197,7 @@ describe("Workstream sidebar binding cancellation", () => {
       loading: false,
       refresh: vi.fn(),
       submit: vi.fn(),
+      runBindingOperation: vi.fn(),
       loadDetail,
       loadReference,
     };
@@ -250,6 +259,7 @@ describe("Workstream sidebar binding cancellation", () => {
       loading: false,
       refresh: vi.fn(),
       submit: vi.fn(),
+      runBindingOperation: vi.fn(),
       loadDetail,
       loadReference,
     } as WorkstreamListView;
@@ -326,6 +336,7 @@ describe("Workstream sidebar binding cancellation", () => {
       loading: false,
       refresh: vi.fn(),
       submit,
+      runBindingOperation: vi.fn(),
       loadDetail,
       loadReference,
     } as WorkstreamListView;
@@ -394,6 +405,7 @@ describe("Workstream sidebar binding cancellation", () => {
       loading: false,
       refresh: vi.fn(),
       submit: vi.fn(() => pendingSubmit),
+      runBindingOperation: vi.fn(),
       loadDetail,
       loadReference: vi.fn(async () => ({ latest_observation: null })),
     } as unknown as WorkstreamListView;
@@ -458,5 +470,101 @@ describe("Workstream sidebar binding cancellation", () => {
     expect(controller.submit).toHaveBeenCalledTimes(1);
     expect(loadDetail).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(hooks.snapshot())).not.toContain("command-a");
+  });
+
+  it("keeps a multi-step reorder in one binding operation until every step settles", async () => {
+    let resolveSecond!: (value: unknown) => void;
+    const second = new Promise((resolve) => {
+      resolveSecond = resolve;
+    });
+    const refresh = vi.fn();
+    const stepReceipts = [
+      {
+        state: "committed",
+        registry_version: 12,
+        effects: {
+          workstream_versions: [
+            { workstream_id: "ws-c", version: 2 },
+            { workstream_id: "ws-a", version: 5 },
+          ],
+        },
+      },
+      second,
+      {
+        state: "committed",
+        registry_version: 14,
+        effects: { workstream_versions: [{ workstream_id: "ws-b", version: 10 }] },
+      },
+    ];
+    const submitStep = vi.fn(async (_command: unknown) => {
+      const value = stepReceipts.shift();
+      return await Promise.resolve(value);
+    });
+    const runBindingOperation = vi.fn(async (operation: (submit: typeof submitStep) => unknown) => {
+      const value = await operation(submitStep);
+      refresh();
+      return value;
+    });
+    const items = [
+      data.items[0],
+      { ...data.items[0]!, workstreamId: "ws-b", name: "Beta", sortOrder: 1 },
+      { ...data.items[0]!, workstreamId: "ws-c", name: "Gamma", sortOrder: 2 },
+    ];
+    const controller = {
+      placementInventory: { coverage: "complete", identities: [], json: "[]", totalIdentities: 0 },
+      placements: null,
+      data: { ...data, items },
+      error: null,
+      loading: false,
+      refresh,
+      submit: vi.fn(async () => {
+        throw new Error("reorder used per-command submission");
+      }),
+      runBindingOperation,
+      loadDetail: vi.fn(),
+      loadReference: vi.fn(),
+    } as unknown as WorkstreamListView;
+
+    hooks.beginRender();
+    const initial = WorkstreamSidebarSection({ controller });
+    const gamma = findElement(
+      initial,
+      (element) => element.type === "li" && containsText(element, "Gamma"),
+    ) as ReactElement<{ onDragStart: () => void }> | undefined;
+    gamma?.props.onDragStart();
+
+    hooks.beginRender();
+    const dragging = WorkstreamSidebarSection({ controller });
+    const alpha = findElement(
+      dragging,
+      (element) => element.type === "li" && containsText(element, "Alpha"),
+    ) as ReactElement<{ onDrop: (event: { preventDefault: () => void }) => void }> | undefined;
+    alpha?.props.onDrop({ preventDefault: vi.fn() });
+
+    await vi.waitFor(() => expect(submitStep).toHaveBeenCalledTimes(2));
+    expect(runBindingOperation).toHaveBeenCalledTimes(1);
+    expect(controller.submit).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(submitStep.mock.calls[1]?.[0]).toMatchObject({
+      expected_registry_version: 12,
+      action: { workstream_id: "ws-a", expected_version: 5 },
+    });
+
+    resolveSecond({
+      state: "committed",
+      registry_version: 13,
+      effects: {
+        workstream_versions: [
+          { workstream_id: "ws-a", version: 6 },
+          { workstream_id: "ws-b", version: 9 },
+        ],
+      },
+    });
+    await vi.waitFor(() => expect(submitStep).toHaveBeenCalledTimes(3));
+    expect(submitStep.mock.calls[2]?.[0]).toMatchObject({
+      expected_registry_version: 13,
+      action: { workstream_id: "ws-b", expected_version: 9 },
+    });
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
   });
 });

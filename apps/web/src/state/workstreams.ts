@@ -224,6 +224,9 @@ export interface WorkstreamListView {
   readonly loading: boolean;
   readonly refresh: () => void;
   readonly submit: (command: WorkstreamCommand) => Promise<WorkstreamReceipt>;
+  readonly runBindingOperation: <A>(
+    operation: (submit: (command: WorkstreamCommand) => Promise<WorkstreamReceipt>) => Promise<A>,
+  ) => Promise<A>;
   readonly loadDetail: (
     workstreamId: string,
     options?: { readonly signal?: AbortSignal },
@@ -323,6 +326,22 @@ export function nativePlacementInventoryJson(
   return nativePlacementInventory(nativeThreads).json;
 }
 
+export function reuseNativePlacementIdentitySnapshot<
+  Thread extends { readonly environmentId: string; readonly id: string },
+>(previous: readonly Thread[], next: readonly Thread[]): readonly Thread[] {
+  if (previous === next || previous.length !== next.length) return next;
+  for (let index = 0; index < previous.length; index += 1) {
+    const previousThread = previous[index]!;
+    const nextThread = next[index]!;
+    if (
+      previousThread.environmentId !== nextThread.environmentId ||
+      previousThread.id !== nextThread.id
+    )
+      return next;
+  }
+  return previous;
+}
+
 export function useWorkstreams(
   placementsEnabled = true,
   nativeThreads: readonly {
@@ -330,9 +349,15 @@ export function useWorkstreams(
     readonly id: string;
   }[] = EMPTY_NATIVE_THREADS,
 ): WorkstreamListView {
+  const nativeThreadsSnapshot = useRef(nativeThreads);
+  nativeThreadsSnapshot.current = reuseNativePlacementIdentitySnapshot(
+    nativeThreadsSnapshot.current,
+    nativeThreads,
+  );
+  const stableNativeThreads = nativeThreadsSnapshot.current;
   const inventory = useMemo(
-    () => nativePlacementInventory(placementsEnabled ? nativeThreads : EMPTY_NATIVE_THREADS),
-    [placementsEnabled, nativeThreads],
+    () => nativePlacementInventory(placementsEnabled ? stableNativeThreads : EMPTY_NATIVE_THREADS),
+    [placementsEnabled, stableNativeThreads],
   );
   const identities = useMemo(
     () => JSON.parse(inventory.json) as readonly T3PlacementIdentity[],
@@ -435,18 +460,24 @@ export function useWorkstreams(
     return () => window.clearTimeout(timer);
   }, [placements]);
 
-  const submit = useCallback(
-    async (command: WorkstreamCommand) => {
+  const runBindingOperation = useCallback(
+    async <A>(
+      operation: (submit: (command: WorkstreamCommand) => Promise<WorkstreamReceipt>) => Promise<A>,
+    ) => {
       const startedBindingKey = currentBindingKey;
       if (startedBindingKey === null) throw new Error("Workstream binding is unavailable.");
       const controller = new AbortController();
       commandRequests.current.add(controller);
+      let commandAttempted = false;
+      let refreshAfterOperation = false;
       const assertCurrentBinding = () => {
         if (currentBindingKeyRef.current !== startedBindingKey && !controller.signal.aborted)
           controller.abort();
         controller.signal.throwIfAborted();
       };
-      try {
+      const submitCommand = async (command: WorkstreamCommand) => {
+        assertCurrentBinding();
+        commandAttempted = true;
         let receipt = await request(
           (client) => client.workstreams.submit({ headers: {}, payload: { command } }),
           controller.signal,
@@ -470,22 +501,37 @@ export function useWorkstreams(
           );
           assertCurrentBinding();
         }
-        assertCurrentBinding();
-        refresh();
         return receipt;
+      };
+      try {
+        const value = await operation(submitCommand);
+        assertCurrentBinding();
+        refreshAfterOperation = true;
+        return value;
       } catch (cause) {
         if (!controller.signal.aborted && currentBindingKeyRef.current === startedBindingKey) {
           generation.current += 1;
           setPlacements(null);
           metadataCache.purgeAuthorization();
           setData(null);
+          refreshAfterOperation = commandAttempted;
         }
         throw cause;
       } finally {
         commandRequests.current.delete(controller);
+        if (
+          refreshAfterOperation &&
+          !controller.signal.aborted &&
+          currentBindingKeyRef.current === startedBindingKey
+        )
+          refresh();
       }
     },
     [currentBindingKey, refresh],
+  );
+  const submit = useCallback(
+    (command: WorkstreamCommand) => runBindingOperation((submitCommand) => submitCommand(command)),
+    [runBindingOperation],
   );
 
   const loadDetail = useCallback(
@@ -580,6 +626,7 @@ export function useWorkstreams(
     loading,
     refresh,
     submit,
+    runBindingOperation,
     loadDetail,
     loadReference,
   };

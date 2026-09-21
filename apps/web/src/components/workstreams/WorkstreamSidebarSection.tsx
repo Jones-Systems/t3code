@@ -31,7 +31,8 @@ const commandId = () =>
 const bindingSuperseded = Symbol("binding superseded");
 
 export function WorkstreamSidebarSection(props: { readonly controller: WorkstreamListView }) {
-  const { data, placementInventory, submit, loadDetail, loadReference, refresh } = props.controller;
+  const { data, placementInventory, submit, runBindingOperation, loadDetail, loadReference } =
+    props.controller;
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [dragging, setDragging] = useState<string | null>(null);
@@ -146,14 +147,20 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
     });
   const reorder = (sourceId: string, targetIndex: number) => {
     const startedBindingKey = bindingKey;
-    void (async () => {
+    void runBindingOperation(async (submitStep) => {
       const plan = planWorkstreamOwnerOrder(items, sourceId, targetIndex);
       let registryVersion = data.binding.registryVersion;
+      let latestReceipt: WorkstreamReceipt | null = null;
       const versions = new Map(items.map((item) => [item.workstreamId, item.version]));
       for (const step of plan) {
         if (step.item.sortOrder === step.sortOrder) continue;
-        const value = await run(
-          {
+        const id = await commandId();
+        if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
+        const value = await submitStep({
+          command_id: id,
+          expected_server_generation: data.binding.serverGeneration,
+          expected_registry_version: registryVersion,
+          action: {
             operation: "update_workstream",
             workstream_id: step.item.workstreamId,
             expected_version: versions.get(step.item.workstreamId) ?? step.item.version,
@@ -162,19 +169,26 @@ export function WorkstreamSidebarSection(props: { readonly controller: Workstrea
             progress: step.item.progress,
             sort_order: step.sortOrder,
           },
-          registryVersion,
-          startedBindingKey,
-        );
-        if (value.state !== "committed") return;
+        });
+        if (bindingKeyRef.current !== startedBindingKey) throw bindingSuperseded;
+        latestReceipt = value;
+        if (value.state !== "committed") return value;
         registryVersion = value.registry_version;
         for (const version of value.effects.workstream_versions)
           versions.set(version.workstream_id, version.version);
       }
-    })().catch((cause: unknown) => {
-      if (cause === bindingSuperseded || bindingKeyRef.current !== startedBindingKey) return;
-      setCommandError(cause instanceof Error ? cause.message : "Workstream reorder failed.");
-      refresh();
-    });
+      return latestReceipt;
+    })
+      .then((value) => {
+        if (value === null || bindingKeyRef.current !== startedBindingKey) return;
+        setReceipt(value);
+        setCommandError(null);
+        if (selected) showDetail(selected);
+      })
+      .catch((cause: unknown) => {
+        if (cause === bindingSuperseded || bindingKeyRef.current !== startedBindingKey) return;
+        setCommandError(cause instanceof Error ? cause.message : "Workstream reorder failed.");
+      });
   };
 
   const workstream = detail?.detail.workstream;

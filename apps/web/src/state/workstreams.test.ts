@@ -11,6 +11,7 @@ import {
   loadCompleteWorkstreamList,
   nativePlacementInventory,
   nativePlacementInventoryJson,
+  reuseNativePlacementIdentitySnapshot,
   type WorkstreamDetailLoaders,
 } from "./workstreams";
 
@@ -158,6 +159,22 @@ describe("complete Workstream list loading", () => {
       sort.mockRestore();
     }
   });
+
+  it("reuses a large placement identity snapshot until identity membership changes", () => {
+    const original = Array.from({ length: 100_001 }, (_, index) => ({
+      environmentId: `environment-${index % 7}`,
+      id: `thread-${index}`,
+      activeAt: 1,
+    }));
+    const minuteTick = original.map((thread) => ({ ...thread, activeAt: 2 }));
+    const changed = minuteTick.map((thread, index) =>
+      index === minuteTick.length - 1 ? { ...thread, id: "replacement-thread" } : thread,
+    );
+
+    expect(reuseNativePlacementIdentitySnapshot(original, minuteTick)).toBe(original);
+    expect(reuseNativePlacementIdentitySnapshot(original, changed)).toBe(changed);
+  });
+
   it("loads across page boundaries before exposing an owner list", async () => {
     const cursors: Array<string | undefined> = [];
     const result = await loadCompleteWorkstreamList(async (cursor) => {
