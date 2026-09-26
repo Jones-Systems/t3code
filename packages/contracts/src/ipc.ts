@@ -69,6 +69,7 @@ import {
   PreviewAutomationHostFocus,
   PreviewAutomationPressInput,
   PreviewAutomationResponse,
+  PreviewAutomationRuntimeIdentity,
   PreviewAutomationScrollInput,
   PreviewAutomationSnapshot,
   PreviewAutomationStatus,
@@ -1054,6 +1055,7 @@ export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
+  getPreviewAutomationRuntimeIdentity?: () => Promise<PreviewAutomationRuntimeIdentity>;
   /** The desktop client's OS platform, read from Electron's preload process. */
   getClientPlatform?: () => string;
   /**

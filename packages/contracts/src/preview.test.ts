@@ -17,6 +17,7 @@ import {
   PreviewAutomationOpenInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
+  PreviewAutomationRuntimeIdentity,
   PreviewAutomationStatus,
 } from "./previewAutomation.ts";
 
@@ -32,6 +33,7 @@ const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResul
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
 const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
+const decodeRuntimeIdentity = Schema.decodeUnknownSync(PreviewAutomationRuntimeIdentity);
 
 describe("PreviewAutomationOpenInput", () => {
   it("accepts the inline preview visibility flag", () => {
@@ -172,6 +174,44 @@ describe("PreviewAutomationHost", () => {
       }).supportedOperations,
     ).toEqual(["status", "resize"]);
   });
+
+  it("accepts a versioned runtime descriptor and rejects incompatible versions", () => {
+    const runtimeIdentity = {
+      schemaVersion: 1,
+      runtimeKind: "electron",
+      runtimeInstanceId: "runtime-1",
+      appVersion: "0.1.0",
+      buildCommit: "a".repeat(40),
+    };
+    expect(decodeRuntimeIdentity(runtimeIdentity)).toEqual(runtimeIdentity);
+    expect(
+      decodeAutomationHost({
+        clientId: "current",
+        environmentId: "environment-1",
+        runtimeIdentity,
+      }).runtimeIdentity,
+    ).toEqual(runtimeIdentity);
+    expect(() => decodeRuntimeIdentity({ ...runtimeIdentity, schemaVersion: 2 })).toThrow();
+    expect(() => decodeRuntimeIdentity({ ...runtimeIdentity, runtimeKind: "browser" })).toThrow();
+    expect(() => decodeRuntimeIdentity({ ...runtimeIdentity, runtimeInstanceId: "" })).toThrow();
+    expect(() =>
+      decodeRuntimeIdentity({ ...runtimeIdentity, runtimeInstanceId: "x".repeat(65) }),
+    ).toThrow();
+    expect(() => decodeRuntimeIdentity({ ...runtimeIdentity, appVersion: " " })).toThrow();
+    expect(() =>
+      decodeRuntimeIdentity({ ...runtimeIdentity, appVersion: "x".repeat(129) }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeIdentity({ ...runtimeIdentity, buildCommit: "a".repeat(39) }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeIdentity({ ...runtimeIdentity, buildCommit: "A".repeat(40) }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeIdentity({ ...runtimeIdentity, buildCommit: "g".repeat(40) }),
+    ).toThrow();
+    expect(decodeRuntimeIdentity({ ...runtimeIdentity, buildCommit: null }).buildCommit).toBeNull();
+  });
 });
 
 describe("PreviewAutomationError", () => {
@@ -220,6 +260,25 @@ describe("PreviewAutomationStatus", () => {
         viewport: { width: 412, height: 915 },
       }).viewport,
     ).toEqual({ width: 412, height: 915 });
+  });
+
+  it("accepts an optional broker-selected client receipt with a legacy null descriptor", () => {
+    const status = {
+      available: true,
+      visible: false,
+      tabId: null,
+      url: null,
+      title: null,
+      loading: false,
+      selectedClient: {
+        clientId: "legacy",
+        connectionId: "connection-1",
+        requestId: "preview-0",
+        completedAt: "2026-09-27T00:00:00.000Z",
+        runtimeIdentity: null,
+      },
+    };
+    expect(decodeAutomationStatus(status)).toEqual(status);
   });
 });
 
