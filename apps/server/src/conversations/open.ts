@@ -1,5 +1,8 @@
-import { constants, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
-import { join } from "node:path";
+import { HostProcessPlatform, HostProcessUserId } from "@t3tools/shared/hostProcess";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - The private-file check needs lstat, owner metadata, and O_NOFOLLOW/O_EXCL creation at the Node filesystem boundary.
+import * as NodeFS from "node:fs";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - The synchronous Node adapter needs native path semantics outside an Effect runtime.
+import * as NodePath from "node:path";
 import { ConversationLibraryError } from "@t3tools/shared/conversationLibrary";
 import { ConversationLibraryStore, type LibraryDatabase } from "./Store.ts";
 
@@ -9,12 +12,16 @@ function absent(error: unknown): boolean {
 
 function inspect(path: string, directory: boolean): boolean {
   try {
-    const info = lstatSync(path);
+    const info = NodeFS.lstatSync(path);
+    const platform = HostProcessPlatform.defaultValue();
+    const ownerMismatch = () => {
+      const userId = HostProcessUserId.defaultValue();
+      return userId !== undefined && info.uid !== userId;
+    };
     if (
       info.isSymbolicLink() ||
       (directory ? !info.isDirectory() : !info.isFile()) ||
-      (process.platform !== "win32" &&
-        ((info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())))
+      (platform !== "win32" && ((info.mode & 0o077) !== 0 || ownerMismatch()))
     ) {
       throw new ConversationLibraryError(
         "storage",
@@ -76,12 +83,12 @@ export async function openConversationLibrary(
   write: boolean,
   now: number,
 ): Promise<ConversationLibraryStore> {
-  const directory = join(stateDir, "conversation-library");
-  const path = join(directory, "library.sqlite");
+  const directory = NodePath.join(stateDir, "conversation-library");
+  const path = NodePath.join(directory, "library.sqlite");
   let exists = inspect(directory, true);
   if (!exists && write) {
     try {
-      mkdirSync(directory, { mode: 0o700 });
+      NodeFS.mkdirSync(directory, { mode: 0o700 });
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
     }
@@ -90,10 +97,13 @@ export async function openConversationLibrary(
   let fileExists = exists && inspect(path, false);
   if (write && !fileExists) {
     try {
-      closeSync(
-        openSync(
+      NodeFS.closeSync(
+        NodeFS.openSync(
           path,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+          NodeFS.constants.O_CREAT |
+            NodeFS.constants.O_EXCL |
+            NodeFS.constants.O_WRONLY |
+            NodeFS.constants.O_NOFOLLOW,
           0o600,
         ),
       );

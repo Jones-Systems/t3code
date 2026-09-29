@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import {
   CONVERSATION_LIBRARY_PROTOCOL,
   LIBRARY_PAGE_SIZE,
@@ -59,7 +59,7 @@ function nullableText(row: Row, key: string): string | null {
 }
 
 function digest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return NodeCrypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function offset(value: number | undefined): number {
@@ -557,7 +557,7 @@ export class ConversationLibraryStore {
               "That account/workspace label already exists. Select its existing binding.",
             );
           }
-          const id = randomUUID();
+          const id = NodeCrypto.randomUUID();
           this.db.prepare("INSERT INTO accounts VALUES (?, ?, ?)").run(id, label, workspace);
           this.advance();
           return { kind: "account", account: { id, label, workspace } };

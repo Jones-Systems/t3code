@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import * as NodeAssert from "node:assert/strict";
 import type { ExportConversation } from "@t3tools/contracts/conversationLibrary";
 import {
   LibraryRequestFence,
@@ -56,15 +56,15 @@ export const conversationLibraryCases: readonly {
     name: "preserves the selected path and regenerated alternatives",
     run: () => {
       const snapshot = normalizeConversationExport([sampleConversation()])[0]!;
-      assert.deepEqual(
+      NodeAssert.deepEqual(
         libraryBranch(snapshot.nodes, snapshot.currentNodeId).map((n) => n.text),
         ["Question", "Answer"],
       );
-      assert.deepEqual(
+      NodeAssert.deepEqual(
         libraryBranch(snapshot.nodes, "b").map((n) => n.text),
         ["Question", "Regenerated answer"],
       );
-      assert.deepEqual(libraryBranchIds(snapshot.nodes, snapshot.currentNodeId), ["a", "b"]);
+      NodeAssert.deepEqual(libraryBranchIds(snapshot.nodes, snapshot.currentNodeId), ["a", "b"]);
     },
   },
   {
@@ -75,7 +75,7 @@ export const conversationLibraryCases: readonly {
         ...sample,
         mapping: Object.fromEntries(Object.entries(sample.mapping).reverse()),
       };
-      assert.equal(
+      NodeAssert.equal(
         JSON.stringify(normalizeConversationExport([sample])),
         JSON.stringify(normalizeConversationExport([reordered])),
       );
@@ -86,7 +86,7 @@ export const conversationLibraryCases: readonly {
     run: () => {
       const sample = sampleConversation();
       const mapping = { ...sample.mapping, x: { parent: "y" }, y: { parent: "x" } };
-      assert.throws(() => normalizeConversationExport([{ ...sample, mapping }]), /cycle/);
+      NodeAssert.throws(() => normalizeConversationExport([{ ...sample, mapping }]), /cycle/);
     },
   },
   {
@@ -95,8 +95,8 @@ export const conversationLibraryCases: readonly {
       const sample = sampleConversation();
       const mapping = { ...sample.mapping, u: { ...sample.mapping.u!, parent: "missing" } };
       const snapshot = normalizeConversationExport([{ ...sample, mapping }])[0]!;
-      assert.match(snapshot.warnings.join(" "), /history gap/);
-      assert.equal(libraryBranch(snapshot.nodes, "a").length, 2);
+      NodeAssert.match(snapshot.warnings.join(" "), /history gap/);
+      NodeAssert.equal(libraryBranch(snapshot.nodes, "a").length, 2);
     },
   },
   {
@@ -105,9 +105,9 @@ export const conversationLibraryCases: readonly {
       const snapshot = normalizeConversationExport([
         { ...sampleConversation(), current_node: "unknown" },
       ])[0]!;
-      assert.equal(snapshot.currentNodeId, null);
-      assert.deepEqual(libraryBranch(snapshot.nodes, null), []);
-      assert.throws(() => libraryBranch(snapshot.nodes, "unknown"), /not in this snapshot/);
+      NodeAssert.equal(snapshot.currentNodeId, null);
+      NodeAssert.deepEqual(libraryBranch(snapshot.nodes, null), []);
+      NodeAssert.throws(() => libraryBranch(snapshot.nodes, "unknown"), /not in this snapshot/);
     },
   },
   {
@@ -130,10 +130,10 @@ export const conversationLibraryCases: readonly {
           },
         },
       ])[0]!;
-      assert.equal(snapshot.nodes[0]!.text, "Visible text");
-      assert.equal(snapshot.nodes[0]!.unsupportedParts, 1);
-      assert.match(snapshot.warnings.join(" "), /non-text parts/);
-      assert.ok(!JSON.stringify(snapshot).includes("private"));
+      NodeAssert.equal(snapshot.nodes[0]!.text, "Visible text");
+      NodeAssert.equal(snapshot.nodes[0]!.unsupportedParts, 1);
+      NodeAssert.match(snapshot.warnings.join(" "), /non-text parts/);
+      NodeAssert.ok(!JSON.stringify(snapshot).includes("private"));
     },
   },
   {
@@ -155,14 +155,14 @@ export const conversationLibraryCases: readonly {
           },
         },
       ])[0]!;
-      assert.equal(libraryBranch(snapshot.nodes, "one").length, 0);
-      assert.equal(libraryBranch(snapshot.nodes, "one", true).length, 1);
+      NodeAssert.equal(libraryBranch(snapshot.nodes, "one").length, 0);
+      NodeAssert.equal(libraryBranch(snapshot.nodes, "one", true).length, 1);
     },
   },
   {
     name: "rejects duplicate conversation identities in a batch",
     run: () => {
-      assert.throws(
+      NodeAssert.throws(
         () => normalizeConversationExport([sampleConversation(), sampleConversation()]),
         /twice/,
       );
@@ -171,11 +171,11 @@ export const conversationLibraryCases: readonly {
   {
     name: "rejects contradictory aliases and mismatched mapping IDs",
     run: () => {
-      assert.throws(
+      NodeAssert.throws(
         () => normalizeConversationExport([{ ...sampleConversation(), conversation_id: "other" }]),
         /conflicting/,
       );
-      assert.throws(
+      NodeAssert.throws(
         () =>
           normalizeConversationExport([
             { ...sampleConversation(), mapping: { key: { id: "different" } } },
@@ -187,11 +187,11 @@ export const conversationLibraryCases: readonly {
   {
     name: "never normalizes whitespace into a different identity",
     run: () => {
-      assert.throws(
+      NodeAssert.throws(
         () => normalizeConversationExport([{ ...sampleConversation(), id: " chat-one" }]),
         /whitespace/,
       );
-      assert.throws(
+      NodeAssert.throws(
         () =>
           normalizeConversationExport([
             { ...sampleConversation(), mapping: { " a": { parent: null } } },
@@ -203,11 +203,11 @@ export const conversationLibraryCases: readonly {
   {
     name: "validates timestamps instead of substituting import time",
     run: () => {
-      assert.throws(
+      NodeAssert.throws(
         () => normalizeConversationExport([{ ...sampleConversation(), update_time: Infinity }]),
         /timestamp/,
       );
-      assert.equal(
+      NodeAssert.equal(
         normalizeConversationExport([{ ...sampleConversation(), update_time: null }])[0]!
           .sourceUpdatedAt,
         null,
@@ -217,7 +217,7 @@ export const conversationLibraryCases: readonly {
   {
     name: "bounds node count and text bytes before admission",
     run: () => {
-      assert.throws(
+      NodeAssert.throws(
         () =>
           normalizeConversationExport([
             {
@@ -230,7 +230,7 @@ export const conversationLibraryCases: readonly {
         /exceeds/,
       );
       const big = "x".repeat(8 * 1024 * 1024 + 1);
-      assert.throws(
+      NodeAssert.throws(
         () =>
           normalizeConversationExport([
             {
@@ -247,9 +247,9 @@ export const conversationLibraryCases: readonly {
   {
     name: "constructs only fixed-origin original-chat links",
     run: () => {
-      assert.equal(libraryOriginalUrl("chat-one"), "https://chatgpt.com/c/chat-one");
+      NodeAssert.equal(libraryOriginalUrl("chat-one"), "https://chatgpt.com/c/chat-one");
       for (const id of ["../logout", "https://evil.invalid", "a?token=secret", "a#x", ""])
-        assert.equal(libraryOriginalUrl(id), null);
+        NodeAssert.equal(libraryOriginalUrl(id), null);
     },
   },
   {
@@ -258,25 +258,25 @@ export const conversationLibraryCases: readonly {
       const fence = new LibraryRequestFence();
       const accountA = fence.next();
       const accountB = fence.next();
-      assert.equal(fence.accepts(accountA), false);
-      assert.equal(fence.accepts(accountB), true);
+      NodeAssert.equal(fence.accepts(accountA), false);
+      NodeAssert.equal(fence.accepts(accountB), true);
       fence.next();
-      assert.equal(fence.accepts(accountB), false);
+      NodeAssert.equal(fence.accepts(accountB), false);
     },
   },
   {
     name: "requires mutation authority for every state-changing request",
     run: () => {
-      assert.equal(
+      NodeAssert.equal(
         libraryRequestMutates({ kind: "import", accountId: "a", conversations: [] }),
         true,
       );
-      assert.equal(
+      NodeAssert.equal(
         libraryRequestMutates({ kind: "createAccount", label: "a", workspace: "Personal" }),
         true,
       );
-      assert.equal(libraryRequestMutates({ kind: "update", key: "a", pinned: true }), true);
-      assert.equal(
+      NodeAssert.equal(libraryRequestMutates({ kind: "update", key: "a", pinned: true }), true);
+      NodeAssert.equal(
         libraryRequestMutates({
           kind: "selectSnapshot",
           key: "a",
@@ -285,7 +285,10 @@ export const conversationLibraryCases: readonly {
         }),
         true,
       );
-      assert.equal(libraryRequestMutates({ kind: "remove", key: "a", expectedRevision: 1 }), true);
+      NodeAssert.equal(
+        libraryRequestMutates({ kind: "remove", key: "a", expectedRevision: 1 }),
+        true,
+      );
       for (const request of [
         { kind: "hello" },
         { kind: "accounts" },
@@ -293,7 +296,7 @@ export const conversationLibraryCases: readonly {
         { kind: "detail", key: "a" },
         { kind: "preview", conversations: [] },
       ] as const)
-        assert.equal(libraryRequestMutates(request), false);
+        NodeAssert.equal(libraryRequestMutates(request), false);
     },
   },
   {
@@ -308,7 +311,7 @@ export const conversationLibraryCases: readonly {
       const snapshot = normalizeConversationExport([
         { id: "prototype", title: "Prototype", current_node: "__proto__", mapping },
       ])[0]!;
-      assert.equal(libraryBranch(snapshot.nodes, "__proto__")[0]!.text, "Safe");
+      NodeAssert.equal(libraryBranch(snapshot.nodes, "__proto__")[0]!.text, "Safe");
     },
   },
 ];

@@ -1,8 +1,10 @@
-import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as NodeAssert from "node:assert/strict";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Persistence coverage needs a real Node SQLite file on a temporary path to verify reopen and read-only behavior.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - The synchronous persistence fixture needs native path semantics outside an Effect runtime.
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 import type {
   ExportConversation,
   LibraryReply,
@@ -31,12 +33,14 @@ function expectKind<K extends LibraryReply["kind"]>(
   reply: LibraryReply,
   kind: K,
 ): Extract<LibraryReply, { kind: K }> {
-  assert.equal(reply.kind, kind);
+  NodeAssert.equal(reply.kind, kind);
   return reply as Extract<LibraryReply, { kind: K }>;
 }
 
-function withStore(run: (store: ConversationLibraryStore, db: DatabaseSync) => void): void {
-  const db = new DatabaseSync(":memory:");
+function withStore(
+  run: (store: ConversationLibraryStore, db: NodeSqlite.DatabaseSync) => void,
+): void {
+  const db = new NodeSqlite.DatabaseSync(":memory:");
   try {
     const store = new ConversationLibraryStore(db, {
       initialize: true,
@@ -77,18 +81,18 @@ export const conversationStoreCases: readonly {
     run: () =>
       withStore((store) => {
         const id = account(store);
-        assert.equal(imported(store, id).inserted, 1);
+        NodeAssert.equal(imported(store, id).inserted, 1);
         const found = rows(store).rows;
-        assert.equal(found.length, 1);
-        assert.equal(found[0]!.unread, true);
+        NodeAssert.equal(found.length, 1);
+        NodeAssert.equal(found[0]!.unread, true);
         const hello = expectKind(store.execute({ kind: "hello" }, false), "hello");
-        assert.equal(hello.capture, "not-enabled");
-        assert.equal(hello.canWrite, false);
+        NodeAssert.equal(hello.capture, "not-enabled");
+        NodeAssert.equal(hello.canWrite, false);
         const detail = expectKind(
           store.execute({ kind: "detail", key: found[0]!.key }, false),
           "detail",
         );
-        assert.deepEqual(
+        NodeAssert.deepEqual(
           detail.messages.map((message) => message.text),
           ["Sample question", "Original answer"],
         );
@@ -104,14 +108,14 @@ export const conversationStoreCases: readonly {
         imported(store, b);
         const first = rows(store, { kind: "list", accountId: a }).rows[0]!;
         const second = rows(store, { kind: "list", accountId: b }).rows[0]!;
-        assert.notEqual(first.key, second.key);
-        assert.notEqual(first.snapshotId, second.snapshotId);
-        assert.throws(
+        NodeAssert.notEqual(first.key, second.key);
+        NodeAssert.notEqual(first.snapshotId, second.snapshotId);
+        NodeAssert.throws(
           () =>
             store.execute({ kind: "detail", key: first.key, snapshotId: second.snapshotId }, false),
           /does not exist/,
         );
-        assert.equal(rows(store).rows.length, 2);
+        NodeAssert.equal(rows(store).rows.length, 2);
       }),
   },
   {
@@ -123,10 +127,10 @@ export const conversationStoreCases: readonly {
         const first = rows(store).rows[0]!;
         store.execute({ kind: "update", key: first.key, readThrough: first.revision }, true);
         const before = rows(store).revision;
-        assert.equal(imported(store, id).duplicates, 1);
+        NodeAssert.equal(imported(store, id).duplicates, 1);
         const after = rows(store);
-        assert.equal(after.revision, before);
-        assert.equal(after.rows[0]!.unread, false);
+        NodeAssert.equal(after.revision, before);
+        NodeAssert.equal(after.rows[0]!.unread, false);
       }),
   },
   {
@@ -138,8 +142,8 @@ export const conversationStoreCases: readonly {
         const first = rows(store).rows[0]!;
         imported(store, id, [sample("shared-chat", 200, "New answer")]);
         store.execute({ kind: "update", key: first.key, readThrough: first.revision }, true);
-        assert.equal(rows(store).rows[0]!.unread, true);
-        assert.throws(
+        NodeAssert.equal(rows(store).rows[0]!.unread, true);
+        NodeAssert.throws(
           () => store.execute({ kind: "update", key: first.key, readThrough: 99999 }, true),
           /future revision/,
         );
@@ -157,15 +161,15 @@ export const conversationStoreCases: readonly {
           true,
         );
         const pinned = rows(store, { kind: "list", view: "pinned" }).rows[0]!;
-        assert.equal(pinned.revision, first.revision);
-        assert.equal(pinned.unread, false);
+        NodeAssert.equal(pinned.revision, first.revision);
+        NodeAssert.equal(pinned.unread, false);
         store.execute({ kind: "update", key: first.key, archived: true }, true);
-        assert.equal(rows(store).rows.length, 0);
-        assert.equal(rows(store, { kind: "list", view: "archived" }).rows.length, 1);
+        NodeAssert.equal(rows(store).rows.length, 0);
+        NodeAssert.equal(rows(store, { kind: "list", view: "archived" }).rows.length, 1);
         imported(store, id);
-        assert.equal(rows(store).rows.length, 0);
+        NodeAssert.equal(rows(store).rows.length, 0);
         store.execute({ kind: "update", key: first.key, archived: false }, true);
-        assert.equal(rows(store).rows.length, 1);
+        NodeAssert.equal(rows(store).rows.length, 1);
       }),
   },
   {
@@ -176,21 +180,21 @@ export const conversationStoreCases: readonly {
         imported(store, id, [sample("shared-chat", 200, "Later")]);
         const first = rows(store).rows[0]!;
         const result = imported(store, id, [sample("shared-chat", 100, "Earlier")]);
-        assert.equal(result.older, 1);
+        NodeAssert.equal(result.older, 1);
         const detail = expectKind(
           store.execute({ kind: "detail", key: first.key }, false),
           "detail",
         );
-        assert.equal(detail.snapshotCount, 2);
-        assert.equal(detail.messages.at(-1)!.text, "Later");
-        assert.equal(detail.conversation.revision, first.revision);
+        NodeAssert.equal(detail.snapshotCount, 2);
+        NodeAssert.equal(detail.messages.at(-1)!.text, "Later");
+        NodeAssert.equal(detail.conversation.revision, first.revision);
         const old = detail.snapshots.find((snapshot) => snapshot.id !== detail.snapshotId)!;
         const oldDetail = expectKind(
           store.execute({ kind: "detail", key: first.key, snapshotId: old.id }, false),
           "detail",
         );
-        assert.equal(oldDetail.messages.at(-1)!.text, "Earlier");
-        assert.equal(oldDetail.readThrough, 0);
+        NodeAssert.equal(oldDetail.messages.at(-1)!.text, "Earlier");
+        NodeAssert.equal(oldDetail.readThrough, 0);
       }),
   },
   {
@@ -200,16 +204,19 @@ export const conversationStoreCases: readonly {
         const id = account(store);
         imported(store, id);
         const first = rows(store).rows[0]!;
-        assert.equal(imported(store, id, [sample("shared-chat", 100, "Different")]).conflicts, 1);
+        NodeAssert.equal(
+          imported(store, id, [sample("shared-chat", 100, "Different")]).conflicts,
+          1,
+        );
         const current = rows(store).rows[0]!;
-        assert.equal(current.conflicts, true);
+        NodeAssert.equal(current.conflicts, true);
         const detail = expectKind(
           store.execute({ kind: "detail", key: current.key }, false),
           "detail",
         );
-        assert.equal(detail.readThrough, 0);
+        NodeAssert.equal(detail.readThrough, 0);
         const conflict = detail.snapshots.find((snapshot) => snapshot.id !== detail.snapshotId)!;
-        assert.throws(
+        NodeAssert.throws(
           () =>
             store.execute(
               {
@@ -235,8 +242,8 @@ export const conversationStoreCases: readonly {
           store.execute({ kind: "detail", key: first.key }, false),
           "detail",
         );
-        assert.equal(chosen.messages.at(-1)!.text, "Different");
-        assert.equal(chosen.conversation.conflicts, false);
+        NodeAssert.equal(chosen.messages.at(-1)!.text, "Different");
+        NodeAssert.equal(chosen.conversation.conflicts, false);
       }),
   },
   {
@@ -246,12 +253,12 @@ export const conversationStoreCases: readonly {
         const id = account(store);
         const missing = { ...sample(), update_time: null, create_time: 500 };
         imported(store, id, [missing]);
-        assert.equal(rows(store).rows[0]!.sourceUpdatedAt, null);
-        assert.equal(
+        NodeAssert.equal(rows(store).rows[0]!.sourceUpdatedAt, null);
+        NodeAssert.equal(
           imported(store, id, [sample("shared-chat", 600, "Known timestamp")]).conflicts,
           1,
         );
-        assert.equal(rows(store).rows[0]!.sourceUpdatedAt, null);
+        NodeAssert.equal(rows(store).rows[0]!.sourceUpdatedAt, null);
       }),
   },
   {
@@ -260,7 +267,7 @@ export const conversationStoreCases: readonly {
       withStore((store) => {
         const id = account(store);
         const before = rows(store).revision;
-        assert.throws(
+        NodeAssert.throws(
           () =>
             imported(store, id, [
               sample("good"),
@@ -268,14 +275,14 @@ export const conversationStoreCases: readonly {
             ]),
           /cycle/,
         );
-        assert.equal(rows(store).rows.length, 0);
-        assert.equal(rows(store).revision, before);
+        NodeAssert.equal(rows(store).rows.length, 0);
+        NodeAssert.equal(rows(store).revision, before);
       }),
   },
   {
     name: "rolls back rows, snapshots, search and revision on an injected SQLite write failure",
     run: () => {
-      const db = new DatabaseSync(":memory:");
+      const db = new NodeSqlite.DatabaseSync(":memory:");
       let fail = false,
         writes = 0;
       const driver: LibraryDatabase = {
@@ -299,11 +306,11 @@ export const conversationStoreCases: readonly {
         const id = account(store);
         const before = rows(store).revision;
         fail = true;
-        assert.throws(() => imported(store, id), /injected/);
-        assert.equal(rows(store).rows.length, 0);
-        assert.equal(rows(store).revision, before);
+        NodeAssert.throws(() => imported(store, id), /injected/);
+        NodeAssert.equal(rows(store).rows.length, 0);
+        NodeAssert.equal(rows(store).revision, before);
         for (const table of ["snapshots", "nodes", "library_search"])
-          assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()!.n, 0);
+          NodeAssert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()!.n, 0);
       } finally {
         db.close();
       }
@@ -320,19 +327,25 @@ export const conversationStoreCases: readonly {
           Array.from({ length: 61 }, (_, index) => sample(`chat-${index}`)),
         );
         const first = rows(store);
-        assert.equal(first.rows.length, 50);
-        assert.ok(first.cursor);
+        NodeAssert.equal(first.rows.length, 50);
+        NodeAssert.ok(first.cursor);
         const second = rows(store, { kind: "list", cursor: first.cursor });
-        assert.equal(second.rows.length, 11);
-        assert.equal(second.cursor, null);
-        assert.equal(new Set([...first.rows, ...second.rows].map((row) => row.key)).size, 61);
-        assert.throws(
+        NodeAssert.equal(second.rows.length, 11);
+        NodeAssert.equal(second.cursor, null);
+        NodeAssert.equal(new Set([...first.rows, ...second.rows].map((row) => row.key)).size, 61);
+        NodeAssert.throws(
           () => rows(store, { kind: "list", view: "unread", cursor: first.cursor! }),
           /list changed/,
         );
         store.execute({ kind: "update", key: first.rows[0]!.key, pinned: true }, true);
-        assert.throws(() => rows(store, { kind: "list", cursor: first.cursor! }), /list changed/);
-        assert.throws(() => rows(store, { kind: "list", cursor: "garbage" }), /cursor is invalid/);
+        NodeAssert.throws(
+          () => rows(store, { kind: "list", cursor: first.cursor! }),
+          /list changed/,
+        );
+        NodeAssert.throws(
+          () => rows(store, { kind: "list", cursor: "garbage" }),
+          /cursor is invalid/,
+        );
       }),
   },
   {
@@ -355,8 +368,8 @@ export const conversationStoreCases: readonly {
         imported(store, id, [{ ...sample(), mapping, current_node: "134" }]);
         const key = rows(store).rows[0]!.key;
         const initial = expectKind(store.execute({ kind: "detail", key }, false), "detail");
-        assert.equal(initial.offset, 100);
-        assert.equal(initial.messages.length, 35);
+        NodeAssert.equal(initial.offset, 100);
+        NodeAssert.equal(initial.messages.length, 35);
         const seen: string[] = [];
         let start: number | null = 0;
         while (start !== null) {
@@ -367,8 +380,8 @@ export const conversationStoreCases: readonly {
           seen.push(...detail.messages.map((entry) => entry.id));
           start = detail.nextOffset;
         }
-        assert.equal(new Set(seen).size, 135);
-        assert.deepEqual(
+        NodeAssert.equal(new Set(seen).size, 135);
+        NodeAssert.deepEqual(
           seen,
           Array.from({ length: 135 }, (_, index) => String(index)),
         );
@@ -383,14 +396,14 @@ export const conversationStoreCases: readonly {
           sample("one", 100, "Distinctive answer"),
           sample("two", 100, "Other text"),
         ]);
-        assert.equal(
+        NodeAssert.equal(
           rows(store, { kind: "list", query: "Distinctive" }).rows[0]!.conversationId,
           "one",
         );
-        assert.equal(rows(store, { kind: "list", query: "one" }).rows.length, 1);
+        NodeAssert.equal(rows(store, { kind: "list", query: "one" }).rows.length, 1);
         for (const query of ['" OR *', '"', "(answer)", "not:syntax"]) {
           const result = rows(store, { kind: "list", query });
-          assert.ok(result.rows.length <= 2);
+          NodeAssert.ok(result.rows.length <= 2);
         }
       }),
   },
@@ -415,7 +428,7 @@ export const conversationStoreCases: readonly {
             },
           },
         ]);
-        assert.equal(rows(store, { kind: "list", query: "notindexabletoken" }).rows.length, 0);
+        NodeAssert.equal(rows(store, { kind: "list", query: "notindexabletoken" }).rows.length, 0);
       }),
   },
   {
@@ -428,7 +441,7 @@ export const conversationStoreCases: readonly {
         imported(store, b);
         const first = rows(store, { kind: "list", accountId: a }).rows[0]!;
         imported(store, a, [sample("shared-chat", 200, "Newer")]);
-        assert.throws(
+        NodeAssert.throws(
           () =>
             store.execute(
               { kind: "remove", key: first.key, expectedRevision: first.revision },
@@ -441,15 +454,15 @@ export const conversationStoreCases: readonly {
           { kind: "remove", key: current.key, expectedRevision: current.revision },
           true,
         );
-        assert.equal(rows(store).rows.length, 1);
-        assert.equal(rows(store).rows[0]!.accountId, b);
-        assert.equal(
+        NodeAssert.equal(rows(store).rows.length, 1);
+        NodeAssert.equal(rows(store).rows[0]!.accountId, b);
+        NodeAssert.equal(
           db
             .prepare("SELECT count(*) AS n FROM snapshots WHERE conversation_key = ?")
             .get(first.key)!.n,
           0,
         );
-        assert.equal(
+        NodeAssert.equal(
           db.prepare("SELECT count(*) AS n FROM library_search WHERE key = ?").get(first.key)!.n,
           0,
         );
@@ -476,22 +489,22 @@ export const conversationStoreCases: readonly {
         ];
         const before = rows(store).revision;
         for (const request of writes)
-          assert.throws(() => store.execute(request, false), /cannot change/);
-        assert.equal(rows(store).revision, before);
-        assert.equal(rows(store).rows.length, 1);
+          NodeAssert.throws(() => store.execute(request, false), /cannot change/);
+        NodeAssert.equal(rows(store).revision, before);
+        NodeAssert.equal(rows(store).rows.length, 1);
       }),
   },
   {
     name: "future database versions fail closed without rewriting them",
     run: () => {
-      const db = new DatabaseSync(":memory:");
+      const db = new NodeSqlite.DatabaseSync(":memory:");
       try {
         db.exec("PRAGMA user_version = 99");
-        assert.throws(
+        NodeAssert.throws(
           () => new ConversationLibraryStore(db, { initialize: true }),
           /version is not supported/,
         );
-        assert.equal(db.prepare("PRAGMA user_version").get()!.user_version, 99);
+        NodeAssert.equal(db.prepare("PRAGMA user_version").get()!.user_version, 99);
       } finally {
         db.close();
       }
@@ -500,14 +513,14 @@ export const conversationStoreCases: readonly {
   {
     name: "refuses to initialize an unrelated unversioned database",
     run: () => {
-      const db = new DatabaseSync(":memory:");
+      const db = new NodeSqlite.DatabaseSync(":memory:");
       try {
         db.exec("CREATE TABLE unrelated (value TEXT)");
-        assert.throws(
+        NodeAssert.throws(
           () => new ConversationLibraryStore(db, { initialize: true }),
           /unrecognized database/,
         );
-        assert.equal(db.prepare("SELECT count(*) AS n FROM unrelated").get()!.n, 0);
+        NodeAssert.equal(db.prepare("SELECT count(*) AS n FROM unrelated").get()!.n, 0);
       } finally {
         db.close();
       }
@@ -516,25 +529,25 @@ export const conversationStoreCases: readonly {
   {
     name: "persists across reopen and supports read-only SQLite connections",
     run: () => {
-      const directory = mkdtempSync(join(tmpdir(), "t3-library-test-"));
-      const path = join(directory, "library.sqlite");
+      const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-library-test-"));
+      const path = NodePath.join(directory, "library.sqlite");
       try {
-        const db = new DatabaseSync(path);
+        const db = new NodeSqlite.DatabaseSync(path);
         try {
           const store = new ConversationLibraryStore(db, { initialize: true });
           imported(store, account(store));
         } finally {
           db.close();
         }
-        const read = new DatabaseSync(path, { readOnly: true });
+        const read = new NodeSqlite.DatabaseSync(path, { readOnly: true });
         try {
           const store = new ConversationLibraryStore(read);
-          assert.equal(rows(store).rows.length, 1);
+          NodeAssert.equal(rows(store).rows.length, 1);
         } finally {
           read.close();
         }
       } finally {
-        rmSync(directory, { recursive: true, force: true });
+        NodeFS.rmSync(directory, { recursive: true, force: true });
       }
     },
   },
@@ -547,14 +560,14 @@ export const conversationStoreCases: readonly {
           imported(store, id, [sample("many", version, `version ${version}`)]);
         const key = rows(store).rows[0]!.key;
         const before = rows(store).revision;
-        assert.throws(
+        NodeAssert.throws(
           () => imported(store, id, [sample("many", 251, "too many")]),
           /retention limit/,
         );
         const detail = expectKind(store.execute({ kind: "detail", key }, false), "detail");
-        assert.equal(detail.snapshotCount, 250);
-        assert.equal(rows(store).revision, before);
-        assert.equal(detail.messages.at(-1)!.text, "version 250");
+        NodeAssert.equal(detail.snapshotCount, 250);
+        NodeAssert.equal(rows(store).revision, before);
+        NodeAssert.equal(detail.messages.at(-1)!.text, "version 250");
       }),
   },
 ];

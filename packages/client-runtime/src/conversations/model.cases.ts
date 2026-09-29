@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "vite-plus/test";
 import type {
   LibraryDetail,
   LibraryReply,
