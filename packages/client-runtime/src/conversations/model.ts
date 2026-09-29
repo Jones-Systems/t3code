@@ -78,11 +78,22 @@ function stale<A>(page: LibraryReaderPage<A>): LibraryReaderPage<A> {
 }
 
 function sameBinding(a: LibraryReaderBinding | null, b: LibraryReaderBinding | null): boolean {
-  return a === b || (a !== null && b !== null && a.environmentId === b.environmentId && a.generation === b.generation);
+  return (
+    a === b ||
+    (a !== null &&
+      b !== null &&
+      a.environmentId === b.environmentId &&
+      a.generation === b.generation)
+  );
 }
 
-function detailMatches(request: DetailRequest, detail: LibraryDetail, accountId: string | null): boolean {
-  return detail.conversation.key === request.key &&
+function detailMatches(
+  request: DetailRequest,
+  detail: LibraryDetail,
+  accountId: string | null,
+): boolean {
+  return (
+    detail.conversation.key === request.key &&
     detail.account.id === detail.conversation.accountId &&
     (accountId === null || detail.account.id === accountId) &&
     (request.snapshotId === undefined || request.snapshotId === detail.snapshotId) &&
@@ -90,7 +101,8 @@ function detailMatches(request: DetailRequest, detail: LibraryDetail, accountId:
     (request.offset === undefined || request.offset === detail.offset) &&
     (request.snapshotOffset ?? 0) === detail.snapshotOffset &&
     (request.branchOffset ?? 0) === detail.branchOffset &&
-    (request.showHidden ?? false) === detail.showHidden;
+    (request.showHidden ?? false) === detail.showHidden
+  );
 }
 
 /**
@@ -108,7 +120,9 @@ export class ConversationLibraryReader {
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
-    return () => { this.listeners.delete(listener); };
+    return () => {
+      this.listeners.delete(listener);
+    };
   };
 
   private publish(state: LibraryReaderState): void {
@@ -126,11 +140,24 @@ export class ConversationLibraryReader {
   setFilter(filter: LibraryReaderFilter): void {
     const next = { ...filter, query: filter.query.trim() };
     const current = this.state.filter;
-    if (current.accountId === next.accountId && current.query === next.query && current.view === next.view) return;
+    if (
+      current.accountId === next.accountId &&
+      current.query === next.query &&
+      current.view === next.view
+    )
+      return;
     this.pending.delete("list");
     this.pending.delete("detail");
     this.appendList = false;
-    this.publish({ ...this.state, filter: next, list: idle(), detail: idle(), selection: null, displayed: false, error: null });
+    this.publish({
+      ...this.state,
+      filter: next,
+      list: idle(),
+      detail: idle(),
+      selection: null,
+      displayed: false,
+      error: null,
+    });
   }
 
   clearSelection(): void {
@@ -163,7 +190,11 @@ export class ConversationLibraryReader {
     if (!this.owns("hello", ticket)) return false;
     this.pending.delete("hello");
     if (reply.revision < this.state.revision) {
-      this.publish({ ...this.state, canWrite: false, error: "The library capability reply is stale. Refresh the connection." });
+      this.publish({
+        ...this.state,
+        canWrite: false,
+        error: "The library capability reply is stale. Refresh the connection.",
+      });
       return false;
     }
     const state = this.advanceRevision(reply.revision);
@@ -173,7 +204,11 @@ export class ConversationLibraryReader {
 
   requestAccounts(): LibraryReaderTicket<Extract<LibraryRequest, { kind: "accounts" }>> | null {
     const ticket = this.begin("accounts", { kind: "accounts" });
-    if (ticket) this.publish({ ...this.state, accounts: { ...this.state.accounts, status: "loading", error: null } });
+    if (ticket)
+      this.publish({
+        ...this.state,
+        accounts: { ...this.state.accounts, status: "loading", error: null },
+      });
     return ticket;
   }
 
@@ -184,7 +219,9 @@ export class ConversationLibraryReader {
     return true;
   }
 
-  requestList(append = false): LibraryReaderTicket<Extract<LibraryRequest, { kind: "list" }>> | null {
+  requestList(
+    append = false,
+  ): LibraryReaderTicket<Extract<LibraryRequest, { kind: "list" }>> | null {
     const list = this.state.list;
     if (append && (list.status !== "ready" || list.value?.cursor == null)) return null;
     const { accountId, query, view } = this.state.filter;
@@ -205,13 +242,21 @@ export class ConversationLibraryReader {
   acceptList(ticket: LibraryReaderTicket, reply: ListReply): boolean {
     if (!this.owns("list", ticket)) return false;
     const prior = this.state.list.value;
-    if (reply.revision < this.state.revision || (this.appendList && prior?.revision !== reply.revision)) {
+    if (
+      reply.revision < this.state.revision ||
+      (this.appendList && prior?.revision !== reply.revision)
+    ) {
       this.reject(ticket, "The library changed. Refresh before loading another page.");
       return false;
     }
     const rows = this.appendList && prior ? [...prior.rows, ...reply.rows] : reply.rows;
-    if (new Set(rows.map((row) => row.key)).size !== rows.length ||
-      rows.some((row) => this.state.filter.accountId !== null && row.accountId !== this.state.filter.accountId)) {
+    if (
+      new Set(rows.map((row) => row.key)).size !== rows.length ||
+      rows.some(
+        (row) =>
+          this.state.filter.accountId !== null && row.accountId !== this.state.filter.accountId,
+      )
+    ) {
       this.reject(ticket, "The library returned an inconsistent conversation page.");
       return false;
     }
@@ -223,19 +268,33 @@ export class ConversationLibraryReader {
 
   requestDetail(request: DetailRequest): LibraryReaderTicket<DetailRequest> | null {
     const ticket = this.begin("detail", { ...request });
-    if (ticket) this.publish({ ...this.state, detail: { status: "loading", value: null, error: null }, selection: ticket.request, displayed: false });
+    if (ticket)
+      this.publish({
+        ...this.state,
+        detail: { status: "loading", value: null, error: null },
+        selection: ticket.request,
+        displayed: false,
+      });
     return ticket;
   }
 
   acceptDetail(ticket: LibraryReaderTicket, reply: LibraryDetail): boolean {
     if (!this.owns("detail", ticket) || ticket.request.kind !== "detail") return false;
     if (!detailMatches(ticket.request, reply, this.state.filter.accountId)) {
-      this.reject(ticket, "The library returned a different conversation, snapshot, branch, or page.");
+      this.reject(
+        ticket,
+        "The library returned a different conversation, snapshot, branch, or page.",
+      );
       return false;
     }
     this.pending.delete("detail");
     const state = this.advanceRevision(reply.conversation.revision);
-    this.publish({ ...state, detail: { status: "ready", value: reply, error: null }, selection: libraryDetailPage(reply, {}), displayed: false });
+    this.publish({
+      ...state,
+      detail: { status: "ready", value: reply, error: null },
+      selection: libraryDetailPage(reply, {}),
+      displayed: false,
+    });
     return true;
   }
 
@@ -266,16 +325,27 @@ export class ConversationLibraryReader {
 
   private mutate(request: MutationRequest): LibraryReaderTicket<MutationRequest> | null {
     const detail = this.state.detail;
-    if (!this.state.canWrite || this.state.mutationPending || detail.status !== "ready" ||
-      detail.value?.conversation.key !== request.key) return null;
+    if (
+      !this.state.canWrite ||
+      this.state.mutationPending ||
+      detail.status !== "ready" ||
+      detail.value?.conversation.key !== request.key
+    )
+      return null;
     const ticket = this.begin("mutation", request);
     if (ticket) this.publish({ ...this.state, mutationPending: true, error: null });
     return ticket;
   }
 
-  requestFlags(flags: Pick<UpdateRequest, "pinned" | "archived" | "attention">): LibraryReaderTicket<MutationRequest> | null {
+  requestFlags(
+    flags: Pick<UpdateRequest, "pinned" | "archived" | "attention">,
+  ): LibraryReaderTicket<MutationRequest> | null {
     const conversation = this.state.detail.value?.conversation;
-    if (!conversation || (flags.pinned === undefined && flags.archived === undefined && flags.attention === undefined)) return null;
+    if (
+      !conversation ||
+      (flags.pinned === undefined && flags.archived === undefined && flags.attention === undefined)
+    )
+      return null;
     return this.mutate({
       kind: "update",
       key: conversation.key,
@@ -287,35 +357,68 @@ export class ConversationLibraryReader {
 
   requestMarkRead(): LibraryReaderTicket<MutationRequest> | null {
     const detail = this.state.detail.value;
-    if (!detail || !this.state.displayed || !detail.conversation.unread || detail.conversation.conflicts ||
-      detail.snapshotId !== detail.conversation.snapshotId || detail.nodeId === null ||
-      detail.messages.length === 0 || detail.nextOffset !== null ||
-      detail.offset + detail.messages.length !== detail.totalMessages || detail.readThrough <= 0 ||
-      detail.readThrough !== detail.conversation.revision) return null;
-    return this.mutate({ kind: "update", key: detail.conversation.key, readThrough: detail.readThrough });
+    if (
+      !detail ||
+      !this.state.displayed ||
+      !detail.conversation.unread ||
+      detail.conversation.conflicts ||
+      detail.snapshotId !== detail.conversation.snapshotId ||
+      detail.nodeId === null ||
+      detail.messages.length === 0 ||
+      detail.nextOffset !== null ||
+      detail.offset + detail.messages.length !== detail.totalMessages ||
+      detail.readThrough <= 0 ||
+      detail.readThrough !== detail.conversation.revision
+    )
+      return null;
+    return this.mutate({
+      kind: "update",
+      key: detail.conversation.key,
+      readThrough: detail.readThrough,
+    });
   }
 
   requestSelectSnapshot(snapshotId: string): LibraryReaderTicket<MutationRequest> | null {
     const conversation = this.state.detail.value?.conversation;
-    return conversation ? this.mutate({ kind: "selectSnapshot", key: conversation.key, snapshotId, expectedRevision: conversation.revision }) : null;
+    return conversation
+      ? this.mutate({
+          kind: "selectSnapshot",
+          key: conversation.key,
+          snapshotId,
+          expectedRevision: conversation.revision,
+        })
+      : null;
   }
 
   requestRemoveLocalCopy(): LibraryReaderTicket<MutationRequest> | null {
     const conversation = this.state.detail.value?.conversation;
-    return conversation ? this.mutate({ kind: "remove", key: conversation.key, expectedRevision: conversation.revision }) : null;
+    return conversation
+      ? this.mutate({
+          kind: "remove",
+          key: conversation.key,
+          expectedRevision: conversation.revision,
+        })
+      : null;
   }
 
-  acceptMutation(ticket: LibraryReaderTicket<MutationRequest>, reply: Extract<LibraryReply, { kind: "updated" | "removed" }>): boolean {
+  acceptMutation(
+    ticket: LibraryReaderTicket<MutationRequest>,
+    reply: Extract<LibraryReply, { kind: "updated" | "removed" }>,
+  ): boolean {
     if (!this.owns("mutation", ticket)) return false;
     const expected = ticket.request.kind === "remove" ? "removed" : "updated";
     if (reply.kind !== expected) {
-      this.reject(ticket, "The library mutation response is inconsistent. Refresh to reconcile its outcome.");
+      this.reject(
+        ticket,
+        "The library mutation response is inconsistent. Refresh to reconcile its outcome.",
+      );
       return false;
     }
     this.pending.delete("mutation");
     this.pending.delete("list");
     this.pending.delete("detail");
-    const removedSelected = ticket.request.kind === "remove" && this.state.selection?.key === ticket.request.key;
+    const removedSelected =
+      ticket.request.kind === "remove" && this.state.selection?.key === ticket.request.key;
     this.publish({
       ...this.state,
       revision: Math.max(this.state.revision, reply.revision),
@@ -337,12 +440,30 @@ export class ConversationLibraryReader {
     else if (lane === "mutation") {
       this.pending.delete("list");
       this.pending.delete("detail");
-      this.publish({ ...this.state, mutationPending: false, list: stale(this.state.list), detail: stale(this.state.detail), displayed: false, error: message });
+      this.publish({
+        ...this.state,
+        mutationPending: false,
+        list: stale(this.state.list),
+        detail: stale(this.state.detail),
+        displayed: false,
+        error: message,
+      });
     } else if (lane === "accounts") {
-      this.publish({ ...this.state, accounts: { ...this.state.accounts, status: "error", error: message } });
+      this.publish({
+        ...this.state,
+        accounts: { ...this.state.accounts, status: "error", error: message },
+      });
     } else if (lane === "list") {
-      this.publish({ ...this.state, list: { ...this.state.list, status: "error", error: message } });
-    } else this.publish({ ...this.state, detail: { status: "error", value: null, error: message }, displayed: false });
+      this.publish({
+        ...this.state,
+        list: { ...this.state.list, status: "error", error: message },
+      });
+    } else
+      this.publish({
+        ...this.state,
+        detail: { status: "error", value: null, error: message },
+        displayed: false,
+      });
     return true;
   }
 }
