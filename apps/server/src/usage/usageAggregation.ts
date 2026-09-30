@@ -1,7 +1,8 @@
 // @effect-diagnostics globalDate:off
 /**
- * Folds parsed transcript records into `(day, hourStart?, provider, model)`
- * buckets.
+ * Folds one transcript source's records into `(day, hourStart?, provider,
+ * model)` buckets. The usage service tags finished buckets with a source id
+ * when it aggregates configured instances.
  *
  * `Intl.DateTimeFormat` is the only reliable way to resolve a wall-clock day in
  * an arbitrary IANA zone, and it takes a `Date`. That is why the raw `Date`
@@ -75,11 +76,12 @@ export interface AggregateResult {
 }
 
 /**
- * Accumulates records across many files.
+ * Accumulates records across the files supplied to this aggregator.
  *
- * De-duplication is global across the whole scan, not per file: Claude Code
- * copies a message's records forward when a session is resumed or forked, so
- * the same `dedupeKey` legitimately appears in several transcripts.
+ * De-duplication spans those files, not just one file: Claude Code copies a
+ * message's records forward when a session is resumed or forked, so the same
+ * `dedupeKey` legitimately appears in several transcripts. The service uses
+ * one aggregator per configured source when source links are requested.
  */
 export class UsageAggregator {
   readonly #buckets = new Map<string, MutableBucket>();

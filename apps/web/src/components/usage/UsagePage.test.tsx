@@ -1,5 +1,5 @@
 import { USAGE_CONTRACT_VERSION } from "@t3tools/contracts";
-import { mergeUsage } from "@t3tools/shared/usageMerge";
+import { mergeUsage, type UsageInstanceOption } from "@t3tools/shared/usageMerge";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -8,6 +8,16 @@ const testState = vi.hoisted(() => ({
   metric: "cost" as "cost" | "tokens",
   breakdown: "time" as "model" | "time",
   expandedModels: new Set<string>(),
+  instanceSelection: undefined as { environmentId: string; instanceId: string }[] | undefined,
+  instanceOptions: [] as UsageInstanceOption[],
+  instanceNotices: [] as string[],
+  environments: [] as {
+    environmentId: string;
+    label: string;
+    isPending: boolean;
+    error: string | null;
+    summary: { providerInstances?: readonly unknown[] } | null;
+  }[],
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -34,7 +44,9 @@ vi.mock("react", async (importOriginal) => {
               ? testState.metric
               : initial === "model"
                 ? testState.breakdown
-                : initial;
+                : initial === undefined && testState.instanceSelection !== undefined
+                  ? testState.instanceSelection
+                  : initial;
       return [value, vi.fn()];
     }),
   };
@@ -95,6 +107,27 @@ const tokenTotals = (
   reasoningTokens,
 });
 
+function makeInstanceOption(
+  environmentId: string,
+  environmentLabel: string,
+  instanceId: string,
+  overrides: Partial<UsageInstanceOption> = {},
+): UsageInstanceOption {
+  return {
+    key: JSON.stringify([environmentId, instanceId]),
+    environmentId: environmentId as UsageInstanceOption["environmentId"],
+    environmentLabel,
+    instanceId: instanceId as UsageInstanceOption["instanceId"],
+    driver: "codex" as UsageInstanceOption["driver"],
+    displayName: "Work",
+    enabled: true,
+    coverage: "supported",
+    message: null,
+    sharedWith: [],
+    ...overrides,
+  };
+}
+
 const modelTotals = Object.freeze([
   {
     model: "expensive-model",
@@ -146,9 +179,15 @@ beforeEach(() => {
   testState.metric = "cost";
   testState.breakdown = "time";
   testState.expandedModels = new Set();
+  testState.instanceSelection = undefined;
+  testState.instanceOptions.length = 0;
+  testState.instanceNotices.length = 0;
+  testState.environments.length = 0;
   testState.useUsage.mockReturnValue({
     merged: {
       ...mergeUsage([], USAGE_CONTRACT_VERSION),
+      instanceOptions: testState.instanceOptions,
+      instanceNotices: testState.instanceNotices,
       uncachedInputTokens: 70,
       cachedInputTokens: 20,
       cacheCreationTokens: 10,
@@ -173,7 +212,7 @@ beforeEach(() => {
         },
       ],
     },
-    environments: [],
+    environments: testState.environments,
     isPending: false,
     isPartial: false,
     refresh: vi.fn(),
@@ -242,5 +281,71 @@ describe("UsagePage model breakdown", () => {
     expect(markup).toContain("1 unpriced record");
     expect(markup).toContain("$0.50 cache savings");
     expect(markup).not.toContain("NaN");
+  });
+});
+
+describe("UsagePage provider instances", () => {
+  it("identifies configured entries and explains selected missing coverage", () => {
+    testState.instanceOptions.push(
+      makeInstanceOption("env-a", "Desktop", "codex_work", {
+        enabled: false,
+        coverage: "unsupported",
+        message: "No usage collector is configured.",
+      }),
+      makeInstanceOption("env-b", "Workstation", "codex_work", {
+        coverage: "unavailable",
+        message: "The server could not read this instance's history.",
+      }),
+    );
+    testState.instanceSelection = [
+      { environmentId: "env-a", instanceId: "codex_work" },
+      { environmentId: "env-b", instanceId: "codex_work" },
+    ];
+    testState.instanceNotices.push(
+      "Work (Desktop) has unsupported usage coverage; a zero total does not prove no usage. No usage collector is configured.",
+      "Work (Workstation) usage coverage is unavailable; a zero total does not prove no usage. The server could not read this instance's history.",
+      "Some provider instances share a transcript directory; selecting any associated instance includes that usage once.",
+    );
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+
+    expect(markup).toContain("Work · ID codex_work · Desktop");
+    expect(markup).toContain("Work · ID codex_work · Workstation");
+    expect(markup).toContain("Usage not collected");
+    expect(markup).toContain("Usage unavailable");
+    expect(markup).toContain("Disabled");
+    expect(markup).toContain("No usage collector is configured.");
+    expect(markup).toContain("The server could not read this instance&#x27;s history.");
+    expect(markup).toContain("usage coverage is unavailable; a zero total does not prove no usage");
+    expect(markup).toContain("Some provider instances share a transcript directory");
+  });
+
+  it("explains when an older server cannot filter history by instance", () => {
+    testState.environments.push({
+      environmentId: "legacy-server",
+      label: "Legacy server",
+      isPending: false,
+      error: null,
+      summary: {},
+    });
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+
+    expect(markup).toContain("Instance filtering is unavailable");
+    expect(markup).toContain("all usage available from that server is shown");
+  });
+
+  it("does not treat a current server with an empty provider roster as legacy", () => {
+    testState.environments.push({
+      environmentId: "current-server",
+      label: "Current server",
+      isPending: false,
+      error: null,
+      summary: { providerInstances: [] },
+    });
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+
+    expect(markup).not.toContain("Instance filtering is unavailable");
   });
 });

@@ -1,9 +1,13 @@
 import {
+  ProviderDriverKind,
+  ProviderInstanceId,
   USAGE_CONTRACT_VERSION,
   type EnvironmentId,
+  type ProviderInstanceId as ProviderInstanceIdType,
   type UsageBucket,
   type UsageDay,
   type UsageProviderKind,
+  type UsageSourceStatus,
   type UsageSummary,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -38,12 +42,16 @@ function summary(
     provider: UsageProviderKind;
     hostId: string;
     homePath: string;
+    sourceId?: string;
+    instanceIds?: readonly ProviderInstanceIdType[];
     volumeId?: string;
     distinctSessions?: number;
+    status?: UsageSourceStatus;
   }[],
   contractVersion: number = USAGE_CONTRACT_VERSION,
+  providerInstances?: NonNullable<UsageSummary["providerInstances"]>,
 ): UsageSummary {
-  return {
+  const base: UsageSummary = {
     contractVersion,
     readAt: "2026-08-07T00:00:00.000Z",
     timeZone: "UTC",
@@ -51,13 +59,15 @@ function summary(
     untilDay: "2026-08-31" as UsageDay,
     buckets,
     sources: sources.map((source) => ({
+      ...(source.sourceId === undefined ? {} : { sourceId: source.sourceId }),
+      ...(source.instanceIds === undefined ? {} : { instanceIds: source.instanceIds }),
       fingerprint: {
         hostId: source.hostId,
         provider: source.provider,
         resolvedHomePath: source.homePath,
         volumeId: source.volumeId ?? `vol-${source.hostId}`,
       },
-      status: "ok" as const,
+      status: source.status ?? ("ok" as const),
       scannedFiles: 1,
       skippedFiles: 0,
       malformedRecords: 0,
@@ -66,6 +76,25 @@ function summary(
     })),
     pricing: { status: "fresh", source: "litellm", fetchedAt: null, knownModels: 10 },
     scanDurationMs: 1,
+  };
+  return providerInstances === undefined ? base : { ...base, providerInstances };
+}
+
+type ProviderInstanceSummaryEntry = NonNullable<UsageSummary["providerInstances"]>[number];
+
+function providerInstance(
+  instanceId: string,
+  driver: string,
+  overrides: Partial<Omit<ProviderInstanceSummaryEntry, "instanceId" | "driver">> = {},
+): ProviderInstanceSummaryEntry {
+  return {
+    instanceId: ProviderInstanceId.make(instanceId),
+    driver: ProviderDriverKind.make(driver),
+    displayName: instanceId,
+    enabled: true,
+    coverage: "supported",
+    message: null,
+    ...overrides,
   };
 }
 
@@ -773,5 +802,443 @@ describe("mergeUsage", () => {
         cacheSavingsUsd: 0,
       });
     }
+  });
+
+  it("filters separate same-driver instances by environment and instance", () => {
+    const firstId = ProviderInstanceId.make("workspace-one");
+    const secondId = ProviderInstanceId.make("workspace-two");
+    const environments = [
+      environment(
+        "env-a",
+        summary(
+          [
+            bucket({ sourceId: "source-one", costUsd: 10 }),
+            bucket({ sourceId: "source-two", costUsd: 4 }),
+          ],
+          [
+            {
+              provider: "claude",
+              hostId: "mac",
+              homePath: "/projects/one/.claude",
+              sourceId: "source-one",
+              instanceIds: [firstId],
+              distinctSessions: 2,
+            },
+            {
+              provider: "claude",
+              hostId: "mac",
+              homePath: "/projects/two/.claude",
+              sourceId: "source-two",
+              instanceIds: [secondId],
+              distinctSessions: 3,
+            },
+          ],
+          USAGE_CONTRACT_VERSION,
+          [
+            providerInstance(String(firstId), "claudeAgent"),
+            providerInstance(String(secondId), "claudeAgent"),
+          ],
+        ),
+      ),
+    ];
+    const merged = mergeUsage(environments, USAGE_CONTRACT_VERSION, undefined, [
+      { environmentId: "env-a" as EnvironmentId, instanceId: firstId },
+    ]);
+    const none = mergeUsage(environments, USAGE_CONTRACT_VERSION, undefined, []);
+
+    expect(merged.costUsd).toBe(10);
+    expect(merged.sessions).toBe(2);
+    expect(merged.providers).toMatchObject([{ provider: "claude", costUsd: 10, sessions: 2 }]);
+    expect(merged.instanceOptions).toHaveLength(2);
+    expect(merged.instanceOptions.map((option) => option.driver)).toEqual([
+      ProviderDriverKind.make("claudeAgent"),
+      ProviderDriverKind.make("claudeAgent"),
+    ]);
+    expect(none.costUsd).toBe(0);
+    expect(none.sessions).toBe(0);
+    expect(none.instanceOptions).toHaveLength(2);
+  });
+
+  it("counts shared same-environment history once for either or both selected instances", () => {
+    const firstId = ProviderInstanceId.make("personal-home");
+    const secondId = ProviderInstanceId.make("work-home");
+    const environments = [
+      environment(
+        "env:desktop",
+        summary(
+          [bucket({ sourceId: "shared-source", costUsd: 8 })],
+          [
+            {
+              provider: "claude",
+              hostId: "mac",
+              homePath: "/home/user/.claude",
+              sourceId: "shared-source",
+              instanceIds: [firstId, secondId],
+              distinctSessions: 3,
+            },
+          ],
+          USAGE_CONTRACT_VERSION,
+          [
+            providerInstance(String(firstId), "claudeAgent"),
+            providerInstance(String(secondId), "claudeAgent"),
+          ],
+        ),
+      ),
+    ];
+    const select = (instanceId: ProviderInstanceIdType) =>
+      mergeUsage(environments, USAGE_CONTRACT_VERSION, undefined, [
+        { environmentId: "env:desktop" as EnvironmentId, instanceId },
+      ]);
+    const first = select(firstId);
+    const second = select(secondId);
+    const both = mergeUsage(environments, USAGE_CONTRACT_VERSION, undefined, [
+      { environmentId: "env:desktop" as EnvironmentId, instanceId: firstId },
+      { environmentId: "env:desktop" as EnvironmentId, instanceId: secondId },
+    ]);
+
+    for (const selected of [first, second, both]) {
+      expect(selected.costUsd).toBe(8);
+      expect(selected.sessions).toBe(3);
+    }
+    expect(first.instanceOptions[0]?.sharedWith).toContain("env:desktop: work-home (work-home)");
+    expect(second.instanceOptions[1]?.sharedWith).toContain(
+      "env:desktop: personal-home (personal-home)",
+    );
+    expect(both.instanceNotices).toContain(
+      "Shared transcript history cannot be separated between these provider instances. Selecting either or both associated entries counts the shared usage once.",
+    );
+  });
+
+  it("filters before physical-source claims and merges partial cross-environment overlap once", () => {
+    const sharedId = ProviderInstanceId.make("shared-home");
+    const onlyAId = ProviderInstanceId.make("only-a");
+    const onlyBId = ProviderInstanceId.make("only-b");
+    const sharedBucket = (sourceId: string, day: UsageDay, model: string) =>
+      bucket({
+        sourceId,
+        day,
+        hourStart: `${day}T09:00:00.000Z`,
+        model,
+        totals: {
+          uncachedInputTokens: 2,
+          cachedInputTokens: 3,
+          cacheCreationTokens: 0,
+          outputTokens: 4,
+          reasoningTokens: 2,
+        },
+        costUsd: 10,
+        cacheSavingsUsd: 1,
+        costSource: "modelPriced",
+        records: 2,
+      });
+    const environments = [
+      environment(
+        "env-a",
+        summary(
+          [
+            sharedBucket("a-shared", "2026-08-07" as UsageDay, "claude-shared"),
+            bucket({
+              sourceId: "a-only",
+              day: "2026-08-08" as UsageDay,
+              hourStart: "2026-08-08T10:00:00.000Z",
+              model: "claude-a",
+              costUsd: 2,
+              costSource: "providerReported",
+              records: 1,
+            }),
+          ],
+          [
+            {
+              provider: "claude",
+              hostId: "host",
+              homePath: "/shared",
+              sourceId: "a-shared",
+              instanceIds: [sharedId],
+              distinctSessions: 1,
+            },
+            {
+              provider: "claude",
+              hostId: "host",
+              homePath: "/only-a",
+              sourceId: "a-only",
+              instanceIds: [onlyAId],
+              distinctSessions: 2,
+            },
+          ],
+          USAGE_CONTRACT_VERSION,
+          [
+            providerInstance(String(sharedId), "claudeAgent", { displayName: "Shared Claude" }),
+            providerInstance(String(onlyAId), "claudeAgent", { displayName: "A Claude" }),
+          ],
+        ),
+      ),
+      environment(
+        "env-b",
+        summary(
+          [
+            sharedBucket("b-shared", "2026-08-07" as UsageDay, "claude-shared"),
+            bucket({
+              sourceId: "b-only",
+              day: "2026-08-09" as UsageDay,
+              hourStart: "2026-08-09T11:00:00.000Z",
+              model: "claude-b",
+              totals: {
+                uncachedInputTokens: 1,
+                cachedInputTokens: 1,
+                cacheCreationTokens: 1,
+                outputTokens: 2,
+                reasoningTokens: 1,
+              },
+              costUsd: 4,
+              costSource: "providerReported",
+              records: 1,
+            }),
+          ],
+          [
+            {
+              provider: "claude",
+              hostId: "host",
+              homePath: "/shared",
+              sourceId: "b-shared",
+              instanceIds: [sharedId],
+              distinctSessions: 1,
+            },
+            {
+              provider: "claude",
+              hostId: "host",
+              homePath: "/only-b",
+              sourceId: "b-only",
+              instanceIds: [onlyBId],
+              distinctSessions: 3,
+            },
+          ],
+          USAGE_CONTRACT_VERSION,
+          [
+            providerInstance(String(sharedId), "claudeAgent", { displayName: "Shared Claude" }),
+            providerInstance(String(onlyBId), "claudeAgent", { displayName: "B Claude" }),
+          ],
+        ),
+      ),
+    ];
+    const selection = (...entries: [string, ProviderInstanceIdType][]) =>
+      entries.map(([environmentId, instanceId]) => ({
+        environmentId: environmentId as EnvironmentId,
+        instanceId,
+      }));
+    const bOnly = mergeUsage(
+      environments,
+      USAGE_CONTRACT_VERSION,
+      undefined,
+      selection(["env-b", sharedId], ["env-b", onlyBId]),
+    );
+    const aOnly = mergeUsage(
+      environments,
+      USAGE_CONTRACT_VERSION,
+      undefined,
+      selection(["env-a", sharedId], ["env-a", onlyAId]),
+    );
+    const both = mergeUsage(
+      environments,
+      USAGE_CONTRACT_VERSION,
+      undefined,
+      selection(["env-a", sharedId], ["env-a", onlyAId], ["env-b", sharedId], ["env-b", onlyBId]),
+    );
+
+    expect(bOnly).toMatchObject({
+      costUsd: 14,
+      records: 3,
+      sessions: 4,
+      totalTokens: 14,
+      contributingEnvironments: ["env-b"],
+      costQuality: {
+        providerReportedShare: 1 / 3,
+        modelPricedShare: 2 / 3,
+        unpricedShare: 0,
+        cacheSavingsUsd: 3,
+      },
+    });
+    expect(bOnly.providers).toMatchObject([
+      { costUsd: 14, records: 3, sessions: 4, costShare: 1, tokenShare: 1 },
+    ]);
+    expect(bOnly.models.map((model) => model.model)).toEqual(["claude-shared", "claude-b"]);
+    expect(bOnly.daily.map((day) => day.day)).toEqual(["2026-08-07", "2026-08-09"]);
+    expect(bOnly.hourly.map((hour) => hour.hourStart)).toEqual([
+      "2026-08-07T09:00:00.000Z",
+      "2026-08-09T11:00:00.000Z",
+    ]);
+    expect(aOnly.costUsd).toBe(12);
+    expect(aOnly.sessions).toBe(3);
+    expect(both.costUsd).toBe(16);
+    expect(both.sessions).toBe(6);
+    expect(both.duplicateSources).toEqual(["env-b: /shared"]);
+    const sharedOptionA = both.instanceOptions.find(
+      (option) => option.environmentId === "env-a" && option.instanceId === sharedId,
+    );
+    const sharedOptionB = both.instanceOptions.find(
+      (option) => option.environmentId === "env-b" && option.instanceId === sharedId,
+    );
+    expect(sharedOptionA?.sharedWith).toContain("env-b: Shared Claude (shared-home)");
+    expect(sharedOptionA?.key).not.toBe(sharedOptionB?.key);
+  });
+
+  it("preserves legacy All totals but reports unavailable and filtered coverage clearly", () => {
+    const unavailableId = ProviderInstanceId.make("offline-cli");
+    const unsupportedId = ProviderInstanceId.make("unsupported-cli");
+    const legacy = environment(
+      "env-legacy",
+      summary(
+        [bucket({ costUsd: 7 })],
+        [{ provider: "claude", hostId: "legacy", homePath: "/legacy" }],
+      ),
+    );
+    const modern = environment(
+      "env-modern",
+      summary([], [], USAGE_CONTRACT_VERSION, [
+        providerInstance(String(unavailableId), "claudeAgent", {
+          displayName: "Claude home",
+          coverage: "unavailable",
+          message: "The source could not be read.",
+        }),
+        providerInstance(String(unsupportedId), "claudeAgent", {
+          displayName: "Claude home",
+          coverage: "unsupported",
+          message: "This provider does not expose usage.",
+        }),
+      ]),
+    );
+    const all = mergeUsage([legacy, modern], USAGE_CONTRACT_VERSION);
+    const filtered = mergeUsage([legacy, modern], USAGE_CONTRACT_VERSION, undefined, [
+      { environmentId: "env-modern" as EnvironmentId, instanceId: unavailableId },
+      { environmentId: "env-modern" as EnvironmentId, instanceId: unsupportedId },
+    ]);
+
+    expect(all.costUsd).toBe(7);
+    expect(all.instanceNotices).toContain(
+      "Some legacy usage has no provider-instance attribution and cannot be filtered by instance.",
+    );
+    expect(filtered.costUsd).toBe(0);
+    expect(filtered.instanceNotices).toContain(
+      "Legacy usage has no provider-instance attribution and was omitted from this selection.",
+    );
+    expect(filtered.instanceNotices).toContain(
+      "Claude home (env-modern, offline-cli): Usage unavailable. The source could not be read.",
+    );
+    expect(filtered.instanceNotices).toContain(
+      "Claude home (env-modern, unsupported-cli): Usage not collected. This provider does not expose usage.",
+    );
+  });
+
+  it("omits malformed modern source links instead of guessing their ownership", () => {
+    const instanceId = ProviderInstanceId.make("valid-home");
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-modern",
+          summary(
+            [
+              bucket({ costUsd: 100 }),
+              bucket({ sourceId: "duplicate", costUsd: 80 }),
+              bucket({ sourceId: "unknown", costUsd: 70 }),
+              bucket({ sourceId: "good", costUsd: 3 }),
+              bucket({ sourceId: "missing", costUsd: 9 }),
+            ],
+            [
+              { provider: "claude", hostId: "h", homePath: "/without-id" },
+              {
+                provider: "claude",
+                hostId: "h",
+                homePath: "/duplicate-one",
+                sourceId: "duplicate",
+              },
+              {
+                provider: "claude",
+                hostId: "h",
+                homePath: "/duplicate-two",
+                sourceId: "duplicate",
+              },
+              {
+                provider: "claude",
+                hostId: "h",
+                homePath: "/good",
+                sourceId: "good",
+                instanceIds: [instanceId],
+                distinctSessions: 2,
+              },
+              {
+                provider: "claude",
+                hostId: "h",
+                homePath: "/missing",
+                sourceId: "missing",
+                instanceIds: [instanceId],
+                status: "missing",
+              },
+            ],
+            USAGE_CONTRACT_VERSION,
+            [providerInstance(String(instanceId), "claudeAgent")],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(3);
+    expect(merged.records).toBe(5);
+    expect(merged.sessions).toBe(2);
+    expect(merged.instanceNotices).toContain(
+      "Some transcript sources had missing or ambiguous identifiers and were omitted.",
+    );
+    expect(merged.instanceNotices).toContain(
+      "Some usage buckets could not be linked to one valid source and were omitted.",
+    );
+  });
+
+  it("omits ambiguous legacy family buckets before they can claim a modern source", () => {
+    const modernId = ProviderInstanceId.make("modern-claude");
+    const legacy = environment(
+      "env-a-legacy",
+      summary(
+        [
+          bucket({ costUsd: 90, records: 9 }),
+          bucket({ provider: "codex", costUsd: 5, records: 1 }),
+        ],
+        [
+          { provider: "claude", hostId: "host", homePath: "/shared", distinctSessions: 9 },
+          { provider: "claude", hostId: "host", homePath: "/other", distinctSessions: 8 },
+          { provider: "codex", hostId: "host", homePath: "/legacy-codex", distinctSessions: 3 },
+        ],
+      ),
+    );
+    const modern = environment(
+      "env-b-modern",
+      summary(
+        [bucket({ sourceId: "modern-shared", costUsd: 10, records: 2 })],
+        [
+          {
+            provider: "claude",
+            hostId: "host",
+            homePath: "/shared",
+            sourceId: "modern-shared",
+            instanceIds: [modernId],
+            distinctSessions: 1,
+          },
+        ],
+        USAGE_CONTRACT_VERSION,
+        [providerInstance(String(modernId), "claudeAgent")],
+      ),
+    );
+
+    const merged = mergeUsage([legacy, modern], USAGE_CONTRACT_VERSION);
+
+    expect(merged.costUsd).toBe(15);
+    expect(merged.records).toBe(3);
+    expect(merged.sessions).toBe(4);
+    expect(merged.providers.map((provider) => [provider.provider, provider.costUsd])).toEqual([
+      ["claude", 10],
+      ["codex", 5],
+    ]);
+    expect(merged.duplicateSources).toEqual([]);
+    expect(merged.instanceNotices).toContain(
+      "Some legacy provider families have multiple transcript roots and were omitted because their buckets cannot be attributed to one source.",
+    );
   });
 });

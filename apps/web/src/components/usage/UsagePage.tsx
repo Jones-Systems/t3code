@@ -2,7 +2,13 @@ import type { UsageProviderKind } from "@t3tools/contracts";
 import { CheckIcon, ChevronDownIcon, ChevronRightIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 
-import type { DailyTotals, HourlyTotals, ModelTotals } from "@t3tools/shared/usageMerge";
+import type {
+  DailyTotals,
+  HourlyTotals,
+  ModelTotals,
+  UsageInstanceOption,
+  UsageInstanceSelection,
+} from "@t3tools/shared/usageMerge";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
@@ -40,7 +46,6 @@ import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart"
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
 
 type UsageMetric = UsageChartMetric | "limits";
-type UsageProviderSelection = "all" | UsageProviderKind;
 const METRIC_OPTIONS = [
   { value: "cost", label: "Cost" },
   { value: "tokens", label: "Tokens" },
@@ -64,20 +69,19 @@ export function UsagePage() {
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageMetric>("cost");
-  const [providerSelection, setProviderSelection] = useState<UsageProviderSelection[]>(["all"]);
+  const [instanceSelection, setInstanceSelection] = useState<
+    readonly UsageInstanceSelection[] | undefined
+  >(undefined);
   const showingLimits = metric === "limits";
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
   const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(new Set());
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const providerFilter = useMemo(
-    () =>
-      providerSelection.includes("all")
-        ? undefined
-        : PROVIDER_ORDER.filter((provider) => providerSelection.includes(provider)),
-    [providerSelection],
+  const { merged, environments, isPending, isPartial, refresh } = useUsage(
+    window,
+    undefined,
+    instanceSelection,
   );
-  const { merged, environments, isPending, isPartial, refresh } = useUsage(window, providerFilter);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
@@ -121,8 +125,35 @@ export function UsagePage() {
     (total, provider) => total + provider.unpricedRecords,
     0,
   );
-  const selectProviders = (next: readonly string[]) => {
-    setProviderSelection((current) => normalizeProviderSelection(current, next));
+  const instanceSelectionKeys = useMemo(
+    () => instanceSelection?.map(instanceSelectionKey) ?? ["all"],
+    [instanceSelection],
+  );
+  const hasLegacyInstanceMetadata = environments.some(
+    (environment) =>
+      environment.summary !== null && environment.summary.providerInstances === undefined,
+  );
+  const instanceNotices = useMemo(() => {
+    const notices = [...merged.instanceNotices];
+    const hasLegacyNotice = notices.some((notice) => /legacy usage/i.test(notice));
+    if (merged.instanceOptions.length === 0 && hasLegacyInstanceMetadata && !hasLegacyNotice) {
+      notices.push(
+        instanceSelection === undefined
+          ? "A connected server does not provide provider-instance details. Instance filtering is unavailable; all usage available from that server is shown."
+          : "A connected server does not provide provider-instance details. The current instance selection cannot be applied.",
+      );
+    }
+    return [...new Set(notices)];
+  }, [
+    hasLegacyInstanceMetadata,
+    instanceSelection,
+    merged.instanceNotices,
+    merged.instanceOptions.length,
+  ]);
+  const selectInstances = (next: readonly string[]) => {
+    setInstanceSelection((current) =>
+      normalizeInstanceSelection(current, next, merged.instanceOptions),
+    );
   };
 
   const selectWindow = (days: number) => {
@@ -173,13 +204,14 @@ export function UsagePage() {
         )}
       </WorkspaceBreadcrumb>
       <div className="ms-auto hidden min-w-0 items-center justify-end gap-2 xl:flex">
-        {showingLimits ? null : (
-          <UsageProviderSelect
-            selection={providerSelection}
+        {!showingLimits && merged.instanceOptions.length > 0 ? (
+          <UsageInstanceSelect
+            options={merged.instanceOptions}
+            selection={instanceSelectionKeys}
             compact={false}
-            onSelectionChange={selectProviders}
+            onSelectionChange={selectInstances}
           />
-        )}
+        ) : null}
         <ToggleGroup
           aria-label="Usage metric"
           variant="segmented"
@@ -223,13 +255,14 @@ export function UsagePage() {
         </Button>
       </div>
       <div className="ms-auto flex min-w-0 items-center justify-end gap-0.5 xl:hidden">
-        {showingLimits ? null : (
-          <UsageProviderSelect
-            selection={providerSelection}
+        {!showingLimits && merged.instanceOptions.length > 0 ? (
+          <UsageInstanceSelect
+            options={merged.instanceOptions}
+            selection={instanceSelectionKeys}
             compact
-            onSelectionChange={selectProviders}
+            onSelectionChange={selectInstances}
           />
-        )}
+        ) : null}
         <Select
           value={metric}
           onValueChange={(value) => {
@@ -310,6 +343,7 @@ export function UsagePage() {
                   duplicateSources={merged.duplicateSources}
                   staleEnvironments={merged.staleEnvironments}
                 />
+                <UsageInstanceNotices notices={instanceNotices} />
 
                 <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
                   <div className="flex min-w-0 flex-col gap-5">
@@ -612,38 +646,47 @@ function ProviderMark({
   return <Mark className={cn("shrink-0", className)} aria-hidden />;
 }
 
-function UsageProviderSelect({
+function UsageInstanceSelect({
   compact,
+  options,
   selection,
   onSelectionChange,
 }: {
   readonly compact: boolean;
-  readonly selection: UsageProviderSelection[];
+  readonly options: readonly UsageInstanceOption[];
+  readonly selection: readonly string[];
   readonly onSelectionChange: (next: readonly string[]) => void;
 }) {
   return (
     <Select
       multiple
-      value={selection}
+      value={[...selection]}
       onValueChange={(next) =>
         onSelectionChange(Array.isArray(next) ? next : next === null ? [] : [next])
       }
     >
       <SelectTrigger
-        aria-label="Usage provider filter"
+        aria-label="Usage provider instance filter"
         size={compact ? "compact" : "sm"}
         variant={compact ? "ghost" : "default"}
-        className={compact ? "w-28 min-w-0" : "w-40"}
+        className={compact ? "w-32 min-w-0" : "w-40"}
       >
-        <SelectValue>{formatProviderSelection(selection)}</SelectValue>
+        <SelectValue>{formatInstanceSelection(selection, options)}</SelectValue>
       </SelectTrigger>
-      <SelectPopup align="end" alignItemWithTrigger={false} className="min-w-40">
+      <SelectPopup align="end" alignItemWithTrigger={false} className="min-w-56">
         <SelectItem showCheck value="all">
           All providers
         </SelectItem>
-        {PROVIDER_ORDER.map((provider) => (
-          <SelectItem key={provider} showCheck value={provider}>
-            {PROVIDER_PRESENTATION[provider].label}
+        {options.map((option) => (
+          <SelectItem key={option.key} showCheck value={option.key}>
+            <div className="flex min-w-0 flex-col gap-0.5 py-0.5">
+              <span className="truncate">{instanceOptionLabel(option, options)}</span>
+              {instanceOptionDetails(option) ? (
+                <span className="whitespace-normal text-xs text-muted-foreground">
+                  {instanceOptionDetails(option)}
+                </span>
+              ) : null}
+            </div>
           </SelectItem>
         ))}
       </SelectPopup>
@@ -651,25 +694,92 @@ function UsageProviderSelect({
   );
 }
 
-function formatProviderSelection(selection: readonly UsageProviderSelection[]): string {
+function formatInstanceSelection(
+  selection: readonly string[],
+  options: readonly UsageInstanceOption[],
+): string {
   if (selection.includes("all")) return "All providers";
-  const providers = PROVIDER_ORDER.filter((provider) => selection.includes(provider));
-  if (providers.length === 1) {
-    const provider = providers[0];
-    return provider === undefined ? "All providers" : PROVIDER_PRESENTATION[provider].label;
-  }
-  return providers.length > 1 ? `${providers.length} providers` : "All providers";
+  const selected = options.filter((option) => selection.includes(option.key));
+  const onlySelected = selected[0];
+  if (selected.length === 1 && onlySelected) return instanceOptionLabel(onlySelected, options);
+  const count = selection.filter((key) => key !== "all").length;
+  return count > 0 ? `${count} instances` : "All providers";
 }
 
-function normalizeProviderSelection(
-  current: readonly UsageProviderSelection[],
+function instanceOptionLabel(
+  option: UsageInstanceOption,
+  options: readonly UsageInstanceOption[],
+): string {
+  const displayName = option.displayName || option.instanceId;
+  const sameNameCount = options.filter(
+    (candidate) => (candidate.displayName || candidate.instanceId) === displayName,
+  ).length;
+  const hasMultipleEnvironments =
+    new Set(options.map((candidate) => candidate.environmentId)).size > 1;
+  const sameEnvironmentLabelCount = new Set(
+    options
+      .filter((candidate) => candidate.environmentLabel === option.environmentLabel)
+      .map((candidate) => candidate.environmentId),
+  ).size;
+  const environmentLabel =
+    sameEnvironmentLabelCount > 1
+      ? `${option.environmentLabel} (${option.environmentId})`
+      : option.environmentLabel;
+  return [
+    displayName,
+    sameNameCount > 1 ? `ID ${option.instanceId}` : null,
+    hasMultipleEnvironments ? environmentLabel : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+}
+
+function instanceOptionDetails(option: UsageInstanceOption): string | null {
+  const details = [
+    option.enabled ? null : "Disabled",
+    option.coverage === "unsupported"
+      ? "Usage not collected"
+      : option.coverage === "unavailable"
+        ? "Usage unavailable"
+        : null,
+    option.sharedWith.length > 0 ? `History shared with ${option.sharedWith.join(", ")}` : null,
+    option.message,
+  ].filter((detail): detail is string => detail !== null && detail.length > 0);
+  return details.length > 0 ? details.join(" · ") : null;
+}
+
+function instanceSelectionKey(selection: UsageInstanceSelection): string {
+  return JSON.stringify([selection.environmentId, selection.instanceId]);
+}
+
+function normalizeInstanceSelection(
+  current: readonly UsageInstanceSelection[] | undefined,
   next: readonly string[],
-): UsageProviderSelection[] {
-  const selectedProviders = PROVIDER_ORDER.filter((provider) => next.includes(provider));
-  if (current.includes("all")) {
-    return selectedProviders.length > 0 ? selectedProviders : ["all"];
+  options: readonly UsageInstanceOption[],
+): readonly UsageInstanceSelection[] | undefined {
+  const selectedOptions = options.filter((option) => next.includes(option.key));
+  const selected = selectedOptions.map(({ environmentId, instanceId }) => ({
+    environmentId,
+    instanceId,
+  }));
+  if (current === undefined) {
+    return selected.length > 0 ? selected : undefined;
   }
-  return next.includes("all") || selectedProviders.length === 0 ? ["all"] : selectedProviders;
+  return next.includes("all") || selected.length === 0 ? undefined : selected;
+}
+
+function UsageInstanceNotices({ notices }: { readonly notices: readonly string[] }) {
+  if (notices.length === 0) return null;
+  return (
+    <div
+      className="flex flex-col gap-1 rounded-md border border-border p-3 text-xs text-muted-foreground"
+      role="status"
+    >
+      {notices.map((notice) => (
+        <p key={notice}>{notice}</p>
+      ))}
+    </div>
+  );
 }
 
 function ModelBreakdownButton({

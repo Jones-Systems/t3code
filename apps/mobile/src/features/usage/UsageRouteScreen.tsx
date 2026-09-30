@@ -1,7 +1,11 @@
 import type { MenuAction } from "@react-native-menu/menu";
 import { useNavigation } from "@react-navigation/native";
-import type { UsageProviderKind } from "@t3tools/contracts";
-import type { DailyTotals, MergedUsage } from "@t3tools/shared/usageMerge";
+import type {
+  DailyTotals,
+  MergedUsage,
+  UsageInstanceOption,
+  UsageInstanceSelection,
+} from "@t3tools/shared/usageMerge";
 import {
   enumerateDays,
   enumerateHourStarts,
@@ -27,7 +31,7 @@ import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
 import { UsageLimitsSection } from "./UsageLimitsSection";
 import type { UsageChartMetric } from "./usageChartData";
-import { PROVIDER_LABEL, PROVIDER_ORDER, useProviderColors } from "./usageProviders";
+import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
 
 const WINDOW_OPTIONS = [
   { days: 1, label: "Past 24h" },
@@ -36,12 +40,18 @@ const WINDOW_OPTIONS = [
   { days: 90, label: "90 days" },
 ] as const;
 
-const PROVIDER_FILTER_OPTIONS = PROVIDER_ORDER.map((provider) => ({
-  provider,
-  label: PROVIDER_LABEL[provider],
-}));
-
 const CHART_HEIGHT = 180;
+
+type InstanceMenuOption = {
+  readonly option: UsageInstanceOption;
+  readonly title: string;
+  readonly selectionLabel: string;
+  readonly subtitle: string;
+};
+
+function instanceSelectionKey(selection: UsageInstanceSelection): string {
+  return JSON.stringify([selection.environmentId, selection.instanceId]);
+}
 
 export function UsageRouteScreen() {
   const navigation = useNavigation();
@@ -51,59 +61,146 @@ export function UsageRouteScreen() {
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
-  const [selectedProviders, setSelectedProviders] = useState<readonly UsageProviderKind[] | null>(
-    null,
-  );
+  const [selectedInstances, setSelectedInstances] = useState<
+    readonly UsageInstanceSelection[] | null
+  >(null);
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, isPartial, refresh } = useUsage(
     window,
-    selectedProviders ?? undefined,
+    undefined,
+    selectedInstances ?? undefined,
   );
-  const providerFilterActions = useMemo<MenuAction[]>(
+  const instanceMenuOptions = useMemo<readonly InstanceMenuOption[]>(() => {
+    const displayNameCounts = new Map<string, number>();
+    for (const option of merged.instanceOptions) {
+      const name = option.displayName.trim() || String(option.instanceId);
+      const key = name.toLowerCase();
+      displayNameCounts.set(key, (displayNameCounts.get(key) ?? 0) + 1);
+    }
+    const environmentIdsByLabel = new Map<string, Set<string>>();
+    for (const option of merged.instanceOptions) {
+      const label = option.environmentLabel.trim() || String(option.environmentId);
+      const environmentIds = environmentIdsByLabel.get(label) ?? new Set<string>();
+      environmentIds.add(String(option.environmentId));
+      environmentIdsByLabel.set(label, environmentIds);
+    }
+    const hasMultipleEnvironments =
+      new Set(merged.instanceOptions.map((option) => String(option.environmentId))).size > 1;
+
+    return merged.instanceOptions.map((option) => {
+      const displayName = option.displayName.trim() || String(option.instanceId);
+      const hasNameCollision = (displayNameCounts.get(displayName.toLowerCase()) ?? 0) > 1;
+      const title = hasNameCollision ? `${displayName} (${option.instanceId})` : displayName;
+      const baseEnvironmentLabel = option.environmentLabel.trim() || String(option.environmentId);
+      const environmentLabel =
+        (environmentIdsByLabel.get(baseEnvironmentLabel)?.size ?? 0) > 1
+          ? `${baseEnvironmentLabel} (${option.environmentId})`
+          : baseEnvironmentLabel;
+      const coverageMessage =
+        option.coverage === "unsupported"
+          ? `Usage not collected${option.message ? `: ${option.message}` : ""}`
+          : option.coverage === "unavailable"
+            ? `Usage unavailable${option.message ? `: ${option.message}` : ""}`
+            : option.message;
+      const subtitle = [
+        hasMultipleEnvironments ? environmentLabel : null,
+        option.enabled ? null : "Disabled",
+        coverageMessage,
+        option.sharedWith.length > 0
+          ? `Shares provider history with ${option.sharedWith.join(", ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+
+      return {
+        option,
+        title,
+        selectionLabel: hasMultipleEnvironments ? `${title} · ${environmentLabel}` : title,
+        subtitle,
+      };
+    });
+  }, [merged.instanceOptions]);
+  const selectedInstanceKeys = useMemo(
+    () => new Set((selectedInstances ?? []).map(instanceSelectionKey)),
+    [selectedInstances],
+  );
+  const selectedInstanceMenuOptions = instanceMenuOptions.filter(({ option }) =>
+    selectedInstanceKeys.has(option.key),
+  );
+  const instanceFilterActions = useMemo<MenuAction[]>(
     () => [
       {
-        id: "providers:all",
-        title: "All providers",
-        subtitle: "Include every provider",
-        state: selectedProviders === null ? "on" : "off",
+        id: "instances:all",
+        title: "All configured instances",
+        subtitle: "Include all provider instances",
+        state: selectedInstances === null ? "on" : "off",
       },
-      ...PROVIDER_FILTER_OPTIONS.map(({ provider, label }) => ({
-        id: `provider:${provider}`,
-        title: label,
-        state: selectedProviders?.includes(provider) ? ("on" as const) : ("off" as const),
+      ...instanceMenuOptions.map(({ option, title, subtitle }) => ({
+        id: `instance:${option.key}`,
+        title,
+        subtitle: subtitle || undefined,
+        state: selectedInstanceKeys.has(option.key) ? ("on" as const) : ("off" as const),
       })),
     ],
-    [selectedProviders],
+    [instanceMenuOptions, selectedInstanceKeys, selectedInstances],
   );
-  const providerSelectionLabel =
-    selectedProviders === null
-      ? "All providers"
-      : PROVIDER_FILTER_OPTIONS.filter(({ provider }) => selectedProviders.includes(provider))
-          .map(({ label }) => label)
-          .join(" · ");
-  const providerSelectionCount =
-    selectedProviders === null ? "All" : `${selectedProviders.length} selected`;
-  const handleProviderFilterAction = ({
+  const instanceSelectionLabel =
+    selectedInstances === null
+      ? "All configured instances"
+      : selectedInstanceMenuOptions.length === 0
+        ? "Selected instances unavailable"
+        : selectedInstanceMenuOptions.map(({ selectionLabel }) => selectionLabel).join(" · ");
+  const instanceSelectionCount =
+    selectedInstances === null ? "All" : `${selectedInstances.length} selected`;
+  const missingSelectedInstanceCount =
+    selectedInstances === null ? 0 : selectedInstances.length - selectedInstanceMenuOptions.length;
+  const missingSelectionLabel =
+    missingSelectedInstanceCount === 0
+      ? null
+      : missingSelectedInstanceCount === 1
+        ? "1 selected entry is"
+        : `${missingSelectedInstanceCount} selected entries are`;
+  const missingSelectionNotice =
+    missingSelectionLabel !== null
+      ? `${missingSelectionLabel} unavailable in the current environment state. ` +
+        "Clear the filter to remove these instance selections."
+      : null;
+  const instanceNotices = [
+    ...merged.instanceNotices,
+    ...(missingSelectionNotice === null ? [] : [missingSelectionNotice]),
+  ];
+  const handleInstanceFilterAction = ({
     nativeEvent,
   }: {
     readonly nativeEvent: { readonly event: string };
   }) => {
-    if (nativeEvent.event === "providers:all") {
-      setSelectedProviders(null);
+    if (nativeEvent.event === "instances:all") {
+      setSelectedInstances(null);
       return;
     }
 
-    const selectedOption = PROVIDER_FILTER_OPTIONS.find(
-      ({ provider }) => nativeEvent.event === `provider:${provider}`,
+    const selectedOption = instanceMenuOptions.find(
+      ({ option }) => nativeEvent.event === `instance:${option.key}`,
     );
     if (!selectedOption) return;
 
-    setSelectedProviders((current) => {
+    setSelectedInstances((current) => {
       const selected = current ?? [];
-      const next = selected.includes(selectedOption.provider)
-        ? selected.filter((provider) => provider !== selectedOption.provider)
-        : [...selected, selectedOption.provider];
+      const next = selected.some(
+        (instance) => instanceSelectionKey(instance) === selectedOption.option.key,
+      )
+        ? selected.filter(
+            (instance) => instanceSelectionKey(instance) !== selectedOption.option.key,
+          )
+        : [
+            ...selected,
+            {
+              environmentId: selectedOption.option.environmentId,
+              instanceId: selectedOption.option.instanceId,
+            },
+          ];
       return next.length === 0 ? null : next;
     });
   };
@@ -179,26 +276,26 @@ export function UsageRouteScreen() {
         />
 
         <View className="gap-2">
-          <Text className="text-sm text-foreground-muted">Provider</Text>
+          <Text className="text-sm text-foreground-muted">Configured instances</Text>
           <ControlPillMenu
-            actions={providerFilterActions}
-            title="Provider filter"
-            onPressAction={handleProviderFilterAction}
+            actions={instanceFilterActions}
+            title="Configured instance filter"
+            onPressAction={handleInstanceFilterAction}
           >
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`Provider filter: ${providerSelectionLabel}`}
-              accessibilityHint="Select all providers or toggle individual providers."
+              accessibilityLabel={`Configured instance filter: ${instanceSelectionLabel}`}
+              accessibilityHint="Show all configured instances or toggle individual instances. Unsupported or unavailable instances include a reason."
               className="min-h-11 flex-row items-center justify-between gap-3 rounded-[16px] border-continuous bg-card px-4 py-2"
             >
               <Text
                 className="min-w-0 flex-1 text-base font-t3-medium text-foreground"
                 numberOfLines={1}
               >
-                {providerSelectionLabel}
+                {instanceSelectionLabel}
               </Text>
               <View className="flex-row items-center gap-2">
-                <Text className="text-sm text-foreground-muted">{providerSelectionCount}</Text>
+                <Text className="text-sm text-foreground-muted">{instanceSelectionCount}</Text>
                 <SymbolView
                   name="chevron.down"
                   size={14}
@@ -211,6 +308,15 @@ export function UsageRouteScreen() {
         </View>
 
         <UsageCoverageNotice environments={environments} merged={merged} isPartial={isPartial} />
+        {instanceNotices.length > 0 ? (
+          <View className="gap-1 rounded-[16px] border-continuous bg-card px-4 py-3">
+            {instanceNotices.map((notice) => (
+              <Text key={notice} className="text-sm text-foreground-muted">
+                {notice}
+              </Text>
+            ))}
+          </View>
+        ) : null}
 
         {isPending ? (
           <Text className="py-16 text-center text-base text-foreground-muted">

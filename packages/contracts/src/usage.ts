@@ -2,19 +2,23 @@
  * Usage reporting contract.
  *
  * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
- * `~/.grok/sessions/**\/updates.jsonl`) rather than relying on T3 Code's own
- * orchestration projections, so usage stays complete even for turns that were
- * never driven through T3 Code. This mirrors the approach `ccusage` takes.
+ * under configured provider homes (defaulting to `~/.claude/projects`,
+ * `~/.codex/sessions`, and `~/.grok/sessions`) rather than relying on T3
+ * Code's orchestration projections, so usage stays complete even for turns
+ * that were never driven through T3 Code. This mirrors the approach `ccusage`
+ * takes.
  *
- * Environments return pre-aggregated `(day, hourStart?, provider, model)`
- * buckets. Raw transcript records never cross the wire.
+ * Environments return pre-aggregated `(sourceId?, day, hourStart?, provider,
+ * model)` buckets. A source id links a bucket to a scanned corpus; it does not
+ * assign individual records exclusively to one configured instance. Raw
+ * transcript records never cross the wire.
  *
  * @module usage
  */
 import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly. The
@@ -26,9 +30,9 @@ export const USAGE_CONTRACT_VERSION = 5 as const;
 /**
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
- * v5 only adds `grok` to {@link UsageProviderKind}; v4 Claude/Codex buckets
- * remain valid, so mixed-version environments keep those totals instead of
- * treating every older server as stale.
+ * v5 adds `grok` and optional configured-instance source links; v4
+ * Claude/Codex buckets remain valid, so mixed-version environments keep those
+ * totals instead of treating every older server as stale.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
@@ -80,8 +84,10 @@ export const UsageTokenTotals = Schema.Struct({
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
 /**
- * One `(day, hourStart?, provider, model)` cell. `hourStart` is the UTC start
- * instant of a rolling bucket and is present only for hourly requests.
+ * One `(sourceId?, day, hourStart?, provider, model)` cell. `sourceId`, when
+ * present, identifies the scanned corpus; it does not assign individual
+ * records exclusively to one configured instance. `hourStart` is the UTC
+ * start instant of a rolling bucket and is present only for hourly requests.
  *
  * `costUsd` is the raw API-equivalent cost of these tokens. It is not money
  * spent: subscription plans bill separately. `unpricedRecords` counts records
@@ -89,6 +95,11 @@ export type UsageTokenTotals = typeof UsageTokenTotals.Type;
  * to `costUsd`.
  */
 export const UsageBucket = Schema.Struct({
+  /**
+   * Present in configured-instance responses; identifies the source that
+   * contributed this bucket.
+   */
+  sourceId: Schema.optional(TrimmedNonEmptyString),
   day: UsageDay,
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
@@ -138,6 +149,13 @@ export const UsageSourceStatus = Schema.Literals(["ok", "missing", "partial", "f
 export type UsageSourceStatus = typeof UsageSourceStatus.Type;
 
 export const UsageSource = Schema.Struct({
+  /** Present in configured-instance responses; stable within the summary. */
+  sourceId: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Configured instances that resolve to this shared transcript root, not
+   * exclusive record owners.
+   */
+  instanceIds: Schema.optional(Schema.Array(ProviderInstanceId)),
   fingerprint: UsageSourceFingerprint,
   status: UsageSourceStatus,
   scannedFiles: NonNegativeInt,
@@ -169,6 +187,16 @@ export const UsagePricing = Schema.Struct({
 });
 export type UsagePricing = typeof UsagePricing.Type;
 
+export const UsageProviderInstance = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  displayName: TrimmedNonEmptyString,
+  enabled: Schema.Boolean,
+  coverage: Schema.Literals(["supported", "unsupported", "unavailable"]),
+  message: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type UsageProviderInstance = typeof UsageProviderInstance.Type;
+
 export const UsageSummaryInput = Schema.Struct({
   /** Inclusive first day of the window, in `timeZone`. */
   sinceDay: UsageDay,
@@ -185,6 +213,11 @@ export const UsageSummaryInput = Schema.Struct({
   sinceTime: Schema.optional(TrimmedNonEmptyString),
   /** Exclusive UTC instant for an hourly rolling window. */
   untilTime: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Requests source-linked configured-instance coverage; omitted by legacy
+   * clients.
+   */
+  includeProviderInstances: Schema.optional(Schema.Boolean),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
 
@@ -196,6 +229,11 @@ export const UsageSummary = Schema.Struct({
   untilDay: UsageDay,
   buckets: Schema.Array(UsageBucket),
   sources: Schema.Array(UsageSource),
+  /**
+   * Present when requested, including an empty array when no instances are
+   * configured.
+   */
+  providerInstances: Schema.optional(Schema.Array(UsageProviderInstance)),
   pricing: UsagePricing,
   /** Wall-clock cost of the scan, surfaced in diagnostics. */
   scanDurationMs: NonNegativeInt,

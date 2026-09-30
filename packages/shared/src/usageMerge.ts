@@ -9,6 +9,8 @@
 import {
   USAGE_MERGE_COMPATIBLE_SINCE,
   type EnvironmentId,
+  type ProviderDriverKind,
+  type ProviderInstanceId,
   type UsageBucket,
   type UsageProviderKind,
   type UsageSourceFingerprint,
@@ -17,6 +19,26 @@ import {
 } from "@t3tools/contracts";
 
 export type UsageProviderFilter = UsageProviderKind | readonly UsageProviderKind[];
+
+export interface UsageInstanceSelection {
+  readonly environmentId: EnvironmentId;
+  readonly instanceId: ProviderInstanceId;
+}
+
+export type UsageInstanceFilter = readonly UsageInstanceSelection[];
+
+export interface UsageInstanceOption {
+  readonly key: string;
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+  readonly instanceId: ProviderInstanceId;
+  readonly driver: ProviderDriverKind;
+  readonly displayName: string;
+  readonly enabled: boolean;
+  readonly coverage: "supported" | "unsupported" | "unavailable";
+  readonly message: string | null;
+  readonly sharedWith: readonly string[];
+}
 
 export interface EnvironmentUsage {
   readonly environmentId: EnvironmentId;
@@ -90,98 +112,498 @@ export interface MergedUsage {
   readonly duplicateSources: readonly string[];
   readonly contributingEnvironments: readonly EnvironmentId[];
   readonly staleEnvironments: readonly EnvironmentId[];
+  readonly instanceOptions: readonly UsageInstanceOption[];
+  readonly instanceNotices: readonly string[];
 }
 
-/**
- * Two sources are the same physical transcript directory only when host,
- * provider, path and filesystem identity all agree.
- *
- * `volumeId` is what stops two machines that happen to share a hostname and a
- * home path, which is every Mac in a fleet, from collapsing into one source and
- * having one of them silently dropped.
- */
+type UsageSourceRecord = UsageSummary["sources"][number];
+type ProviderInstanceDescriptor = NonNullable<UsageSummary["providerInstances"]>[number];
+
+interface PreparedEnvironmentUsage {
+  readonly environment: EnvironmentUsage;
+  readonly isModern: boolean;
+  readonly sourcesById: ReadonlyMap<string, UsageSourceRecord>;
+  readonly instancesById: ReadonlyMap<ProviderInstanceId, ProviderInstanceDescriptor>;
+  readonly eligibleSourceIds: ReadonlySet<string>;
+  readonly eligibleLegacyProviders: ReadonlySet<UsageProviderKind>;
+}
+
+interface SourceOwner {
+  readonly environmentId: EnvironmentId;
+  readonly isModern: boolean;
+  readonly sourceId?: string;
+}
+
+type SourceCandidate = {
+  readonly prepared: PreparedEnvironmentUsage;
+  readonly source: UsageSourceRecord;
+  readonly sourceId?: string;
+};
+
 function fingerprintKey(fingerprint: UsageSourceFingerprint): string {
-  return [
+  return JSON.stringify([
     fingerprint.hostId,
     fingerprint.provider,
     fingerprint.resolvedHomePath,
     fingerprint.volumeId,
-  ].join(" ");
+  ]);
 }
 
-/**
- * Decides which environment owns each physical transcript directory.
- *
- * Several environments on one machine (worktree servers, for instance) resolve
- * the same provider home and would otherwise double count every token. The
- * first environment in a stable order claims a fingerprint; the rest have that
- * provider's buckets dropped. Environments are sorted by id so the winner does
- * not change between renders.
- */
-function claimSources(environments: readonly EnvironmentUsage[]): {
-  readonly ownerByFingerprint: ReadonlyMap<string, EnvironmentId>;
+function instanceSelectionKey(
+  environmentId: EnvironmentId,
+  instanceId: ProviderInstanceId,
+): string {
+  return JSON.stringify([environmentId, instanceId]);
+}
+
+function hasUsageData(environment: EnvironmentUsage): boolean {
+  return (
+    environment.summary.buckets.length > 0 ||
+    environment.summary.sources.some(
+      (source) => source.status !== "missing" && source.distinctSessions > 0,
+    )
+  );
+}
+
+function addInstanceNotice(notices: Set<string>, notice: string): void {
+  notices.add(notice);
+}
+
+function prepareEnvironments(
+  environments: readonly EnvironmentUsage[],
+  instanceFilter: UsageInstanceFilter | undefined,
+  notices: Set<string>,
+): PreparedEnvironmentUsage[] {
+  const selectedInstanceKeys =
+    instanceFilter === undefined
+      ? undefined
+      : new Set(
+          instanceFilter.map(({ environmentId, instanceId }) =>
+            instanceSelectionKey(environmentId, instanceId),
+          ),
+        );
+
+  return environments.map((environment) => {
+    const summary = environment.summary;
+    const providerInstances = summary.providerInstances;
+    const isModern = providerInstances !== undefined;
+    const instancesById = new Map<ProviderInstanceId, ProviderInstanceDescriptor>();
+    const ambiguousInstanceIds = new Set<ProviderInstanceId>();
+    const instanceCounts = new Map<ProviderInstanceId, number>();
+
+    if (providerInstances !== undefined) {
+      for (const instance of providerInstances) {
+        instanceCounts.set(instance.instanceId, (instanceCounts.get(instance.instanceId) ?? 0) + 1);
+      }
+      for (const instance of providerInstances) {
+        if (instanceCounts.get(instance.instanceId) === 1) {
+          instancesById.set(instance.instanceId, instance);
+        } else {
+          ambiguousInstanceIds.add(instance.instanceId);
+        }
+      }
+      if (ambiguousInstanceIds.size > 0) {
+        addInstanceNotice(
+          notices,
+          "Some provider-instance options have ambiguous identifiers and were omitted.",
+        );
+      }
+    }
+
+    const sourceCounts = new Map<string, number>();
+    let hasSourceWithoutId = false;
+    if (isModern) {
+      for (const source of summary.sources) {
+        if (source.sourceId === undefined || source.sourceId.length === 0) {
+          hasSourceWithoutId = true;
+        } else {
+          sourceCounts.set(source.sourceId, (sourceCounts.get(source.sourceId) ?? 0) + 1);
+        }
+      }
+    }
+
+    const sourcesById = new Map<string, UsageSourceRecord>();
+    if (isModern) {
+      for (const source of summary.sources) {
+        const sourceId = source.sourceId;
+        if (sourceId !== undefined && sourceId.length > 0 && sourceCounts.get(sourceId) === 1) {
+          sourcesById.set(sourceId, source);
+        }
+      }
+      if (hasSourceWithoutId || [...sourceCounts.values()].some((count) => count > 1)) {
+        addInstanceNotice(
+          notices,
+          "Some transcript sources had missing or ambiguous identifiers and were omitted.",
+        );
+      }
+    } else if (hasUsageData(environment)) {
+      addInstanceNotice(
+        notices,
+        instanceFilter === undefined
+          ? "Some legacy usage has no provider-instance attribution and cannot be filtered by instance."
+          : "Legacy usage has no provider-instance attribution and was omitted from this selection.",
+      );
+    }
+
+    const eligibleSourceIds = new Set<string>();
+    const eligibleLegacyProviders = new Set<UsageProviderKind>();
+    if (isModern) {
+      let hasUnattributedUsage = false;
+      let hasUnknownInstanceReference = false;
+      let hasInvalidBucketReference = false;
+      const bucketSourceIds = new Set(
+        summary.buckets.flatMap((bucket) =>
+          bucket.sourceId === undefined ? [] : [bucket.sourceId],
+        ),
+      );
+      for (const [sourceId, source] of sourcesById) {
+        if (source.status === "missing") continue;
+        const sourceInstanceIds = source.instanceIds ?? [];
+        if (
+          sourceInstanceIds.length === 0 &&
+          (source.distinctSessions > 0 || bucketSourceIds.has(sourceId))
+        ) {
+          hasUnattributedUsage = true;
+        } else if (sourceInstanceIds.some((instanceId) => !instancesById.has(instanceId))) {
+          hasUnknownInstanceReference = true;
+        }
+
+        if (
+          selectedInstanceKeys === undefined ||
+          sourceInstanceIds.some(
+            (instanceId) =>
+              instancesById.has(instanceId) &&
+              selectedInstanceKeys.has(instanceSelectionKey(environment.environmentId, instanceId)),
+          )
+        ) {
+          eligibleSourceIds.add(sourceId);
+        }
+      }
+
+      for (const bucket of summary.buckets) {
+        const sourceId = bucket.sourceId;
+        const source = sourceId === undefined ? undefined : sourcesById.get(sourceId);
+        if (
+          sourceId === undefined ||
+          source === undefined ||
+          source.status === "missing" ||
+          source.fingerprint.provider !== bucket.provider
+        ) {
+          hasInvalidBucketReference = true;
+        }
+      }
+
+      if (hasUnattributedUsage) {
+        addInstanceNotice(
+          notices,
+          instanceFilter === undefined
+            ? "Some usage is not attributed to a provider instance and remains included under All."
+            : "Some usage is not attributed to a provider instance and was omitted from this selection.",
+        );
+      }
+      if (hasUnknownInstanceReference) {
+        addInstanceNotice(
+          notices,
+          "Some transcript sources reference provider instances without a unique roster entry.",
+        );
+      }
+      if (hasInvalidBucketReference) {
+        addInstanceNotice(
+          notices,
+          "Some usage buckets could not be linked to one valid source and were omitted.",
+        );
+      }
+    } else if (instanceFilter === undefined) {
+      const sourceCountsByProvider = new Map<UsageProviderKind, number>();
+      for (const source of summary.sources) {
+        sourceCountsByProvider.set(
+          source.fingerprint.provider,
+          (sourceCountsByProvider.get(source.fingerprint.provider) ?? 0) + 1,
+        );
+      }
+      for (const [provider, count] of sourceCountsByProvider) {
+        if (count === 1) eligibleLegacyProviders.add(provider);
+      }
+      if ([...sourceCountsByProvider.values()].some((count) => count > 1)) {
+        addInstanceNotice(
+          notices,
+          "Some legacy provider families have multiple transcript roots and were omitted because their buckets cannot be attributed to one source.",
+        );
+      }
+    }
+
+    return {
+      environment,
+      isModern,
+      sourcesById,
+      instancesById,
+      eligibleSourceIds,
+      eligibleLegacyProviders,
+    };
+  });
+}
+
+function claimSources(
+  preparedEnvironments: readonly PreparedEnvironmentUsage[],
+  instanceFilter: UsageInstanceFilter | undefined,
+): {
+  readonly ownerByFingerprint: ReadonlyMap<string, SourceOwner>;
   readonly duplicates: readonly string[];
 } {
-  const ownerByFingerprint = new Map<string, EnvironmentId>();
-  const duplicates: string[] = [];
-
-  const ordered = [...environments].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
-
-  for (const environment of ordered) {
-    for (const source of environment.summary.sources) {
-      if (source.status === "missing") continue;
-      const key = fingerprintKey(source.fingerprint);
-      if (ownerByFingerprint.has(key)) {
-        duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
-        continue;
+  const candidates: SourceCandidate[] = [];
+  for (const prepared of preparedEnvironments) {
+    const { environment } = prepared;
+    if (prepared.isModern) {
+      for (const sourceId of prepared.eligibleSourceIds) {
+        const source = prepared.sourcesById.get(sourceId);
+        if (source !== undefined && source.status !== "missing") {
+          candidates.push({ prepared, source, sourceId });
+        }
       }
-      ownerByFingerprint.set(key, environment.environmentId);
+    } else if (instanceFilter === undefined) {
+      for (const source of environment.summary.sources) {
+        if (
+          source.status !== "missing" &&
+          prepared.eligibleLegacyProviders.has(source.fingerprint.provider)
+        ) {
+          candidates.push({ prepared, source });
+        }
+      }
     }
+  }
+
+  candidates.sort(
+    (a, b) =>
+      a.prepared.environment.environmentId.localeCompare(b.prepared.environment.environmentId) ||
+      fingerprintKey(a.source.fingerprint).localeCompare(fingerprintKey(b.source.fingerprint)) ||
+      (a.sourceId ?? "").localeCompare(b.sourceId ?? ""),
+  );
+
+  const ownerByFingerprint = new Map<string, SourceOwner>();
+  const duplicates: string[] = [];
+  for (const candidate of candidates) {
+    const fingerprint = fingerprintKey(candidate.source.fingerprint);
+    if (ownerByFingerprint.has(fingerprint)) {
+      duplicates.push(
+        `${candidate.prepared.environment.label}: ${candidate.source.fingerprint.resolvedHomePath}`,
+      );
+      continue;
+    }
+    ownerByFingerprint.set(fingerprint, {
+      environmentId: candidate.prepared.environment.environmentId,
+      isModern: candidate.prepared.isModern,
+      ...(candidate.sourceId === undefined ? {} : { sourceId: candidate.sourceId }),
+    });
   }
 
   return { ownerByFingerprint, duplicates };
 }
 
-/**
- * Returns selected buckets and sessions from sources this environment owns
- * after fingerprint claims.
- */
+function providerIsSelected(
+  provider: UsageProviderKind,
+  providerFilter: UsageProviderFilter | undefined,
+): boolean {
+  if (providerFilter === undefined) return true;
+  return typeof providerFilter === "string"
+    ? providerFilter === provider
+    : providerFilter.includes(provider);
+}
+
 function ownedContribution(
-  environment: EnvironmentUsage,
-  ownerByFingerprint: ReadonlyMap<string, EnvironmentId>,
-  providerFilter?: UsageProviderFilter,
+  prepared: PreparedEnvironmentUsage,
+  ownerByFingerprint: ReadonlyMap<string, SourceOwner>,
+  providerFilter: UsageProviderFilter | undefined,
 ): {
   readonly buckets: readonly UsageBucket[];
   readonly sessionsByProvider: ReadonlyMap<UsageProviderKind, number>;
 } {
-  const ownedProviders = new Set<UsageProviderKind>();
+  const { environment } = prepared;
   const sessionsByProvider = new Map<UsageProviderKind, number>();
-  for (const source of environment.summary.sources) {
-    if (source.status === "missing") continue;
-    const key = fingerprintKey(source.fingerprint);
-    if (ownerByFingerprint.get(key) === environment.environmentId) {
-      const provider = source.fingerprint.provider;
+
+  // `distinctSessions` belongs to each source. A session spanning days or models
+  // counts once here, even when several instances share that physical source.
+  if (prepared.isModern) {
+    const ownedSourceIds = new Set<string>();
+    for (const [sourceId, source] of prepared.sourcesById) {
+      if (source.status === "missing") continue;
+      const owner = ownerByFingerprint.get(fingerprintKey(source.fingerprint));
       if (
-        providerFilter !== undefined &&
-        (typeof providerFilter === "string"
-          ? providerFilter !== provider
-          : !providerFilter.includes(provider))
+        owner?.isModern !== true ||
+        owner.environmentId !== environment.environmentId ||
+        owner.sourceId !== sourceId ||
+        !providerIsSelected(source.fingerprint.provider, providerFilter)
       ) {
         continue;
       }
+      ownedSourceIds.add(sourceId);
+      const provider = source.fingerprint.provider;
+      sessionsByProvider.set(
+        provider,
+        (sessionsByProvider.get(provider) ?? 0) + source.distinctSessions,
+      );
+    }
+
+    const buckets = environment.summary.buckets.filter((bucket) => {
+      const sourceId = bucket.sourceId;
+      const source = sourceId === undefined ? undefined : prepared.sourcesById.get(sourceId);
+      return (
+        sourceId !== undefined &&
+        source !== undefined &&
+        source.fingerprint.provider === bucket.provider &&
+        ownedSourceIds.has(sourceId) &&
+        providerIsSelected(bucket.provider, providerFilter)
+      );
+    });
+    return { buckets, sessionsByProvider };
+  }
+
+  const ownedProviders = new Set<UsageProviderKind>();
+  for (const source of environment.summary.sources) {
+    if (source.status === "missing") continue;
+    const owner = ownerByFingerprint.get(fingerprintKey(source.fingerprint));
+    const provider = source.fingerprint.provider;
+    if (
+      owner?.isModern === false &&
+      owner.environmentId === environment.environmentId &&
+      prepared.eligibleLegacyProviders.has(provider) &&
+      providerIsSelected(provider, providerFilter)
+    ) {
       ownedProviders.add(provider);
-      // Distinct within a directory. Summing per-bucket session counts instead
-      // would count a session once per day and model it spans.
       sessionsByProvider.set(
         provider,
         (sessionsByProvider.get(provider) ?? 0) + source.distinctSessions,
       );
     }
   }
+
   return {
-    buckets: environment.summary.buckets.filter((bucket) => ownedProviders.has(bucket.provider)),
+    buckets: environment.summary.buckets.filter(
+      (bucket) =>
+        ownedProviders.has(bucket.provider) && providerIsSelected(bucket.provider, providerFilter),
+    ),
     sessionsByProvider,
   };
+}
+
+function buildInstanceOptions(
+  preparedEnvironments: readonly PreparedEnvironmentUsage[],
+  instanceFilter: UsageInstanceFilter | undefined,
+  notices: Set<string>,
+): UsageInstanceOption[] {
+  const optionSeeds = new Map<
+    string,
+    { readonly prepared: PreparedEnvironmentUsage; readonly instance: ProviderInstanceDescriptor }
+  >();
+  const associationsByFingerprint = new Map<string, Map<string, string>>();
+
+  for (const prepared of preparedEnvironments) {
+    if (!prepared.isModern) continue;
+    const { environment } = prepared;
+
+    for (const instance of prepared.instancesById.values()) {
+      optionSeeds.set(instanceSelectionKey(environment.environmentId, instance.instanceId), {
+        prepared,
+        instance,
+      });
+    }
+
+    for (const source of prepared.sourcesById.values()) {
+      if (source.status === "missing") continue;
+      const instanceIds = source.instanceIds ?? [];
+      if (instanceIds.length === 0) continue;
+      const fingerprint = fingerprintKey(source.fingerprint);
+      const associatedInstances =
+        associationsByFingerprint.get(fingerprint) ?? new Map<string, string>();
+      for (const instanceId of instanceIds) {
+        if (!prepared.instancesById.has(instanceId)) continue;
+        const key = instanceSelectionKey(environment.environmentId, instanceId);
+        const descriptor = prepared.instancesById.get(instanceId);
+        const label = descriptor
+          ? `${environment.label}: ${descriptor.displayName} (${instanceId})`
+          : `${environment.label}: ${instanceId}`;
+        associatedInstances.set(key, label);
+      }
+      associationsByFingerprint.set(fingerprint, associatedInstances);
+    }
+  }
+
+  const sharedWithByInstance = new Map<string, Set<string>>();
+  let hasSharedDirectory = false;
+  for (const associatedInstances of associationsByFingerprint.values()) {
+    if (associatedInstances.size < 2) continue;
+    hasSharedDirectory = true;
+    for (const instanceKey of associatedInstances.keys()) {
+      const sharedWith = sharedWithByInstance.get(instanceKey) ?? new Set<string>();
+      for (const [otherKey, otherLabel] of associatedInstances) {
+        if (otherKey !== instanceKey) sharedWith.add(otherLabel);
+      }
+      sharedWithByInstance.set(instanceKey, sharedWith);
+    }
+  }
+
+  if (hasSharedDirectory) {
+    addInstanceNotice(
+      notices,
+      "Shared transcript history cannot be separated between these provider instances. Selecting either or both associated entries counts the shared usage once.",
+    );
+  }
+
+  const options = [...optionSeeds.values()]
+    .map(({ prepared, instance }) => {
+      const { environment } = prepared;
+      const key = instanceSelectionKey(environment.environmentId, instance.instanceId);
+      return {
+        key,
+        environmentId: environment.environmentId,
+        environmentLabel: environment.label,
+        instanceId: instance.instanceId,
+        driver: instance.driver,
+        displayName: instance.displayName,
+        enabled: instance.enabled,
+        coverage: instance.coverage,
+        message: instance.message,
+        sharedWith: [...(sharedWithByInstance.get(key) ?? [])].sort((a, b) => a.localeCompare(b)),
+      } satisfies UsageInstanceOption;
+    })
+    .sort(
+      (a, b) =>
+        a.environmentLabel.localeCompare(b.environmentLabel) ||
+        a.displayName.localeCompare(b.displayName) ||
+        String(a.instanceId).localeCompare(String(b.instanceId)) ||
+        a.environmentId.localeCompare(b.environmentId),
+    );
+
+  const selectedKeys =
+    instanceFilter === undefined
+      ? undefined
+      : new Set(
+          instanceFilter.map(({ environmentId, instanceId }) =>
+            instanceSelectionKey(environmentId, instanceId),
+          ),
+        );
+  const displayNameCounts = new Map<string, number>();
+  for (const option of options) {
+    displayNameCounts.set(option.displayName, (displayNameCounts.get(option.displayName) ?? 0) + 1);
+  }
+  for (const option of options) {
+    if (selectedKeys !== undefined && !selectedKeys.has(option.key)) continue;
+    const duplicateName = (displayNameCounts.get(option.displayName) ?? 0) > 1;
+    const instanceReference = duplicateName ? `, ${option.instanceId}` : "";
+    const label = `${option.displayName} (${option.environmentLabel}${instanceReference})`;
+    if (option.coverage === "unsupported") {
+      addInstanceNotice(
+        notices,
+        `${label}: Usage not collected. ${option.message ?? "This provider does not report usage."}`,
+      );
+    } else if (option.coverage === "unavailable") {
+      addInstanceNotice(
+        notices,
+        `${label}: Usage unavailable. ${option.message ?? "The usage source could not be read."}`,
+      );
+    }
+  }
+
+  return options;
 }
 
 type MutableUsageTokenTotals = {
@@ -243,6 +665,8 @@ const EMPTY_MERGED: MergedUsage = {
   duplicateSources: [],
   contributingEnvironments: [],
   staleEnvironments: [],
+  instanceOptions: [],
+  instanceNotices: [],
 };
 
 /**
@@ -254,13 +678,14 @@ const EMPTY_MERGED: MergedUsage = {
  * [{@link USAGE_MERGE_COMPATIBLE_SINCE}, expected] still merge, so an additive
  * provider expansion does not drop Claude/Codex totals from older servers.
  * `providerFilter` accepts one provider or a selection. Undefined includes all
- * providers, and an empty selection includes none. Selection is applied after
- * source ownership is resolved.
+ * providers, and an empty selection includes none. `instanceFilter` has the
+ * same selection behavior for environment-specific provider instances.
  */
 export function mergeUsage(
   environments: readonly EnvironmentUsage[],
   expectedContractVersion: number,
   providerFilter?: UsageProviderFilter,
+  instanceFilter?: UsageInstanceFilter,
 ): MergedUsage {
   if (environments.length === 0) return EMPTY_MERGED;
 
@@ -274,7 +699,14 @@ export function mergeUsage(
     }
   }
 
-  const { ownerByFingerprint, duplicates } = claimSources(current);
+  const instanceNotices = new Set<string>();
+  const preparedEnvironments = prepareEnvironments(current, instanceFilter, instanceNotices);
+  const { ownerByFingerprint, duplicates } = claimSources(preparedEnvironments, instanceFilter);
+  const instanceOptions = buildInstanceOptions(
+    preparedEnvironments,
+    instanceFilter,
+    instanceNotices,
+  );
 
   let costUsd = 0;
   let uncachedInputTokens = 0;
@@ -332,9 +764,10 @@ export function mergeUsage(
   >();
   const contributingEnvironments: EnvironmentId[] = [];
 
-  for (const environment of current) {
+  for (const prepared of preparedEnvironments) {
+    const { environment } = prepared;
     const { buckets, sessionsByProvider } = ownedContribution(
-      environment,
+      prepared,
       ownerByFingerprint,
       providerFilter,
     );
@@ -508,5 +941,7 @@ export function mergeUsage(
     duplicateSources: duplicates,
     contributingEnvironments,
     staleEnvironments,
+    instanceOptions,
+    instanceNotices: [...instanceNotices].sort((a, b) => a.localeCompare(b)),
   };
 }
