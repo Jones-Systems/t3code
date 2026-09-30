@@ -273,6 +273,7 @@ Merges native and Electron data and owns public telemetry semantics.
 - calculates CPU and I/O rates from cumulative native counters;
 - preserves the last native rates during desktop-only updates;
 - classifies backend, Electron, and monitor processes;
+- projects scoped provider-root ownership registered by provider runtimes;
 - computes process depth and child relationships;
 - tracks starts, exits, CPU time, and observed I/O;
 - projects power data;
@@ -367,6 +368,30 @@ Steady state uses:
 
 The diagnostics page exposes the monitor's own process resource usage and
 collection duration so the observer's cost is measurable.
+
+### Provider process attribution
+
+Provider runtimes can register a spawned root PID for the lifetime of their
+session scope. Current Codex sessions use this hook for the app-server process.
+The live telemetry projection classifies the matching process as
+`provider-root` and attaches only the opaque T3 thread ID and provider kind.
+Descendants inherit ownership structurally through the process tree; owner data
+is not repeated on every child.
+
+Registrations are in-memory and are removed when the provider-session scope
+closes. A registration is rejected when the sampled process start bucket is
+newer than registration, which prevents later PID reuse from inheriting the
+owner. Native start times can be second-granularity, so reuse within the same
+bucket cannot be distinguished until the session finalizer removes the record.
+Missing attribution is not a staleness verdict: the process may predate this
+server lifetime, belong to a different server, or no longer have a live native
+session. This surface does not add signaling or cleanup behavior.
+
+Owner metadata is currently present only in live resource-telemetry snapshots.
+The diagnostics UI uses the `provider-root` category but does not render the
+opaque thread ID, and historical summaries intentionally omit ephemeral owner
+metadata. Authenticated native clients and diagnostic automation can consume
+the owner directly from the live snapshot.
 
 Failures are isolated:
 
