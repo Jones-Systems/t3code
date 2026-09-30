@@ -1,8 +1,10 @@
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId, WorktreeOwnershipConflictError } from "@t3tools/contracts";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Schema from "effect/Schema";
 
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
+
+export { WorktreeOwnershipConflictError };
 
 export class OrchestrationCommandJsonParseError extends Schema.TaggedErrorClass<OrchestrationCommandJsonParseError>()(
   "OrchestrationCommandJsonParseError",
@@ -55,6 +57,7 @@ export class OrchestrationThreadSettleBlockedError extends Schema.TaggedErrorCla
 export const OrchestrationCommandRejection = Schema.Union([
   OrchestrationCommandInvariantError,
   OrchestrationThreadSettleBlockedError,
+  WorktreeOwnershipConflictError,
 ]);
 export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;
 export const isOrchestrationCommandRejection = Schema.is(OrchestrationCommandRejection);

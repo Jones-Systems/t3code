@@ -448,6 +448,63 @@ export const reconcileProviderSessions = Effect.gen(function* () {
     (yield* providerService.listSessions()).map((session) => session.threadId),
   );
   const { threads } = yield* query.getCommandReadModel();
+  for (const thread of threads) {
+    const session = thread.session;
+    if (
+      session === null ||
+      !liveThreadIds.has(thread.id) ||
+      (session.status !== "starting" &&
+        session.status !== "running" &&
+        session.activeTurnId === null)
+    ) {
+      continue;
+    }
+    const ownership = yield* Effect.exit(orchestrationEngine.acquireWorktreeOwnership(thread.id));
+    if (Exit.isSuccess(ownership)) {
+      continue;
+    }
+    if (Cause.hasInterrupts(ownership.cause)) {
+      return yield* Effect.failCause(ownership.cause);
+    }
+    yield* providerService.stopSession({ threadId: thread.id }).pipe(
+      Effect.retry({ times: 1 }),
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.logError("failed to stop live provider after ownership recovery conflict", {
+              threadId: thread.id,
+              cause,
+            }),
+      ),
+    );
+    const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(yield* crypto.randomUUIDv4),
+        threadId: thread.id,
+        session: {
+          ...session,
+          status: "error",
+          activeTurnId: null,
+          lastError:
+            "This checkout is owned by another thread. Resolve that owner before continuing.",
+          updatedAt: reconciledAt,
+        },
+        createdAt: reconciledAt,
+      })
+      .pipe(
+        Effect.retry({ times: 1 }),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning(
+                "failed to settle live provider after ownership recovery conflict",
+                { threadId: thread.id, cause },
+              ),
+        ),
+      );
+  }
   const orphanedThreads = threads.filter(
     (thread) =>
       thread.session !== null &&
@@ -584,6 +641,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
                 threadId: thread.id,
               });
             }
+            yield* orchestrationEngine.acquireWorktreeOwnership(thread.id);
             const capabilities = yield* providerService.getCapabilities(providerInstanceId);
             yield* providerService.sendTurn({
               threadId: thread.id,

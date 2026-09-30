@@ -921,6 +921,20 @@ const buildAppUnderTest = (options?: {
             dispatch: () => Effect.succeed({ sequence: 0 }),
             streamDomainEvents: Stream.empty,
             latestSequence: Effect.succeed(0),
+            acquireWorktreeOwnership: (threadId) =>
+              Effect.succeed({
+                resourcePath: `/tmp/${threadId}`,
+                leaseId: `lease-${threadId}`,
+                ownerThreadId: threadId,
+                ownerIncarnation: `event-${threadId}`,
+                branch: null,
+                acquiredAtMs: 0,
+                renewedAtMs: 0,
+                expiresAtMs: 300_000,
+              }),
+            releaseWorktreeOwnership: () => Effect.void,
+            listWorktreeOwnershipLeases: Effect.succeed([]),
+            getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
             ...options?.layers?.orchestrationEngine,
           }),
           Layer.mock(ThreadDeletionReactor)({
@@ -8883,6 +8897,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       Effect.gen(function* () {
         const dispatchedCommands: Array<OrchestrationCommand> = [];
         const bootstrapGitOperations: string[] = [];
+        const setupLifecycle: string[] = [];
         const refreshStatus = vi.fn((_: string) =>
           Effect.succeed({
             isRepo: true,
@@ -8950,12 +8965,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]["runForThread"]
             >[0],
           ) =>
-            Effect.succeed({
-              status: "started" as const,
-              scriptId: "setup",
-              scriptName: "Setup",
-              terminalId: "setup-setup",
-              cwd: "/tmp/bootstrap-worktree",
+            Effect.sync(() => {
+              setupLifecycle.push("setup");
+              return {
+                status: "started" as const,
+                scriptId: "setup",
+                scriptName: "Setup",
+                terminalId: "setup-setup",
+                cwd: "/tmp/bootstrap-worktree",
+              };
             }),
         );
 
@@ -8978,6 +8996,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   return { sequence: dispatchedCommands.length };
                 }),
               readEvents: () => Stream.empty,
+              acquireWorktreeOwnership: (threadId) =>
+                Effect.sync(() => {
+                  setupLifecycle.push("ownership");
+                  return {
+                    resourcePath: "/tmp/bootstrap-worktree",
+                    leaseId: "lease-bootstrap",
+                    ownerThreadId: threadId,
+                    ownerIncarnation: "event-thread-bootstrap-created",
+                    branch: "t3code/bootstrap-refName",
+                    acquiredAtMs: 0,
+                    renewedAtMs: 0,
+                    expiresAtMs: 300_000,
+                  };
+                }),
             },
             projectSetupScriptRunner: {
               runForThread,
@@ -9072,6 +9104,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           worktreePath: "/tmp/bootstrap-worktree",
         });
         assert.deepEqual(refreshStatus.mock.calls[0]?.[0], "/tmp/bootstrap-worktree");
+        assert.deepEqual(setupLifecycle, ["ownership", "setup"]);
 
         const setupActivities = dispatchedCommands.filter(
           (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
@@ -9730,6 +9763,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("routes websocket rpc terminal methods", () =>
     Effect.gen(function* () {
+      const acquired: ThreadId[] = [];
       const snapshot = {
         threadId: "thread-1",
         terminalId: "default",
@@ -9746,6 +9780,22 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       yield* buildAppUnderTest({
         layers: {
+          orchestrationEngine: {
+            acquireWorktreeOwnership: (threadId) =>
+              Effect.sync(() => {
+                acquired.push(threadId);
+                return {
+                  resourcePath: "/tmp/project",
+                  leaseId: `lease-${acquired.length}`,
+                  ownerThreadId: threadId,
+                  ownerIncarnation: "event-thread-1-created",
+                  branch: null,
+                  acquiredAtMs: 0,
+                  renewedAtMs: 0,
+                  expiresAtMs: 300_000,
+                };
+              }),
+          },
           terminalManager: {
             open: () => Effect.succeed(snapshot),
             write: () => Effect.void,
@@ -9812,6 +9862,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(restarted.terminalId, "default");
+      assert.deepEqual(acquired, [ThreadId.make("thread-1"), ThreadId.make("thread-1")]);
 
       yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>

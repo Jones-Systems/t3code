@@ -439,6 +439,10 @@ describe("ProviderCommandReactor", () => {
           },
           subscribeDomainEvents: engine.subscribeDomainEvents,
           latestSequence: engine.latestSequence,
+          acquireWorktreeOwnership: engine.acquireWorktreeOwnership,
+          releaseWorktreeOwnership: engine.releaseWorktreeOwnership,
+          listWorktreeOwnershipLeases: engine.listWorktreeOwnershipLeases,
+          getThreadOwnershipIncarnation: engine.getThreadOwnershipIncarnation,
         } satisfies OrchestrationEngineService["Service"];
       }),
     ).pipe(Layer.provide(orchestrationLayer));

@@ -463,6 +463,10 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           streamDomainEvents: Stream.fromQueue(events),
           subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
           latestSequence: Effect.succeed(0),
+          acquireWorktreeOwnership: () => Effect.die("unused"),
+          releaseWorktreeOwnership: () => Effect.die("unused"),
+          listWorktreeOwnershipLeases: Effect.succeed([]),
+          getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
         } satisfies OrchestrationEngineShape;
 
         const snapshotQuery = {
@@ -657,6 +661,10 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
             streamDomainEvents: Stream.fromQueue(events),
             subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
             latestSequence: Effect.succeed(0),
+            acquireWorktreeOwnership: () => Effect.die("unused"),
+            releaseWorktreeOwnership: () => Effect.die("unused"),
+            listWorktreeOwnershipLeases: Effect.succeed([]),
+            getThreadOwnershipIncarnation: () => Effect.succeed(Option.none()),
           } satisfies OrchestrationEngineShape),
           Layer.succeed(ProjectionSnapshotQuery, {
             getShellSnapshot: () =>
