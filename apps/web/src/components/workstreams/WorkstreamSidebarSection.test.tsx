@@ -3,6 +3,15 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("../../state/workstreams", () => ({
   useWorkstreams: () => ({
+    placementInventory: {
+      coverage: "partial",
+      identities: Array.from({ length: 1_000 }, (_, index) => ({
+        source_instance_id: "environment",
+        native_thread_id: String(index),
+      })),
+      json: "[]",
+      totalIdentities: 20_000,
+    },
     data: {
       binding: {
         registryId: "registry",
@@ -33,6 +42,7 @@ vi.mock("../../state/workstreams", () => ({
       stale: false,
     },
     submit: vi.fn(),
+    runBindingOperation: vi.fn(),
     loadDetail: vi.fn(),
     loadReference: vi.fn(),
   }),
@@ -48,5 +58,8 @@ describe("mounted Workstream sidebar", () => {
     expect(html).toContain("Alpha");
     expect(html).toContain("Actions for Alpha");
     expect(html).toContain('draggable="true"');
+    expect(html).toContain(
+      "Thread placement lookup scope is partial (1,000 of 20,000 identities selected).",
+    );
   });
 });

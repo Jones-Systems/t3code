@@ -1,5 +1,6 @@
 import {
   EnvironmentHttpConflictError,
+  T3_PLACEMENT_MAX_REQUEST_BYTES,
   type WorkstreamDetail,
   type WorkstreamReadContext,
 } from "@t3tools/contracts";
@@ -8,7 +9,9 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   loadCompleteWorkstreamDetail,
   loadCompleteWorkstreamList,
+  nativePlacementInventory,
   nativePlacementInventoryJson,
+  reuseNativePlacementIdentitySnapshot,
   type WorkstreamDetailLoaders,
 } from "./workstreams";
 
@@ -82,14 +85,96 @@ describe("complete Workstream list loading", () => {
         [...threads].reverse().map((value) => ({ ...value, title: "changed" })),
       ),
     ).toBe(inventory);
+    const excessThreads = Array.from({ length: 20_000 }, (_, i) => ({
+      environmentId: "env",
+      id: String(i),
+    }));
+    const excessInventory = nativePlacementInventory(excessThreads);
+    expect(excessInventory.identities).toHaveLength(1_000);
+    expect(excessInventory.totalIdentities).toBe(20_000);
+    expect(excessInventory.coverage).toBe("partial");
+    expect(nativePlacementInventory([...excessThreads].reverse())).toEqual(excessInventory);
+    expect(nativePlacementInventory(threads).coverage).toBe("complete");
+
+    const byteBoundInventory = nativePlacementInventory(
+      Array.from({ length: 900 }, (_, i) => ({
+        environmentId: `environment-${String(i).padStart(3, "0")}`,
+        id: `${String(i).padStart(3, "0")}-${"x".repeat(508)}`,
+      })),
+    );
+    expect(byteBoundInventory.identities.length).toBeLessThan(900);
+    expect(byteBoundInventory.coverage).toBe("partial");
     expect(
-      JSON.parse(
-        nativePlacementInventoryJson(
-          Array.from({ length: 20_000 }, (_, i) => ({ environmentId: "env", id: String(i) })),
-        ),
-      ),
-    ).toHaveLength(1001);
+      new TextEncoder().encode(JSON.stringify({ identities: byteBoundInventory.identities }))
+        .byteLength,
+    ).toBeLessThanOrEqual(T3_PLACEMENT_MAX_REQUEST_BYTES);
+    const nextIdentity = {
+      source_instance_id: `environment-${String(byteBoundInventory.identities.length).padStart(3, "0")}`,
+      native_thread_id: `${String(byteBoundInventory.identities.length).padStart(3, "0")}-${"x".repeat(508)}`,
+    };
+    expect(
+      new TextEncoder().encode(
+        JSON.stringify({ identities: [...byteBoundInventory.identities, nextIdentity] }),
+      ).byteLength,
+    ).toBeGreaterThan(T3_PLACEMENT_MAX_REQUEST_BYTES);
   });
+
+  it("keeps a deterministic 1,000-identity selection for a large reversed inventory", () => {
+    const threads = Array.from({ length: 100_001 }, (_, index) => ({
+      environmentId: `environment-${String(index % 7).padStart(2, "0")}`,
+      id: `thread-${String(index).padStart(6, "0")}`,
+    }));
+    const inventory = nativePlacementInventory([...threads].reverse());
+    const ordered = nativePlacementInventory(threads);
+
+    expect(inventory).toEqual(ordered);
+    expect(inventory.identities).toHaveLength(1_000);
+    expect(inventory.totalIdentities).toBe(100_001);
+    expect(inventory.coverage).toBe("partial");
+  });
+
+  it("never sorts more placement candidates than the identity cap", () => {
+    const originalSort = Array.prototype.sort;
+    const sortedLengths: number[] = [];
+    const sort = vi.spyOn(Array.prototype, "sort").mockImplementation(function (
+      this: unknown[],
+      compareFn?: (a: unknown, b: unknown) => number,
+    ) {
+      sortedLengths.push(this.length);
+      if (this.length > 1_000) throw new Error(`sorted ${this.length} placement candidates`);
+      return originalSort.call(this, compareFn);
+    });
+
+    try {
+      const inventory = nativePlacementInventory(
+        Array.from({ length: 20_000 }, (_, index) => ({
+          environmentId: "environment",
+          id: String(20_000 - index),
+        })),
+      );
+      expect(inventory.totalIdentities).toBe(20_000);
+      expect(inventory.identities).toHaveLength(1_000);
+      expect(sortedLengths).toEqual([1_000]);
+    } finally {
+      sort.mockRestore();
+    }
+  });
+
+  it("reuses a large placement identity snapshot until identity membership changes", () => {
+    const original = Array.from({ length: 100_001 }, (_, index) => ({
+      environmentId: `environment-${index % 7}`,
+      id: `thread-${index}`,
+      activeAt: 1,
+    }));
+    const minuteTick = original.map((thread) => ({ ...thread, activeAt: 2 }));
+    const changed = minuteTick.map((thread, index) =>
+      index === minuteTick.length - 1 ? { ...thread, id: "replacement-thread" } : thread,
+    );
+
+    expect(reuseNativePlacementIdentitySnapshot(original, minuteTick)).toBe(original);
+    expect(reuseNativePlacementIdentitySnapshot(original, changed)).toBe(changed);
+  });
+
   it("loads across page boundaries before exposing an owner list", async () => {
     const cursors: Array<string | undefined> = [];
     const result = await loadCompleteWorkstreamList(async (cursor) => {
@@ -119,6 +204,29 @@ describe("complete Workstream list loading", () => {
         };
       }),
     ).rejects.toThrow("later-page-conflict");
+  });
+
+  it("does not request another page after cancellation", async () => {
+    const controller = new AbortController();
+    const cancelled = new Error("list-cancelled");
+    const cursors: Array<string | undefined> = [];
+    await expect(
+      loadCompleteWorkstreamList(
+        async (cursor) => {
+          cursors.push(cursor);
+          controller.abort(cancelled);
+          return {
+            binding,
+            items: [],
+            nextCursor: "must-not-load",
+            source: "live" as const,
+            stale: false,
+          };
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(cancelled);
+    expect(cursors).toEqual([undefined]);
   });
 
   it("restarts a stale page sequence with bounded backoff before exposing data", async () => {
@@ -172,9 +280,63 @@ describe("complete Workstream list loading", () => {
     expect(firstPages).toBe(3);
     expect(wait.mock.calls).toEqual([[50], [100]]);
   });
+
+  it("interrupts cursor backoff without starting another attempt", async () => {
+    const controller = new AbortController();
+    const cancelled = new Error("retry-cancelled");
+    const load = vi.fn(async () => {
+      throw new EnvironmentHttpConflictError({ message: "workstream_cursor_stale" });
+    });
+    const wait = vi.fn(async (_delayMs: number, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      controller.abort(cancelled);
+    });
+
+    await expect(
+      loadCompleteWorkstreamList(load, { signal: controller.signal, wait }),
+    ).rejects.toBe(cancelled);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(wait).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("complete Workstream detail loading", () => {
+  it("interrupts every parallel detail branch", async () => {
+    const controller = new AbortController();
+    const cancelled = new Error("detail-cancelled");
+    const calls = detailCalls();
+    const pending = <A>(name: keyof WorkstreamDetailLoaders): Promise<A> => {
+      calls[name].push(undefined);
+      return new Promise<A>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), {
+          once: true,
+        });
+      });
+    };
+    const loaders: WorkstreamDetailLoaders = {
+      detail: () => pending("detail"),
+      memberships: () => pending("memberships"),
+      declarations: () => pending("declarations"),
+      edges: () => pending("edges"),
+      history: () => pending("history"),
+      references: () => pending("references"),
+    };
+    const result = loadCompleteWorkstreamDetail(loaders, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(cancelled);
+
+    await expect(result).rejects.toBe(cancelled);
+    for (const name of [
+      "detail",
+      "memberships",
+      "declarations",
+      "edges",
+      "history",
+      "references",
+    ] as const)
+      expect(calls[name]).toHaveLength(1);
+  });
+
   it("restarts every detail component when a later page becomes stale", async () => {
     const calls = detailCalls();
     const wait = vi.fn(async () => undefined);
