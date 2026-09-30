@@ -41,6 +41,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Stream from "effect/Stream";
+import * as NodeCrypto from "node:crypto";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import * as ServerConfig from "../../config.ts";
@@ -251,6 +252,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const timedOutNativeCompactions = new Set<ThreadId>();
+  const pendingRecoveryEvents = new Map<string, ProviderRuntimeEvent[]>();
   const settleCompaction = (threadId: ThreadId, pending: PendingCompaction, terminal: string) =>
     Effect.gen(function* () {
       if (pendingCompactions.get(threadId) !== pending) return false;
@@ -309,7 +311,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
 
-  const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
+  const publishRuntimeEventUnbuffered = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
@@ -319,6 +321,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
       Effect.asVoid,
     );
+  const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const pending =
+      event.runtimeGeneration !== undefined
+        ? pendingRecoveryEvents.get(event.runtimeGeneration)
+        : undefined;
+    if (pending !== undefined) {
+      pending.push(event);
+      return Effect.void;
+    }
+    return publishRuntimeEventUnbuffered(event);
+  };
 
   const isCompactedEvent = (
     event: ProviderRuntimeEvent,
@@ -573,11 +586,31 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const recoveredAt = yield* nowIso;
+      const runtimeGeneration = `${recoveredAt}:${NodeCrypto.randomUUID()}`;
+      const recoveryBoundary = {
+        type: "session.started",
+        eventId: EventId.make(NodeCrypto.randomUUID()),
+        provider: adapter.provider,
+        providerInstanceId: bindingInstanceId,
+        runtimeGeneration,
+        threadId: input.binding.threadId,
+        createdAt: recoveredAt,
+        payload: { resume: input.binding.resumeCursor },
+        raw: {
+          source: "t3.provider-service.recovery",
+          method: "session/recovered",
+          payload: {},
+        },
+      } satisfies ProviderRuntimeEvent;
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      const bufferedEvents: ProviderRuntimeEvent[] = [];
+      pendingRecoveryEvents.set(runtimeGeneration, bufferedEvents);
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
+          runtimeGeneration,
           provider: input.binding.provider,
           providerInstanceId: bindingInstanceId,
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
@@ -585,14 +618,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
         })
-        .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
+        .pipe(
+          Effect.onError(() =>
+            Effect.sync(() => pendingRecoveryEvents.delete(runtimeGeneration)).pipe(
+              Effect.andThen(clearMcpSession(input.binding.threadId)),
+            ),
+          ),
+        );
       if (resumed.provider !== adapter.provider) {
+        pendingRecoveryEvents.delete(runtimeGeneration);
         yield* clearMcpSession(input.binding.threadId);
         return yield* toValidationError(
           input.operation,
           `Adapter/provider mismatch while recovering thread '${input.binding.threadId}'. Expected '${adapter.provider}', received '${resumed.provider}'.`,
         );
       }
+
+      yield* Effect.gen(function* () {
+        yield* publishRuntimeEventUnbuffered(recoveryBoundary);
+        for (let index = 0; index < bufferedEvents.length; index += 1) {
+          yield* publishRuntimeEventUnbuffered(bufferedEvents[index]!);
+        }
+      }).pipe(Effect.ensuring(Effect.sync(() => pendingRecoveryEvents.delete(runtimeGeneration))));
 
       yield* upsertSessionBinding(
         { ...resumed, providerInstanceId: bindingInstanceId },

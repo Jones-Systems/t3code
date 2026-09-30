@@ -1350,6 +1350,19 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           },
         });
 
+        yield* harness.waitForReceipt(
+          (receipt): receipt is CheckpointDiffFinalizedReceipt =>
+            receipt.type === "checkpoint.diff.finalized" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 1,
+        );
+        yield* harness.waitForReceipt(
+          (receipt): receipt is TurnProcessingQuiescedReceipt =>
+            receipt.type === "turn.processing.quiesced" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 1,
+        );
+
         yield* harness.waitForThread(
           THREAD_ID,
           (entry) =>
