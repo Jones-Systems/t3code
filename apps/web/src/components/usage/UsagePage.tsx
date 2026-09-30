@@ -64,16 +64,20 @@ export function UsagePage() {
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageMetric>("cost");
-  const [providerSelection, setProviderSelection] = useState<UsageProviderSelection>("all");
+  const [providerSelection, setProviderSelection] = useState<UsageProviderSelection[]>(["all"]);
   const showingLimits = metric === "limits";
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
   const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(new Set());
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, isPending, isPartial, refresh } = useUsage(
-    window,
-    providerSelection === "all" ? undefined : providerSelection,
+  const providerFilter = useMemo(
+    () =>
+      providerSelection.includes("all")
+        ? undefined
+        : PROVIDER_ORDER.filter((provider) => providerSelection.includes(provider)),
+    [providerSelection],
   );
+  const { merged, environments, isPending, isPartial, refresh } = useUsage(window, providerFilter);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
@@ -117,6 +121,9 @@ export function UsagePage() {
     (total, provider) => total + provider.unpricedRecords,
     0,
   );
+  const selectProviders = (next: readonly string[]) => {
+    setProviderSelection((current) => normalizeProviderSelection(current, next));
+  };
 
   const selectWindow = (days: number) => {
     setWindowSelection({
@@ -165,7 +172,14 @@ export function UsagePage() {
           </>
         )}
       </WorkspaceBreadcrumb>
-      <div className="ms-auto hidden min-w-0 items-center justify-end gap-2 lg:flex">
+      <div className="ms-auto hidden min-w-0 items-center justify-end gap-2 xl:flex">
+        {showingLimits ? null : (
+          <UsageProviderSelect
+            selection={providerSelection}
+            compact={false}
+            onSelectionChange={selectProviders}
+          />
+        )}
         <ToggleGroup
           aria-label="Usage metric"
           variant="segmented"
@@ -208,7 +222,14 @@ export function UsagePage() {
           <RefreshCwIcon className="size-3.5" />
         </Button>
       </div>
-      <div className="ms-auto flex min-w-0 items-center justify-end gap-1 lg:hidden">
+      <div className="ms-auto flex min-w-0 items-center justify-end gap-0.5 xl:hidden">
+        {showingLimits ? null : (
+          <UsageProviderSelect
+            selection={providerSelection}
+            compact
+            onSelectionChange={selectProviders}
+          />
+        )}
         <Select
           value={metric}
           onValueChange={(value) => {
@@ -284,39 +305,6 @@ export function UsagePage() {
               </>
             ) : (
               <>
-                <div className="mb-5 flex justify-end">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">Provider</span>
-                    <Select
-                      value={providerSelection}
-                      onValueChange={(value) => {
-                        if (
-                          value === "all" ||
-                          PROVIDER_ORDER.includes(value as UsageProviderKind)
-                        ) {
-                          setProviderSelection(value as UsageProviderSelection);
-                        }
-                      }}
-                    >
-                      <SelectTrigger aria-label="Usage provider" size="sm" className="w-40">
-                        <SelectValue>
-                          {providerSelection === "all"
-                            ? "All providers"
-                            : PROVIDER_PRESENTATION[providerSelection].label}
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectPopup align="end" alignItemWithTrigger={false}>
-                        <SelectItem value="all">All providers</SelectItem>
-                        {PROVIDER_ORDER.map((provider) => (
-                          <SelectItem key={provider} value={provider}>
-                            {PROVIDER_PRESENTATION[provider].label}
-                          </SelectItem>
-                        ))}
-                      </SelectPopup>
-                    </Select>
-                  </div>
-                </div>
-
                 <UsageCoverageNotice
                   environments={environments}
                   duplicateSources={merged.duplicateSources}
@@ -404,13 +392,25 @@ export function UsagePage() {
 
                 <section className="flex flex-col gap-2">
                   <h2 className="text-sm font-medium text-foreground">Totals</h2>
-                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-6">
                     <Metric label="Processed tokens" value={formatTokens(merged.totalTokens)} />
-                    <Metric label="Total input" value={formatTokens(totalInputTokens)} />
+                    <Metric label="Cached input" value={formatTokens(merged.cachedInputTokens)} />
                     <Metric
-                      label="Ordinary input"
+                      label="Uncached input"
                       value={formatTokens(merged.uncachedInputTokens)}
                     />
+                    <Metric label="Output" value={formatTokens(merged.outputTokens)} />
+                    <Metric
+                      label="Cache savings"
+                      value={formatUsd(merged.costQuality.cacheSavingsUsd)}
+                    />
+                    <Metric
+                      label="Cache percentage"
+                      value={formatInputShare(merged.cachedInputTokens, totalInputTokens)}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
+                    <Metric label="Total input" value={formatTokens(totalInputTokens)} />
                     <Metric
                       label="Cache reads"
                       value={formatTokens(merged.cachedInputTokens)}
@@ -421,15 +421,10 @@ export function UsagePage() {
                       value={formatTokens(merged.cacheCreationTokens)}
                       detail={`${formatInputShare(merged.cacheCreationTokens, totalInputTokens)} of input`}
                     />
-                    <Metric label="Output" value={formatTokens(merged.outputTokens)} />
                     <Metric
                       label="Reasoning output"
                       value={formatTokens(merged.reasoningTokens)}
                       detail="Subset of output"
-                    />
-                    <Metric
-                      label="Cache savings"
-                      value={formatUsd(merged.costQuality.cacheSavingsUsd)}
                     />
                     <Metric label="Unpriced records" value={formatCount(unpricedRecords)} />
                   </div>
@@ -615,6 +610,66 @@ function ProviderMark({
 }) {
   const Mark = PROVIDER_PRESENTATION[provider].mark;
   return <Mark className={cn("shrink-0", className)} aria-hidden />;
+}
+
+function UsageProviderSelect({
+  compact,
+  selection,
+  onSelectionChange,
+}: {
+  readonly compact: boolean;
+  readonly selection: UsageProviderSelection[];
+  readonly onSelectionChange: (next: readonly string[]) => void;
+}) {
+  return (
+    <Select
+      multiple
+      value={selection}
+      onValueChange={(next) =>
+        onSelectionChange(Array.isArray(next) ? next : next === null ? [] : [next])
+      }
+    >
+      <SelectTrigger
+        aria-label="Usage provider filter"
+        size={compact ? "compact" : "sm"}
+        variant={compact ? "ghost" : "default"}
+        className={compact ? "w-28 min-w-0" : "w-40"}
+      >
+        <SelectValue>{formatProviderSelection(selection)}</SelectValue>
+      </SelectTrigger>
+      <SelectPopup align="end" alignItemWithTrigger={false} className="min-w-40">
+        <SelectItem showCheck value="all">
+          All providers
+        </SelectItem>
+        {PROVIDER_ORDER.map((provider) => (
+          <SelectItem key={provider} showCheck value={provider}>
+            {PROVIDER_PRESENTATION[provider].label}
+          </SelectItem>
+        ))}
+      </SelectPopup>
+    </Select>
+  );
+}
+
+function formatProviderSelection(selection: readonly UsageProviderSelection[]): string {
+  if (selection.includes("all")) return "All providers";
+  const providers = PROVIDER_ORDER.filter((provider) => selection.includes(provider));
+  if (providers.length === 1) {
+    const provider = providers[0];
+    return provider === undefined ? "All providers" : PROVIDER_PRESENTATION[provider].label;
+  }
+  return providers.length > 1 ? `${providers.length} providers` : "All providers";
+}
+
+function normalizeProviderSelection(
+  current: readonly UsageProviderSelection[],
+  next: readonly string[],
+): UsageProviderSelection[] {
+  const selectedProviders = PROVIDER_ORDER.filter((provider) => next.includes(provider));
+  if (current.includes("all")) {
+    return selectedProviders.length > 0 ? selectedProviders : ["all"];
+  }
+  return next.includes("all") || selectedProviders.length === 0 ? ["all"] : selectedProviders;
 }
 
 function ModelBreakdownButton({
@@ -850,16 +905,27 @@ function UsageSkeleton() {
 
       <section className="flex flex-col gap-2">
         <h2 className="text-sm font-medium text-foreground">Totals</h2>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-6">
           {[
             "Processed tokens",
+            "Cached input",
+            "Uncached input",
+            "Output",
+            "Cache savings",
+            "Cache percentage",
+          ].map((label) => (
+            <div key={label} className="flex flex-col gap-0.5">
+              <span className="text-xs text-muted-foreground">{label}</span>
+              <Skeleton className="h-6 w-16" />
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
+          {[
             "Total input",
-            "Ordinary input",
             "Cache reads",
             "Cache writes",
-            "Output",
             "Reasoning output",
-            "Cache savings",
             "Unpriced records",
           ].map((label) => (
             <div key={label} className="flex flex-col gap-0.5">

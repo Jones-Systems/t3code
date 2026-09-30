@@ -5,12 +5,13 @@ environments. It reads the providers' local session history and shows API-equiva
 processed tokens, cache savings, provider shares, and model breakdowns. Subscription billing is
 separate from the raw token cost shown here.
 
-Use the provider selector to filter cost and token totals, charts, provider shares, and model/time
-breakdowns. Expand a model row to see ordinary input, cache reads and writes, total input, output,
-reasoning output, cache shares, record counts, cache savings, and unpriced records. Cache read and
-write percentages use total input (ordinary input + cache reads + cache writes); reasoning output
-is included in output. These details use reported token counts, and providers may omit cache-write
-or reasoning details. The Limits view remains a separate live quota view.
+Select one or more providers to filter cost and token totals, charts, provider shares, and
+model/time breakdowns. Choose **All providers** to return to the combined view. Expand a model row
+to see ordinary input, cache reads and writes, total input, output, reasoning output, cache shares,
+record counts, cache savings, and unpriced records. Cache read and write percentages use total
+input (ordinary input + cache reads + cache writes); reasoning output is included in output. These
+details use reported token counts, and providers may omit cache-write or reasoning details. The
+Limits view remains a separate live quota view.
 
 Grok Build totals come from persisted session updates. Interactive turns that never wrote a
 completed-turn record will not appear.

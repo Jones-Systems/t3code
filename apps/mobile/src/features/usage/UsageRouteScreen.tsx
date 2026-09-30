@@ -1,3 +1,4 @@
+import type { MenuAction } from "@react-native-menu/menu";
 import { useNavigation } from "@react-navigation/native";
 import type { UsageProviderKind } from "@t3tools/contracts";
 import type { DailyTotals, MergedUsage } from "@t3tools/shared/usageMerge";
@@ -17,14 +18,16 @@ import { Platform, Pressable, RefreshControl, ScrollView, View } from "react-nat
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
+import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
+import { ControlPillMenu } from "../../components/ControlPill";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
 import { UsageLimitsSection } from "./UsageLimitsSection";
 import type { UsageChartMetric } from "./usageChartData";
-import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
+import { PROVIDER_LABEL, PROVIDER_ORDER, useProviderColors } from "./usageProviders";
 
 const WINDOW_OPTIONS = [
   { days: 1, label: "Past 24h" },
@@ -33,14 +36,10 @@ const WINDOW_OPTIONS = [
   { days: 90, label: "90 days" },
 ] as const;
 
-const PROVIDER_OPTIONS = [
-  { value: "all", label: "All" },
-  { value: "codex", label: "Codex" },
-  { value: "claude", label: "Claude Code" },
-  { value: "grok", label: "Grok Build" },
-] as const;
-
-type UsageProviderSelection = "all" | UsageProviderKind;
+const PROVIDER_FILTER_OPTIONS = PROVIDER_ORDER.map((provider) => ({
+  provider,
+  label: PROVIDER_LABEL[provider],
+}));
 
 const CHART_HEIGHT = 180;
 
@@ -52,13 +51,62 @@ export function UsageRouteScreen() {
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
-  const [providerSelection, setProviderSelection] = useState<UsageProviderSelection>("all");
+  const [selectedProviders, setSelectedProviders] = useState<readonly UsageProviderKind[] | null>(
+    null,
+  );
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, isPartial, refresh } = useUsage(
     window,
-    providerSelection === "all" ? undefined : providerSelection,
+    selectedProviders ?? undefined,
   );
+  const providerFilterActions = useMemo<MenuAction[]>(
+    () => [
+      {
+        id: "providers:all",
+        title: "All providers",
+        subtitle: "Include every provider",
+        state: selectedProviders === null ? "on" : "off",
+      },
+      ...PROVIDER_FILTER_OPTIONS.map(({ provider, label }) => ({
+        id: `provider:${provider}`,
+        title: label,
+        state: selectedProviders?.includes(provider) ? ("on" as const) : ("off" as const),
+      })),
+    ],
+    [selectedProviders],
+  );
+  const providerSelectionLabel =
+    selectedProviders === null
+      ? "All providers"
+      : PROVIDER_FILTER_OPTIONS.filter(({ provider }) => selectedProviders.includes(provider))
+          .map(({ label }) => label)
+          .join(" · ");
+  const providerSelectionCount =
+    selectedProviders === null ? "All" : `${selectedProviders.length} selected`;
+  const handleProviderFilterAction = ({
+    nativeEvent,
+  }: {
+    readonly nativeEvent: { readonly event: string };
+  }) => {
+    if (nativeEvent.event === "providers:all") {
+      setSelectedProviders(null);
+      return;
+    }
+
+    const selectedOption = PROVIDER_FILTER_OPTIONS.find(
+      ({ provider }) => nativeEvent.event === `provider:${provider}`,
+    );
+    if (!selectedOption) return;
+
+    setSelectedProviders((current) => {
+      const selected = current ?? [];
+      const next = selected.includes(selectedOption.provider)
+        ? selected.filter((provider) => provider !== selectedOption.provider)
+        : [...selected, selectedOption.provider];
+      return next.length === 0 ? null : next;
+    });
+  };
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -132,11 +180,34 @@ export function UsageRouteScreen() {
 
         <View className="gap-2">
           <Text className="text-sm text-foreground-muted">Provider</Text>
-          <SegmentedControl
-            options={PROVIDER_OPTIONS}
-            selected={providerSelection}
-            onSelect={setProviderSelection}
-          />
+          <ControlPillMenu
+            actions={providerFilterActions}
+            title="Provider filter"
+            onPressAction={handleProviderFilterAction}
+          >
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Provider filter: ${providerSelectionLabel}`}
+              accessibilityHint="Select all providers or toggle individual providers."
+              className="min-h-11 flex-row items-center justify-between gap-3 rounded-[16px] border-continuous bg-card px-4 py-2"
+            >
+              <Text
+                className="min-w-0 flex-1 text-base font-t3-medium text-foreground"
+                numberOfLines={1}
+              >
+                {providerSelectionLabel}
+              </Text>
+              <View className="flex-row items-center gap-2">
+                <Text className="text-sm text-foreground-muted">{providerSelectionCount}</Text>
+                <SymbolView
+                  name="chevron.down"
+                  size={14}
+                  tintColorClassName="accent-icon"
+                  type="monochrome"
+                />
+              </View>
+            </Pressable>
+          </ControlPillMenu>
         </View>
 
         <UsageCoverageNotice environments={environments} merged={merged} isPartial={isPartial} />
@@ -410,57 +481,91 @@ function TotalsSection(props: { readonly merged: MergedUsage; readonly isPast24H
     merged.uncachedInputTokens + merged.cachedInputTokens + merged.cacheCreationTokens;
 
   return (
-    <SettingsSection title="Totals" card>
-      <View className="flex-row flex-wrap">
-        <MetricCell
-          label="Processed tokens"
-          value={formatTokens(merged.totalTokens)}
-          detail={`${formatTokens(periodAverage)} per active ${props.isPast24Hours ? "hour" : "day"}`}
-        />
-        <MetricCell
-          label="Cache savings"
-          value={formatUsd(merged.costQuality.cacheSavingsUsd)}
-          detail={
-            merged.costUsd > 0
-              ? `${(merged.costQuality.cacheSavingsUsd / merged.costUsd).toFixed(1)}x the raw cost`
-              : "vs full input rates"
-          }
-        />
-        <MetricCell
-          label="Cached input"
-          value={formatTokens(merged.cachedInputTokens)}
-          detail={`${shareOf(merged.cachedInputTokens, totalInput)} of total input`}
-        />
-        <MetricCell
-          label="Cache writes"
-          value={formatTokens(merged.cacheCreationTokens)}
-          detail={`${shareOf(merged.cacheCreationTokens, totalInput)} of total input`}
-        />
-        <MetricCell
-          label="Uncached input"
-          value={formatTokens(merged.uncachedInputTokens)}
-          detail={`${shareOf(merged.uncachedInputTokens, totalInput)} of total input`}
-        />
-        <MetricCell
-          label="Output"
-          value={formatTokens(merged.outputTokens)}
-          detail="Reasoning is included in output."
-        />
-        <MetricCell
-          label="Reasoning"
-          value={formatTokens(merged.reasoningTokens)}
-          detail={`${shareOf(merged.reasoningTokens, merged.outputTokens)} of output`}
-        />
-        <MetricCell
-          label="Unpriced"
-          value={merged.records === 0 ? "—" : formatPercent(merged.costQuality.unpricedShare)}
-          detail="of records, excluded from cost"
-        />
-      </View>
-      <Text className="px-4 pb-4 text-xs text-foreground-tertiary">
-        Reported token counts may omit cache write or reasoning fields.
-      </Text>
-    </SettingsSection>
+    <>
+      <SettingsSection title="Totals" card>
+        <View className="flex-row flex-wrap">
+          <MetricCell
+            label="Processed tokens"
+            value={formatTokens(merged.totalTokens)}
+            detail={`${formatTokens(periodAverage)} per active ${props.isPast24Hours ? "hour" : "day"}`}
+          />
+          <MetricCell
+            label="Cache savings"
+            value={formatUsd(merged.costQuality.cacheSavingsUsd)}
+            detail={
+              merged.costUsd > 0
+                ? `${(merged.costQuality.cacheSavingsUsd / merged.costUsd).toFixed(1)}x the raw cost`
+                : "vs full input rates"
+            }
+          />
+          <MetricCell
+            label="Cached input"
+            value={formatTokens(merged.cachedInputTokens)}
+            detail={`${shareOf(merged.cachedInputTokens, totalInput)} of total input`}
+          />
+          <MetricCell
+            label="Cache percentage"
+            value={shareOf(merged.cachedInputTokens, totalInput)}
+            detail="of total input tokens"
+          />
+          <MetricCell
+            label="Uncached input"
+            value={formatTokens(merged.uncachedInputTokens)}
+            detail={`${formatTokens(merged.cacheCreationTokens)} cache writes`}
+          />
+          <MetricCell
+            label="Output"
+            value={formatTokens(merged.outputTokens)}
+            detail={`incl. ${formatTokens(merged.reasoningTokens)} reasoning`}
+          />
+          <MetricCell
+            label="Unpriced"
+            value={merged.records === 0 ? "—" : formatPercent(merged.costQuality.unpricedShare)}
+            detail="of records, excluded from cost"
+          />
+        </View>
+      </SettingsSection>
+
+      <SettingsSection title="Token and pricing detail" card>
+        <View className="flex-row flex-wrap">
+          <MetricCell
+            label="Cache reads"
+            value={formatTokens(merged.cachedInputTokens)}
+            detail={`${shareOf(merged.cachedInputTokens, totalInput)} of total input`}
+          />
+          <MetricCell
+            label="Cache writes"
+            value={formatTokens(merged.cacheCreationTokens)}
+            detail={`${shareOf(merged.cacheCreationTokens, totalInput)} of total input`}
+          />
+          <MetricCell
+            label="Reasoning"
+            value={formatTokens(merged.reasoningTokens)}
+            detail={`${shareOf(merged.reasoningTokens, merged.outputTokens)} of output · subset`}
+          />
+          <MetricCell
+            label="Provider-reported"
+            value={
+              merged.records === 0 ? "—" : formatPercent(merged.costQuality.providerReportedShare)
+            }
+            detail="of records priced from provider reports"
+          />
+          <MetricCell
+            label="Model-rate priced"
+            value={merged.records === 0 ? "—" : formatPercent(merged.costQuality.modelPricedShare)}
+            detail="of records priced from model rates"
+          />
+          <MetricCell
+            label="Unpriced records"
+            value={merged.records === 0 ? "—" : formatPercent(merged.costQuality.unpricedShare)}
+            detail="of records excluded from cost"
+          />
+        </View>
+        <Text className="px-4 pb-4 text-xs text-foreground-tertiary">
+          Reported token counts may omit cache write or reasoning fields.
+        </Text>
+      </SettingsSection>
+    </>
   );
 }
 

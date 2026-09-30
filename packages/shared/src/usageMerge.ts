@@ -16,6 +16,8 @@ import {
   type UsageTokenTotals,
 } from "@t3tools/contracts";
 
+export type UsageProviderFilter = UsageProviderKind | readonly UsageProviderKind[];
+
 export interface EnvironmentUsage {
   readonly environmentId: EnvironmentId;
   readonly label: string;
@@ -147,7 +149,7 @@ function claimSources(environments: readonly EnvironmentUsage[]): {
 function ownedContribution(
   environment: EnvironmentUsage,
   ownerByFingerprint: ReadonlyMap<string, EnvironmentId>,
-  providerFilter?: UsageProviderKind,
+  providerFilter?: UsageProviderFilter,
 ): {
   readonly buckets: readonly UsageBucket[];
   readonly sessionsByProvider: ReadonlyMap<UsageProviderKind, number>;
@@ -159,7 +161,14 @@ function ownedContribution(
     const key = fingerprintKey(source.fingerprint);
     if (ownerByFingerprint.get(key) === environment.environmentId) {
       const provider = source.fingerprint.provider;
-      if (providerFilter !== undefined && provider !== providerFilter) continue;
+      if (
+        providerFilter !== undefined &&
+        (typeof providerFilter === "string"
+          ? providerFilter !== provider
+          : !providerFilter.includes(provider))
+      ) {
+        continue;
+      }
       ownedProviders.add(provider);
       // Distinct within a directory. Summing per-bucket session counts instead
       // would count a session once per day and model it spans.
@@ -244,13 +253,14 @@ const EMPTY_MERGED: MergedUsage = {
  * id is reported so the UI can say coverage is partial. Versions in
  * [{@link USAGE_MERGE_COMPATIBLE_SINCE}, expected] still merge, so an additive
  * provider expansion does not drop Claude/Codex totals from older servers.
- * When `providerFilter` is set, totals and sessions include only that provider
- * after source ownership is resolved.
+ * `providerFilter` accepts one provider or a selection. Undefined includes all
+ * providers, and an empty selection includes none. Selection is applied after
+ * source ownership is resolved.
  */
 export function mergeUsage(
   environments: readonly EnvironmentUsage[],
   expectedContractVersion: number,
-  providerFilter?: UsageProviderKind,
+  providerFilter?: UsageProviderFilter,
 ): MergedUsage {
   if (environments.length === 0) return EMPTY_MERGED;
 

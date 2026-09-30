@@ -149,6 +149,12 @@ beforeEach(() => {
   testState.useUsage.mockReturnValue({
     merged: {
       ...mergeUsage([], USAGE_CONTRACT_VERSION),
+      uncachedInputTokens: 70,
+      cachedInputTokens: 20,
+      cacheCreationTokens: 10,
+      outputTokens: 100,
+      reasoningTokens: 30,
+      totalTokens: 200,
       models: modelTotals,
       hourly: [
         {
@@ -229,6 +235,7 @@ describe("UsagePage model breakdown", () => {
 
     expect(markup).toContain("20.0% of input");
     expect(markup).toContain("10.0% of input");
+    expect(markup).toMatch(/Cache percentage[\s\S]{0,180}20\.0%/);
     expect(markup).toContain("— of input");
     expect(markup).toContain("30");
     expect(markup).toContain("Subset of output");
