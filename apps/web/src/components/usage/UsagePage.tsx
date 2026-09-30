@@ -1,8 +1,8 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
-import { CheckIcon, RefreshCwIcon, XIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, RefreshCwIcon, XIcon } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
 
-import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
+import type { DailyTotals, HourlyTotals, ModelTotals } from "@t3tools/shared/usageMerge";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
@@ -40,6 +40,7 @@ import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart"
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
 
 type UsageMetric = UsageChartMetric | "limits";
+type UsageProviderSelection = "all" | UsageProviderKind;
 const METRIC_OPTIONS = [
   { value: "cost", label: "Cost" },
   { value: "tokens", label: "Tokens" },
@@ -63,19 +64,23 @@ export function UsagePage() {
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageMetric>("cost");
+  const [providerSelection, setProviderSelection] = useState<UsageProviderSelection>("all");
   const showingLimits = metric === "limits";
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
+  const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(new Set());
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+  const { merged, environments, isPending, isPartial, refresh } = useUsage(
+    window,
+    providerSelection === "all" ? undefined : providerSelection,
+  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
 
-  // Hold the content until every environment is terminal. Rendering merged
-  // totals while devices are still answering makes every number on the page
-  // jump as each one lands.
+  // Hold totals and charts until every environment is terminal. Rendering
+  // merged numbers while devices are still answering makes each value jump.
   const settling = isPending || isPartial;
 
   const days = useMemo(
@@ -106,6 +111,12 @@ export function UsagePage() {
   );
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
   const timeValueColumnWidth = `${60 / (activeProviders.length + 2)}%`;
+  const totalInputTokens =
+    merged.uncachedInputTokens + merged.cachedInputTokens + merged.cacheCreationTokens;
+  const unpricedRecords = merged.providers.reduce(
+    (total, provider) => total + provider.unpricedRecords,
+    0,
+  );
 
   const selectWindow = (days: number) => {
     setWindowSelection({
@@ -273,6 +284,39 @@ export function UsagePage() {
               </>
             ) : (
               <>
+                <div className="mb-5 flex justify-end">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Provider</span>
+                    <Select
+                      value={providerSelection}
+                      onValueChange={(value) => {
+                        if (
+                          value === "all" ||
+                          PROVIDER_ORDER.includes(value as UsageProviderKind)
+                        ) {
+                          setProviderSelection(value as UsageProviderSelection);
+                        }
+                      }}
+                    >
+                      <SelectTrigger aria-label="Usage provider" size="sm" className="w-40">
+                        <SelectValue>
+                          {providerSelection === "all"
+                            ? "All providers"
+                            : PROVIDER_PRESENTATION[providerSelection].label}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectPopup align="end" alignItemWithTrigger={false}>
+                        <SelectItem value="all">All providers</SelectItem>
+                        {PROVIDER_ORDER.map((provider) => (
+                          <SelectItem key={provider} value={provider}>
+                            {PROVIDER_PRESENTATION[provider].label}
+                          </SelectItem>
+                        ))}
+                      </SelectPopup>
+                    </Select>
+                  </div>
+                </div>
+
                 <UsageCoverageNotice
                   environments={environments}
                   duplicateSources={merged.duplicateSources}
@@ -360,19 +404,39 @@ export function UsagePage() {
 
                 <section className="flex flex-col gap-2">
                   <h2 className="text-sm font-medium text-foreground">Totals</h2>
-                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
                     <Metric label="Processed tokens" value={formatTokens(merged.totalTokens)} />
-                    <Metric label="Cached input" value={formatTokens(merged.cachedInputTokens)} />
+                    <Metric label="Total input" value={formatTokens(totalInputTokens)} />
                     <Metric
-                      label="Uncached input"
+                      label="Ordinary input"
                       value={formatTokens(merged.uncachedInputTokens)}
                     />
+                    <Metric
+                      label="Cache reads"
+                      value={formatTokens(merged.cachedInputTokens)}
+                      detail={`${formatInputShare(merged.cachedInputTokens, totalInputTokens)} of input`}
+                    />
+                    <Metric
+                      label="Cache writes"
+                      value={formatTokens(merged.cacheCreationTokens)}
+                      detail={`${formatInputShare(merged.cacheCreationTokens, totalInputTokens)} of input`}
+                    />
                     <Metric label="Output" value={formatTokens(merged.outputTokens)} />
+                    <Metric
+                      label="Reasoning output"
+                      value={formatTokens(merged.reasoningTokens)}
+                      detail="Subset of output"
+                    />
                     <Metric
                       label="Cache savings"
                       value={formatUsd(merged.costQuality.cacheSavingsUsd)}
                     />
+                    <Metric label="Unpriced records" value={formatCount(unpricedRecords)} />
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    Based on reported token counts; providers may omit cache-write or reasoning
+                    details.
+                  </p>
                 </section>
 
                 <section className="flex flex-col gap-3">
@@ -424,28 +488,47 @@ export function UsagePage() {
                             </td>
                           </tr>
                         ) : (
-                          breakdownModels.map((model) => (
-                            <tr
-                              key={`${model.provider}:${model.model}`}
-                              className="border-b border-border/50 transition-colors hover:bg-muted/50"
-                            >
-                              <td className="py-2 text-foreground">
-                                <span className="flex items-center gap-2">
-                                  <ProviderMark provider={model.provider} className="size-3.5" />
-                                  {model.model}
-                                </span>
-                              </td>
-                              <td className="py-2 text-right text-foreground tabular-nums">
-                                {formatUsd(model.costUsd)}
-                              </td>
-                              <td className="py-2 text-right text-muted-foreground tabular-nums">
-                                {formatPercent(model.costShare)}
-                              </td>
-                              <td className="py-2 text-right text-muted-foreground tabular-nums">
-                                {formatTokens(model.totalTokens)}
-                              </td>
-                            </tr>
-                          ))
+                          breakdownModels.map((model) => {
+                            const key = `${model.provider}:${model.model}`;
+                            const expanded = expandedModels.has(key);
+                            return (
+                              <Fragment key={key}>
+                                <tr className="border-b border-border/50 transition-colors hover:bg-muted/50">
+                                  <td className="py-2 text-foreground">
+                                    <ModelBreakdownButton
+                                      expanded={expanded}
+                                      model={model.model}
+                                      provider={model.provider}
+                                      onClick={() => {
+                                        setExpandedModels((current) => {
+                                          const next = new Set(current);
+                                          if (next.has(key)) next.delete(key);
+                                          else next.add(key);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                  </td>
+                                  <td className="py-2 text-right text-foreground tabular-nums">
+                                    {formatUsd(model.costUsd)}
+                                  </td>
+                                  <td className="py-2 text-right text-muted-foreground tabular-nums">
+                                    {formatPercent(model.costShare)}
+                                  </td>
+                                  <td className="py-2 text-right text-muted-foreground tabular-nums">
+                                    {formatTokens(model.totalTokens)}
+                                  </td>
+                                </tr>
+                                {expanded ? (
+                                  <tr className="border-b border-border/50 bg-muted/20">
+                                    <td colSpan={4} className="px-3 py-3">
+                                      <ModelUsageDetails model={model} />
+                                    </td>
+                                  </tr>
+                                ) : null}
+                              </Fragment>
+                            );
+                          })
                         )}
                       </tbody>
                     </table>
@@ -534,11 +617,96 @@ function ProviderMark({
   return <Mark className={cn("shrink-0", className)} aria-hidden />;
 }
 
-function Metric({ label, value }: { readonly label: string; readonly value: string }) {
+function ModelBreakdownButton({
+  expanded,
+  model,
+  provider,
+  onClick,
+}: {
+  readonly expanded: boolean;
+  readonly model: string;
+  readonly provider: UsageProviderKind;
+  readonly onClick: () => void;
+}) {
+  const ChevronIcon = expanded ? ChevronDownIcon : ChevronRightIcon;
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      aria-label={`${expanded ? "Hide" : "Show"} details for ${PROVIDER_PRESENTATION[provider].label} ${model}`}
+      onClick={onClick}
+      className="flex min-w-0 items-center gap-2 rounded-sm text-left outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/70"
+    >
+      <ChevronIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+      <ProviderMark provider={provider} className="size-3.5" />
+      <span className="truncate">{model}</span>
+    </button>
+  );
+}
+
+function ModelUsageDetails({ model }: { readonly model: ModelTotals }) {
+  const totalInputTokens =
+    model.totals.uncachedInputTokens +
+    model.totals.cachedInputTokens +
+    model.totals.cacheCreationTokens;
+  const recordLabel = model.records === 1 ? "record" : "records";
+  const unpricedRecordLabel = model.unpricedRecords === 1 ? "record" : "records";
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
+        <Metric label="Ordinary input" value={formatTokens(model.totals.uncachedInputTokens)} />
+        <Metric
+          label="Cache reads"
+          value={formatTokens(model.totals.cachedInputTokens)}
+          detail={`${formatInputShare(model.totals.cachedInputTokens, totalInputTokens)} of input`}
+        />
+        <Metric
+          label="Cache writes"
+          value={formatTokens(model.totals.cacheCreationTokens)}
+          detail={`${formatInputShare(model.totals.cacheCreationTokens, totalInputTokens)} of input`}
+        />
+        <Metric label="Total input" value={formatTokens(totalInputTokens)} />
+        <Metric label="Output" value={formatTokens(model.totals.outputTokens)} />
+        <Metric
+          label="Reasoning output"
+          value={formatTokens(model.totals.reasoningTokens)}
+          detail="Subset of output"
+        />
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-border/50 pt-2 text-xs text-muted-foreground">
+        <span>
+          {formatCount(model.records)} {recordLabel}
+        </span>
+        <span>{formatUsd(model.cacheSavingsUsd)} cache savings</span>
+        {model.unpricedRecords > 0 ? (
+          <span>
+            {formatCount(model.unpricedRecords)} unpriced {unpricedRecordLabel}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function formatInputShare(tokens: number, totalInputTokens: number): string {
+  return totalInputTokens === 0 ? "—" : formatPercent(tokens / totalInputTokens);
+}
+
+function Metric({
+  label,
+  value,
+  detail,
+}: {
+  readonly label: string;
+  readonly value: string;
+  readonly detail?: string;
+}) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="text-base font-medium text-foreground tabular-nums">{value}</span>
+      {detail ? <span className="text-xs text-muted-foreground">{detail}</span> : null}
     </div>
   );
 }
@@ -682,15 +850,23 @@ function UsageSkeleton() {
 
       <section className="flex flex-col gap-2">
         <h2 className="text-sm font-medium text-foreground">Totals</h2>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
-          {["Processed tokens", "Cached input", "Uncached input", "Output", "Cache savings"].map(
-            (label) => (
-              <div key={label} className="flex flex-col gap-0.5">
-                <span className="text-xs text-muted-foreground">{label}</span>
-                <Skeleton className="h-6 w-16" />
-              </div>
-            ),
-          )}
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
+          {[
+            "Processed tokens",
+            "Total input",
+            "Ordinary input",
+            "Cache reads",
+            "Cache writes",
+            "Output",
+            "Reasoning output",
+            "Cache savings",
+            "Unpriced records",
+          ].map((label) => (
+            <div key={label} className="flex flex-col gap-0.5">
+              <span className="text-xs text-muted-foreground">{label}</span>
+              <Skeleton className="h-6 w-16" />
+            </div>
+          ))}
         </div>
       </section>
 

@@ -338,4 +338,299 @@ describe("mergeUsage", () => {
     expect(merged.daily).toHaveLength(1);
     expect(merged.daily[0]?.costUsd).toBe(10);
   });
+
+  it("preserves token categories and weights provider and model shares by their totals", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [
+              bucket({
+                totals: {
+                  uncachedInputTokens: 10,
+                  cachedInputTokens: 20,
+                  cacheCreationTokens: 5,
+                  outputTokens: 35,
+                  reasoningTokens: 15,
+                },
+                costUsd: 20,
+                cacheSavingsUsd: 1.25,
+                records: 2,
+              }),
+              bucket({
+                model: "claude-opus-5",
+                totals: {
+                  uncachedInputTokens: 1,
+                  cachedInputTokens: 2,
+                  cacheCreationTokens: 0,
+                  outputTokens: 7,
+                  reasoningTokens: 3,
+                },
+                costUsd: 10,
+                cacheSavingsUsd: 0.75,
+                records: 1,
+              }),
+              bucket({
+                provider: "codex",
+                model: "gpt-5.6-sol",
+                totals: {
+                  uncachedInputTokens: 100,
+                  cachedInputTokens: 50,
+                  cacheCreationTokens: 25,
+                  outputTokens: 125,
+                  reasoningTokens: 75,
+                },
+                costUsd: 70,
+                cacheSavingsUsd: 3,
+                records: 7,
+                unpricedRecords: 2,
+              }),
+            ],
+            [
+              { provider: "claude", hostId: "mac", homePath: "/a/.claude" },
+              { provider: "codex", hostId: "mac", homePath: "/a/.codex" },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    const claude = merged.providers.find((provider) => provider.provider === "claude");
+    const codex = merged.providers.find((provider) => provider.provider === "codex");
+    const claudeFable = merged.models.find((model) => model.model === "claude-fable-5");
+    const claudeOpus = merged.models.find((model) => model.model === "claude-opus-5");
+    const codexGpt = merged.models.find((model) => model.model === "gpt-5.6-sol");
+
+    expect(merged.totalTokens).toBe(380);
+    expect(merged.reasoningTokens).toBe(93);
+    expect(claude).toMatchObject({
+      costUsd: 30,
+      cacheSavingsUsd: 2,
+      totals: {
+        uncachedInputTokens: 11,
+        cachedInputTokens: 22,
+        cacheCreationTokens: 5,
+        outputTokens: 42,
+        reasoningTokens: 18,
+      },
+      totalTokens: 80,
+      records: 3,
+      unpricedRecords: 0,
+      costShare: 0.3,
+    });
+    expect(claude?.tokenShare).toBeCloseTo(80 / 380, 5);
+    expect(codex).toMatchObject({
+      totalTokens: 300,
+      unpricedRecords: 2,
+      costShare: 0.7,
+    });
+    expect(codex?.tokenShare).toBeCloseTo(300 / 380, 5);
+    expect(claudeFable).toMatchObject({
+      costUsd: 20,
+      cacheSavingsUsd: 1.25,
+      totalTokens: 70,
+      costShare: 0.2,
+      totals: {
+        uncachedInputTokens: 10,
+        cachedInputTokens: 20,
+        cacheCreationTokens: 5,
+        outputTokens: 35,
+        reasoningTokens: 15,
+      },
+    });
+    expect(claudeOpus).toMatchObject({ costUsd: 10, totalTokens: 10, costShare: 0.1 });
+    expect(codexGpt).toMatchObject({
+      cacheSavingsUsd: 3,
+      totalTokens: 300,
+      unpricedRecords: 2,
+      totals: {
+        uncachedInputTokens: 100,
+        cachedInputTokens: 50,
+        cacheCreationTokens: 25,
+        outputTokens: 125,
+        reasoningTokens: 75,
+      },
+    });
+  });
+
+  it("filters every projection and recomputes shares from the selected provider", () => {
+    const environments = [
+      environment(
+        "env-a",
+        summary(
+          [
+            bucket({
+              day: "2026-08-07" as UsageDay,
+              hourStart: "2026-08-07T09:00:00.000Z",
+              totals: {
+                uncachedInputTokens: 10,
+                cachedInputTokens: 5,
+                cacheCreationTokens: 1,
+                outputTokens: 4,
+                reasoningTokens: 2,
+              },
+              costUsd: 6,
+              cacheSavingsUsd: 1,
+              records: 2,
+              unpricedRecords: 0,
+              costSource: "modelPriced",
+            }),
+            bucket({
+              day: "2026-08-08" as UsageDay,
+              hourStart: "2026-08-08T10:00:00.000Z",
+              model: "claude-opus-5",
+              totals: {
+                uncachedInputTokens: 1,
+                cachedInputTokens: 2,
+                cacheCreationTokens: 3,
+                outputTokens: 4,
+                reasoningTokens: 3,
+              },
+              costUsd: 4,
+              cacheSavingsUsd: 2,
+              records: 2,
+              unpricedRecords: 1,
+              costSource: "modelPriced",
+            }),
+            bucket({
+              day: "2026-08-09" as UsageDay,
+              hourStart: "2026-08-09T11:00:00.000Z",
+              provider: "codex",
+              model: "gpt-5.6-sol",
+              totals: {
+                uncachedInputTokens: 5,
+                cachedInputTokens: 6,
+                cacheCreationTokens: 7,
+                outputTokens: 8,
+                reasoningTokens: 4,
+              },
+              costUsd: 30,
+              cacheSavingsUsd: 9,
+              records: 3,
+              unpricedRecords: 0,
+              costSource: "providerReported",
+            }),
+          ],
+          [
+            { provider: "claude", hostId: "mac", homePath: "/a/.claude", distinctSessions: 2 },
+            { provider: "codex", hostId: "mac", homePath: "/a/.codex", distinctSessions: 4 },
+          ],
+        ),
+      ),
+      environment(
+        "env-stale",
+        summary(
+          [bucket({ provider: "grok", model: "grok-4" })],
+          [{ provider: "grok", hostId: "old", homePath: "/old/.grok" }],
+          USAGE_CONTRACT_VERSION - 2,
+        ),
+      ),
+    ];
+    const merged = mergeUsage(environments, USAGE_CONTRACT_VERSION, "claude");
+
+    expect(merged).toMatchObject({
+      costUsd: 10,
+      uncachedInputTokens: 11,
+      cachedInputTokens: 7,
+      cacheCreationTokens: 4,
+      outputTokens: 8,
+      reasoningTokens: 5,
+      totalTokens: 30,
+      records: 4,
+      sessions: 2,
+      staleEnvironments: ["env-stale"],
+    });
+    expect(merged.providers).toHaveLength(1);
+    expect(merged.providers[0]).toMatchObject({
+      provider: "claude",
+      costUsd: 10,
+      cacheSavingsUsd: 3,
+      totalTokens: 30,
+      records: 4,
+      unpricedRecords: 1,
+      sessions: 2,
+      costShare: 1,
+      tokenShare: 1,
+    });
+    expect(merged.models.map((model) => model.model)).toEqual(["claude-fable-5", "claude-opus-5"]);
+    expect(merged.models.map((model) => model.costShare)).toEqual([0.6, 0.4]);
+    expect(
+      merged.daily.map(({ day, costUsd, totalTokens }) => [day, costUsd, totalTokens]),
+    ).toEqual([
+      ["2026-08-07", 6, 20],
+      ["2026-08-08", 4, 10],
+    ]);
+    expect(merged.daily[0]?.byProvider.get("claude")).toEqual({ costUsd: 6, totalTokens: 20 });
+    expect(
+      merged.hourly.map(({ hourStart, costUsd, totalTokens }) => [hourStart, costUsd, totalTokens]),
+    ).toEqual([
+      ["2026-08-07T09:00:00.000Z", 6, 20],
+      ["2026-08-08T10:00:00.000Z", 4, 10],
+    ]);
+    expect(merged.hourly[0]?.byProvider.get("claude")).toEqual({ costUsd: 6, totalTokens: 20 });
+    expect(merged.costQuality).toEqual({
+      providerReportedShare: 0,
+      modelPricedShare: 0.75,
+      unpricedShare: 0.25,
+      cacheSavingsUsd: 3,
+    });
+  });
+
+  it("keeps duplicate ownership and diagnostics stable when filtering providers", () => {
+    const sharedClaude = {
+      provider: "claude" as const,
+      hostId: "mac",
+      homePath: "/home/theo/.claude",
+    };
+    const environments = [
+      environment(
+        "env-b",
+        summary(
+          [bucket({ costUsd: 90 }), bucket({ provider: "codex", costUsd: 4 })],
+          [sharedClaude, { provider: "codex", hostId: "mac", homePath: "/home/theo/.codex" }],
+        ),
+      ),
+      environment("env-a", summary([bucket({ costUsd: 10 })], [sharedClaude])),
+    ];
+    const merged = mergeUsage(environments, USAGE_CONTRACT_VERSION, "codex");
+    const reordered = mergeUsage(environments.toReversed(), USAGE_CONTRACT_VERSION, "codex");
+
+    expect(merged.costUsd).toBe(4);
+    expect(merged.providers.map((provider) => provider.provider)).toEqual(["codex"]);
+    expect(merged.contributingEnvironments).toEqual(["env-b"]);
+    expect(merged.duplicateSources).toEqual(["env-b: /home/theo/.claude"]);
+    expect(reordered.duplicateSources).toEqual(merged.duplicateSources);
+    expect(reordered.costUsd).toBe(merged.costUsd);
+    expect(reordered.contributingEnvironments).toEqual(merged.contributingEnvironments);
+  });
+
+  it("returns empty selected totals when no source reports that provider", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary([bucket()], [{ provider: "claude", hostId: "mac", homePath: "/a/.claude" }]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+      "grok",
+    );
+
+    expect(merged.costUsd).toBe(0);
+    expect(merged.totalTokens).toBe(0);
+    expect(merged.records).toBe(0);
+    expect(merged.sessions).toBe(0);
+    expect(merged.providers).toEqual([]);
+    expect(merged.models).toEqual([]);
+    expect(merged.daily).toEqual([]);
+    expect(merged.hourly).toEqual([]);
+    expect(merged.costQuality).toEqual({
+      providerReportedShare: 0,
+      modelPricedShare: 0,
+      unpricedShare: 0,
+      cacheSavingsUsd: 0,
+    });
+  });
 });

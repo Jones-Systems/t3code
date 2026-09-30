@@ -1,4 +1,5 @@
 import { useNavigation } from "@react-navigation/native";
+import type { UsageProviderKind } from "@t3tools/contracts";
 import type { DailyTotals, MergedUsage } from "@t3tools/shared/usageMerge";
 import {
   enumerateDays,
@@ -32,6 +33,15 @@ const WINDOW_OPTIONS = [
   { days: 90, label: "90 days" },
 ] as const;
 
+const PROVIDER_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "codex", label: "Codex" },
+  { value: "claude", label: "Claude Code" },
+  { value: "grok", label: "Grok Build" },
+] as const;
+
+type UsageProviderSelection = "all" | UsageProviderKind;
+
 const CHART_HEIGHT = 180;
 
 export function UsageRouteScreen() {
@@ -42,9 +52,13 @@ export function UsageRouteScreen() {
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
+  const [providerSelection, setProviderSelection] = useState<UsageProviderSelection>("all");
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+  const { merged, environments, isPending, isPartial, refresh } = useUsage(
+    window,
+    providerSelection === "all" ? undefined : providerSelection,
+  );
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -116,6 +130,15 @@ export function UsageRouteScreen() {
           onSelect={selectWindow}
         />
 
+        <View className="gap-2">
+          <Text className="text-sm text-foreground-muted">Provider</Text>
+          <SegmentedControl
+            options={PROVIDER_OPTIONS}
+            selected={providerSelection}
+            onSelect={setProviderSelection}
+          />
+        </View>
+
         <UsageCoverageNotice environments={environments} merged={merged} isPartial={isPartial} />
 
         {isPending ? (
@@ -140,9 +163,18 @@ export function UsageRouteScreen() {
               timeZone={window.timeZone}
             />
             <ProviderSection merged={merged} metric={metric} />
-            <UsageLimitsSection />
             <TotalsSection merged={merged} isPast24Hours={isPast24Hours} />
             <ModelsSection merged={merged} />
+            <View className="gap-2">
+              <View className="gap-0.5">
+                <Text className="text-sm font-t3-medium text-foreground">Live provider limits</Text>
+                <Text className="text-sm text-foreground-muted">
+                  Current quotas cover all providers and are independent of this date range and
+                  usage filter.
+                </Text>
+              </View>
+              <UsageLimitsSection />
+            </View>
           </>
         )}
       </ScrollView>
@@ -312,6 +344,14 @@ function ProviderSection(props: {
     <SettingsSection title="Providers" card>
       {ordered.map((provider, index) => {
         const share = metric === "cost" ? provider.costShare : provider.tokenShare;
+        const shareLabel =
+          metric === "cost"
+            ? shareOf(provider.costUsd, merged.costUsd)
+            : shareOf(provider.totalTokens, merged.totalTokens);
+        const totalInput =
+          provider.totals.uncachedInputTokens +
+          provider.totals.cachedInputTokens +
+          provider.totals.cacheCreationTokens;
         return (
           <View
             key={provider.provider}
@@ -340,8 +380,18 @@ function ProviderSection(props: {
             </View>
             <Text className="text-sm text-foreground-muted">
               {metric === "cost"
-                ? `${formatPercent(share)} of cost · ${formatTokens(provider.totalTokens)} tokens`
-                : `${formatPercent(share)} of tokens · ${formatUsd(provider.costUsd)}`}
+                ? `${shareLabel} of raw API-rate cost · ${formatTokens(provider.totalTokens)} tokens`
+                : `${shareLabel} of tokens · ${formatUsd(provider.costUsd)} raw API-rate cost`}
+            </Text>
+            <Text className="text-sm text-foreground-muted">
+              Cache read {formatTokens(provider.totals.cachedInputTokens)} (
+              {shareOf(provider.totals.cachedInputTokens, totalInput)}) · write{" "}
+              {formatTokens(provider.totals.cacheCreationTokens)} (
+              {shareOf(provider.totals.cacheCreationTokens, totalInput)}) of input
+            </Text>
+            <Text className="text-xs text-foreground-tertiary">
+              {formatCount(provider.records)} records · {formatUsd(provider.cacheSavingsUsd)} cache
+              savings · {formatCount(provider.unpricedRecords)} unpriced
             </Text>
           </View>
         );
@@ -356,8 +406,8 @@ function TotalsSection(props: { readonly merged: MergedUsage; readonly isPast24H
     (period) => period.totalTokens > 0,
   ).length;
   const periodAverage = activePeriods === 0 ? 0 : merged.totalTokens / activePeriods;
-  const observedInput = merged.uncachedInputTokens + merged.cachedInputTokens;
-  const cachedShare = observedInput === 0 ? 0 : merged.cachedInputTokens / observedInput;
+  const totalInput =
+    merged.uncachedInputTokens + merged.cachedInputTokens + merged.cacheCreationTokens;
 
   return (
     <SettingsSection title="Totals" card>
@@ -379,26 +429,43 @@ function TotalsSection(props: { readonly merged: MergedUsage; readonly isPast24H
         <MetricCell
           label="Cached input"
           value={formatTokens(merged.cachedInputTokens)}
-          detail={`${formatPercent(cachedShare)} of observed input`}
+          detail={`${shareOf(merged.cachedInputTokens, totalInput)} of total input`}
+        />
+        <MetricCell
+          label="Cache writes"
+          value={formatTokens(merged.cacheCreationTokens)}
+          detail={`${shareOf(merged.cacheCreationTokens, totalInput)} of total input`}
         />
         <MetricCell
           label="Uncached input"
           value={formatTokens(merged.uncachedInputTokens)}
-          detail={`${formatTokens(merged.cacheCreationTokens)} cache writes`}
+          detail={`${shareOf(merged.uncachedInputTokens, totalInput)} of total input`}
         />
         <MetricCell
           label="Output"
           value={formatTokens(merged.outputTokens)}
-          detail={`incl. ${formatTokens(merged.reasoningTokens)} reasoning`}
+          detail="Reasoning is included in output."
+        />
+        <MetricCell
+          label="Reasoning"
+          value={formatTokens(merged.reasoningTokens)}
+          detail={`${shareOf(merged.reasoningTokens, merged.outputTokens)} of output`}
         />
         <MetricCell
           label="Unpriced"
-          value={formatPercent(merged.costQuality.unpricedShare)}
+          value={merged.records === 0 ? "—" : formatPercent(merged.costQuality.unpricedShare)}
           detail="of records, excluded from cost"
         />
       </View>
+      <Text className="px-4 pb-4 text-xs text-foreground-tertiary">
+        Reported token counts may omit cache write or reasoning fields.
+      </Text>
     </SettingsSection>
   );
+}
+
+function shareOf(value: number, total: number): string {
+  return total === 0 ? "—" : formatPercent(value / total);
 }
 
 function MetricCell(props: {
@@ -418,34 +485,82 @@ function MetricCell(props: {
 function ModelsSection(props: { readonly merged: MergedUsage }) {
   const { merged } = props;
   const colors = useProviderColors();
+  const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(() => new Set());
   if (merged.models.length === 0) return null;
 
   return (
     <SettingsSection title="By model" card>
-      {merged.models.map((model, index) => (
-        <View
-          key={`${model.provider}:${model.model}`}
-          className={
-            index === 0
-              ? "flex-row items-center gap-3 p-4"
-              : "flex-row items-center gap-3 border-t border-border-subtle p-4"
-          }
-        >
-          <View
-            className="size-2.5 shrink-0 rounded-full"
-            style={{ backgroundColor: colors[model.provider] }}
-          />
-          <View className="min-w-0 flex-1 gap-0.5">
-            <Text className="text-base text-foreground" numberOfLines={1}>
-              {model.model}
-            </Text>
-            <Text className="text-sm text-foreground-muted">
-              {formatPercent(model.costShare)} of cost · {formatTokens(model.totalTokens)} tokens
-            </Text>
-          </View>
-          <Text className="text-base tabular-nums text-foreground">{formatUsd(model.costUsd)}</Text>
-        </View>
-      ))}
+      {merged.models.map((model, index) => {
+        const key = `${model.provider}:${model.model}`;
+        const expanded = expandedModels.has(key);
+        const totalInput =
+          model.totals.uncachedInputTokens +
+          model.totals.cachedInputTokens +
+          model.totals.cacheCreationTokens;
+        const toggle = () => {
+          setExpandedModels((current) => {
+            const next = new Set(current);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+          });
+        };
+
+        return (
+          <Pressable
+            key={key}
+            accessibilityRole="button"
+            accessibilityState={{ expanded }}
+            onPress={toggle}
+            className={index === 0 ? "gap-3 p-4" : "gap-3 border-t border-border-subtle p-4"}
+          >
+            <View className="flex-row items-center gap-3">
+              <View
+                className="size-2.5 shrink-0 rounded-full"
+                style={{ backgroundColor: colors[model.provider] }}
+              />
+              <View className="min-w-0 flex-1 gap-0.5">
+                <Text className="text-base text-foreground" numberOfLines={1}>
+                  {model.model}
+                </Text>
+                <Text className="text-sm text-foreground-muted">
+                  {PROVIDER_LABEL[model.provider]} · {shareOf(model.costUsd, merged.costUsd)} of raw
+                  API-rate cost · {formatTokens(model.totalTokens)} tokens
+                </Text>
+              </View>
+              <Text className="text-base tabular-nums text-foreground">
+                {formatUsd(model.costUsd)}
+              </Text>
+            </View>
+            {expanded ? (
+              <View className="gap-1 pl-5">
+                <Text className="text-sm text-foreground-muted">
+                  Total input: {formatTokens(totalInput)}
+                </Text>
+                <Text className="text-sm text-foreground-muted">
+                  Cache read: {formatTokens(model.totals.cachedInputTokens)} ·{" "}
+                  {shareOf(model.totals.cachedInputTokens, totalInput)} of total input
+                </Text>
+                <Text className="text-sm text-foreground-muted">
+                  Cache write: {formatTokens(model.totals.cacheCreationTokens)} ·{" "}
+                  {shareOf(model.totals.cacheCreationTokens, totalInput)} of total input
+                </Text>
+                <Text className="text-sm text-foreground-muted">
+                  Uncached input: {formatTokens(model.totals.uncachedInputTokens)}
+                </Text>
+                <Text className="text-sm text-foreground-muted">
+                  Output: {formatTokens(model.totals.outputTokens)} · includes{" "}
+                  {formatTokens(model.totals.reasoningTokens)} reasoning
+                </Text>
+                <Text className="text-sm text-foreground-muted">
+                  {formatCount(model.records)} records · {formatUsd(model.cacheSavingsUsd)} cache
+                  savings · {formatCount(model.unpricedRecords)} unpriced
+                </Text>
+              </View>
+            ) : null}
+          </Pressable>
+        );
+      })}
     </SettingsSection>
   );
 }

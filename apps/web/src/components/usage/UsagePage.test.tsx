@@ -7,32 +7,36 @@ const testState = vi.hoisted(() => ({
   useUsage: vi.fn(),
   metric: "cost" as "cost" | "tokens",
   breakdown: "time" as "model" | "time",
+  expandedModels: new Set<string>(),
 }));
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
     ...actual,
-    useState: vi.fn((initial: unknown) => [
-      typeof initial === "function"
-        ? {
-            days: 1,
-            window: {
-              sinceDay: "2026-08-10",
-              untilDay: "2026-08-11",
-              timeZone: "UTC",
-              resolution: "hour",
-              sinceTime: "2026-08-10T12:37:00.000Z",
-              untilTime: "2026-08-11T12:37:00.000Z",
-            },
-          }
-        : initial === "cost"
-          ? testState.metric
-          : initial === "model"
-            ? testState.breakdown
-            : initial,
-      vi.fn(),
-    ]),
+    useState: vi.fn((initial: unknown) => {
+      const value =
+        typeof initial === "function"
+          ? {
+              days: 1,
+              window: {
+                sinceDay: "2026-08-10",
+                untilDay: "2026-08-11",
+                timeZone: "UTC",
+                resolution: "hour",
+                sinceTime: "2026-08-10T12:37:00.000Z",
+                untilTime: "2026-08-11T12:37:00.000Z",
+              },
+            }
+          : initial instanceof Set
+            ? testState.expandedModels
+            : initial === "cost"
+              ? testState.metric
+              : initial === "model"
+                ? testState.breakdown
+                : initial;
+      return [value, vi.fn()];
+    }),
   };
 });
 
@@ -64,6 +68,7 @@ vi.mock("./usageProviders", async (importOriginal) => {
     PROVIDER_PRESENTATION: {
       codex: { color: "white", label: "Codex", mark: "span" },
       claude: { color: "orange", label: "Claude Code", mark: "span" },
+      grok: { color: "purple", label: "Grok Build", mark: "span" },
     },
   };
 });
@@ -76,14 +81,31 @@ const providerTotals = (codex: number, claude: number) =>
     ["claude", { costUsd: claude, totalTokens: claude * 1_000 }],
   ] as const);
 
+const tokenTotals = (
+  uncachedInputTokens: number,
+  cachedInputTokens: number,
+  cacheCreationTokens: number,
+  outputTokens: number,
+  reasoningTokens: number,
+) => ({
+  uncachedInputTokens,
+  cachedInputTokens,
+  cacheCreationTokens,
+  outputTokens,
+  reasoningTokens,
+});
+
 const modelTotals = Object.freeze([
   {
     model: "expensive-model",
     provider: "claude" as const,
     costUsd: 10,
-    totalTokens: 100,
+    totalTokens: 200,
     records: 1,
     costShare: 10 / 16,
+    totals: tokenTotals(70, 20, 10, 100, 30),
+    cacheSavingsUsd: 0.5,
+    unpricedRecords: 1,
   },
   {
     model: "token-heavy-model",
@@ -92,6 +114,9 @@ const modelTotals = Object.freeze([
     totalTokens: 1_000,
     records: 1,
     costShare: 5 / 16,
+    totals: tokenTotals(600, 200, 100, 100, 50),
+    cacheSavingsUsd: 0.25,
+    unpricedRecords: 0,
   },
   {
     model: "token-heavy-cheaper-model",
@@ -100,12 +125,27 @@ const modelTotals = Object.freeze([
     totalTokens: 1_000,
     records: 1,
     costShare: 1 / 16,
+    totals: tokenTotals(600, 200, 100, 100, 50),
+    cacheSavingsUsd: 0.15,
+    unpricedRecords: 0,
+  },
+  {
+    model: "no-input-model",
+    provider: "codex" as const,
+    costUsd: 0,
+    totalTokens: 12,
+    records: 1,
+    costShare: 0,
+    totals: tokenTotals(0, 0, 0, 12, 0),
+    cacheSavingsUsd: 0,
+    unpricedRecords: 0,
   },
 ]);
 
 beforeEach(() => {
   testState.metric = "cost";
   testState.breakdown = "time";
+  testState.expandedModels = new Set();
   testState.useUsage.mockReturnValue({
     merged: {
       ...mergeUsage([], USAGE_CONTRACT_VERSION),
@@ -177,6 +217,23 @@ describe("UsagePage model breakdown", () => {
       "expensive-model",
       "token-heavy-model",
       "token-heavy-cheaper-model",
+      "no-input-model",
     ]);
+  });
+
+  it("shows token-weighted cache shares and marks zero-input shares unavailable", () => {
+    testState.breakdown = "model";
+    testState.expandedModels = new Set(["claude:expensive-model", "codex:no-input-model"]);
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+
+    expect(markup).toContain("20.0% of input");
+    expect(markup).toContain("10.0% of input");
+    expect(markup).toContain("— of input");
+    expect(markup).toContain("30");
+    expect(markup).toContain("Subset of output");
+    expect(markup).toContain("1 unpriced record");
+    expect(markup).toContain("$0.50 cache savings");
+    expect(markup).not.toContain("NaN");
   });
 });

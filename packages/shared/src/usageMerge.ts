@@ -13,6 +13,7 @@ import {
   type UsageProviderKind,
   type UsageSourceFingerprint,
   type UsageSummary,
+  type UsageTokenTotals,
 } from "@t3tools/contracts";
 
 export interface EnvironmentUsage {
@@ -24,8 +25,11 @@ export interface EnvironmentUsage {
 export interface ProviderTotals {
   readonly provider: UsageProviderKind;
   readonly costUsd: number;
+  readonly cacheSavingsUsd: number;
+  readonly totals: UsageTokenTotals;
   readonly totalTokens: number;
   readonly records: number;
+  readonly unpricedRecords: number;
   readonly sessions: number;
   readonly costShare: number;
   readonly tokenShare: number;
@@ -35,8 +39,11 @@ export interface ModelTotals {
   readonly model: string;
   readonly provider: UsageProviderKind;
   readonly costUsd: number;
+  readonly cacheSavingsUsd: number;
+  readonly totals: UsageTokenTotals;
   readonly totalTokens: number;
   readonly records: number;
+  readonly unpricedRecords: number;
   readonly costShare: number;
 }
 
@@ -133,10 +140,14 @@ function claimSources(environments: readonly EnvironmentUsage[]): {
   return { ownerByFingerprint, duplicates };
 }
 
-/** Sources this environment owns after fingerprint claims, plus their buckets. */
+/**
+ * Returns selected buckets and sessions from sources this environment owns
+ * after fingerprint claims.
+ */
 function ownedContribution(
   environment: EnvironmentUsage,
   ownerByFingerprint: ReadonlyMap<string, EnvironmentId>,
+  providerFilter?: UsageProviderKind,
 ): {
   readonly buckets: readonly UsageBucket[];
   readonly sessionsByProvider: ReadonlyMap<UsageProviderKind, number>;
@@ -148,6 +159,7 @@ function ownedContribution(
     const key = fingerprintKey(source.fingerprint);
     if (ownerByFingerprint.get(key) === environment.environmentId) {
       const provider = source.fingerprint.provider;
+      if (providerFilter !== undefined && provider !== providerFilter) continue;
       ownedProviders.add(provider);
       // Distinct within a directory. Summing per-bucket session counts instead
       // would count a session once per day and model it spans.
@@ -161,6 +173,28 @@ function ownedContribution(
     buckets: environment.summary.buckets.filter((bucket) => ownedProviders.has(bucket.provider)),
     sessionsByProvider,
   };
+}
+
+type MutableUsageTokenTotals = {
+  -readonly [Key in keyof UsageTokenTotals]: UsageTokenTotals[Key];
+};
+
+function emptyTokenTotals(): MutableUsageTokenTotals {
+  return {
+    uncachedInputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+  };
+}
+
+function addTokenTotals(target: MutableUsageTokenTotals, totals: UsageTokenTotals): void {
+  target.uncachedInputTokens += totals.uncachedInputTokens;
+  target.cachedInputTokens += totals.cachedInputTokens;
+  target.cacheCreationTokens += totals.cacheCreationTokens;
+  target.outputTokens += totals.outputTokens;
+  target.reasoningTokens += totals.reasoningTokens;
 }
 
 function bucketTokens(bucket: UsageBucket): number {
@@ -203,17 +237,20 @@ const EMPTY_MERGED: MergedUsage = {
 };
 
 /**
- * Merges every connected environment's summary.
+ * Merges connected summaries after physical-source de-duplication.
  *
  * `expectedContractVersion` guards against an environment running older server
  * code: rather than blocking the page, incompatible data is excluded and its
  * id is reported so the UI can say coverage is partial. Versions in
  * [{@link USAGE_MERGE_COMPATIBLE_SINCE}, expected] still merge, so an additive
  * provider expansion does not drop Claude/Codex totals from older servers.
+ * When `providerFilter` is set, totals and sessions include only that provider
+ * after source ownership is resolved.
  */
 export function mergeUsage(
   environments: readonly EnvironmentUsage[],
   expectedContractVersion: number,
+  providerFilter?: UsageProviderKind,
 ): MergedUsage {
   if (environments.length === 0) return EMPTY_MERGED;
 
@@ -243,11 +280,27 @@ export function mergeUsage(
 
   const providerAccumulator = new Map<
     UsageProviderKind,
-    { costUsd: number; totalTokens: number; records: number; sessions: number }
+    {
+      costUsd: number;
+      cacheSavingsUsd: number;
+      totals: MutableUsageTokenTotals;
+      totalTokens: number;
+      records: number;
+      unpricedRecords: number;
+      sessions: number;
+    }
   >();
   const modelAccumulator = new Map<
     string,
-    { provider: UsageProviderKind; costUsd: number; totalTokens: number; records: number }
+    {
+      provider: UsageProviderKind;
+      costUsd: number;
+      cacheSavingsUsd: number;
+      totals: MutableUsageTokenTotals;
+      totalTokens: number;
+      records: number;
+      unpricedRecords: number;
+    }
   >();
   const dailyAccumulator = new Map<
     string,
@@ -270,7 +323,11 @@ export function mergeUsage(
   const contributingEnvironments: EnvironmentId[] = [];
 
   for (const environment of current) {
-    const { buckets, sessionsByProvider } = ownedContribution(environment, ownerByFingerprint);
+    const { buckets, sessionsByProvider } = ownedContribution(
+      environment,
+      ownerByFingerprint,
+      providerFilter,
+    );
     if (buckets.length > 0) contributingEnvironments.push(environment.environmentId);
 
     for (const [providerKind, providerSessions] of sessionsByProvider) {
@@ -278,8 +335,11 @@ export function mergeUsage(
       if (providerSessions === 0) continue;
       const provider = providerAccumulator.get(providerKind) ?? {
         costUsd: 0,
+        cacheSavingsUsd: 0,
+        totals: emptyTokenTotals(),
         totalTokens: 0,
         records: 0,
+        unpricedRecords: 0,
         sessions: 0,
       };
       provider.sessions += providerSessions;
@@ -302,25 +362,37 @@ export function mergeUsage(
 
       const provider = providerAccumulator.get(bucket.provider) ?? {
         costUsd: 0,
+        cacheSavingsUsd: 0,
+        totals: emptyTokenTotals(),
         totalTokens: 0,
         records: 0,
+        unpricedRecords: 0,
         sessions: 0,
       };
       provider.costUsd += bucket.costUsd;
+      provider.cacheSavingsUsd += bucket.cacheSavingsUsd;
+      addTokenTotals(provider.totals, bucket.totals);
       provider.totalTokens += tokens;
       provider.records += bucket.records;
+      provider.unpricedRecords += bucket.unpricedRecords;
       providerAccumulator.set(bucket.provider, provider);
 
       const modelKey = `${bucket.provider} ${bucket.model}`;
       const model = modelAccumulator.get(modelKey) ?? {
         provider: bucket.provider,
         costUsd: 0,
+        cacheSavingsUsd: 0,
+        totals: emptyTokenTotals(),
         totalTokens: 0,
         records: 0,
+        unpricedRecords: 0,
       };
       model.costUsd += bucket.costUsd;
+      model.cacheSavingsUsd += bucket.cacheSavingsUsd;
+      addTokenTotals(model.totals, bucket.totals);
       model.totalTokens += tokens;
       model.records += bucket.records;
+      model.unpricedRecords += bucket.unpricedRecords;
       modelAccumulator.set(modelKey, model);
 
       const day = dailyAccumulator.get(bucket.day) ?? {
@@ -364,8 +436,11 @@ export function mergeUsage(
     .map(([provider, totals]) => ({
       provider,
       costUsd: totals.costUsd,
+      cacheSavingsUsd: totals.cacheSavingsUsd,
+      totals: totals.totals,
       totalTokens: totals.totalTokens,
       records: totals.records,
+      unpricedRecords: totals.unpricedRecords,
       sessions: totals.sessions,
       costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
       tokenShare: totalTokens === 0 ? 0 : totals.totalTokens / totalTokens,
@@ -377,8 +452,11 @@ export function mergeUsage(
       model: key.slice(key.indexOf(" ") + 1),
       provider: totals.provider,
       costUsd: totals.costUsd,
+      cacheSavingsUsd: totals.cacheSavingsUsd,
+      totals: totals.totals,
       totalTokens: totals.totalTokens,
       records: totals.records,
+      unpricedRecords: totals.unpricedRecords,
       costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
     }))
     .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens);
