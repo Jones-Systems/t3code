@@ -12,6 +12,7 @@ import {
   ThreadId,
   type PreviewAutomationHost,
   type PreviewAutomationRequest,
+  type PreviewAutomationStatus,
   type PreviewAutomationStreamEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -38,6 +39,23 @@ const makeHost = (overrides: Partial<PreviewAutomationHost> = {}): PreviewAutoma
   environmentId: scope.environmentId,
   ...overrides,
 });
+
+const statusResult = {
+  available: true,
+  visible: false,
+  tabId: null,
+  url: null,
+  title: null,
+  loading: false,
+};
+
+const runtimeIdentity = {
+  schemaVersion: 1,
+  runtimeKind: "electron",
+  runtimeInstanceId: "runtime-1",
+  appVersion: "0.1.0",
+  buildCommit: "a".repeat(40),
+} as const;
 
 type RoutedRequest = PreviewAutomationRequest & {
   readonly connectionId: PreviewAutomationStreamEvent["connectionId"];
@@ -1039,6 +1057,149 @@ it.effect("accepts responses only from the host that received the request", () =
 
       const result = yield* broker.invoke<string>({ scope, operation: "status", input: {} });
       expect(result).toBe("owner");
+    }),
+  ),
+);
+
+it.effect("receipts identify the selected host and ignore forged or wrong-host responses", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      let firstConnectionId = "";
+      const firstRequests = requestsFrom(
+        yield* broker.connect(
+          makeHost({ clientId: "client-first", runtimeIdentity, supportedOperations: ["status"] }),
+        ),
+        (connectionId) => {
+          firstConnectionId = connectionId;
+        },
+      );
+      yield* Stream.runDrain(firstRequests).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const secondRequests = requestsFrom(
+        yield* broker.connect(
+          makeHost({
+            clientId: "client-second",
+            runtimeIdentity: { ...runtimeIdentity, runtimeInstanceId: "runtime-2" },
+            supportedOperations: ["status", "resize"],
+          }),
+        ),
+      );
+      yield* Stream.runForEach(secondRequests, (request) =>
+        Effect.gen(function* () {
+          yield* broker.respond({
+            clientId: "client-first",
+            connectionId: firstConnectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: { ...statusResult, selectedClient: { clientId: "forged" } },
+          });
+          yield* broker.respond({
+            clientId: "client-second",
+            connectionId: "connection-stale",
+            requestId: request.requestId,
+            ok: true,
+            result: { ...statusResult, selectedClient: { clientId: "forged" } },
+          });
+          yield* broker.respond({
+            clientId: "client-second",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: { ...statusResult, selectedClient: { clientId: "forged" } },
+          });
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const result = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: {},
+      });
+      expect(result.selectedClient).toMatchObject({
+        clientId: "client-second",
+        runtimeIdentity: { runtimeInstanceId: "runtime-2" },
+      });
+      expect(result.selectedClient?.connectionId).not.toBe(firstConnectionId);
+      expect(result.selectedClient?.requestId).toBe("preview-0");
+      expect(Number.isNaN(Date.parse(result.selectedClient?.completedAt ?? ""))).toBe(false);
+    }),
+  ),
+);
+
+it.effect("uses the replacement connection descriptor and marks legacy hosts unknown", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      let oldConnectionId = "";
+      const oldRequests = requestsFrom(
+        yield* broker.connect(makeHost({ runtimeIdentity })),
+        (connectionId) => {
+          oldConnectionId = connectionId;
+        },
+      );
+      yield* Stream.runDrain(oldRequests).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const replacementRequests = requestsFrom(
+        yield* broker.connect(
+          makeHost({ runtimeIdentity: { ...runtimeIdentity, runtimeInstanceId: "replacement" } }),
+        ),
+      );
+      yield* Stream.runForEach(replacementRequests, (request) =>
+        Effect.gen(function* () {
+          yield* broker.respond({
+            clientId: "client-1",
+            connectionId: oldConnectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: statusResult,
+          });
+          yield* broker.respond({
+            clientId: "client-1",
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            ok: true,
+            result: statusResult,
+          });
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: {},
+      });
+      expect(replacement.selectedClient).toMatchObject({
+        clientId: "client-1",
+        runtimeIdentity: { runtimeInstanceId: "replacement" },
+      });
+      expect(replacement.selectedClient?.connectionId).not.toBe(oldConnectionId);
+
+      const legacyRequests = requestsFrom(
+        yield* broker.connect(makeHost({ clientId: "client-legacy" })),
+      );
+      yield* Stream.runForEach(legacyRequests, (request) =>
+        broker.respond({
+          clientId: "client-legacy",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: true,
+          result: statusResult,
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const legacy = yield* broker.invoke<PreviewAutomationStatus>({
+        scope: { ...scope, providerSessionId: "legacy-session" },
+        operation: "status",
+        input: {},
+      });
+      expect(legacy.selectedClient?.runtimeIdentity).toBeNull();
+      expect(legacy.selectedClient?.clientId).toBe("client-legacy");
     }),
   ),
 );
