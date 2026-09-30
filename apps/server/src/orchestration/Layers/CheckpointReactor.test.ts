@@ -219,14 +219,18 @@ function runGit(cwd: string, args: ReadonlyArray<string>) {
 }
 
 function createGitRepository() {
-  const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-handler-"));
-  runGit(cwd, ["init", "--initial-branch=main"]);
-  runGit(cwd, ["config", "user.email", "test@example.com"]);
-  runGit(cwd, ["config", "user.name", "Test User"]);
-  NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v1\n", "utf8");
-  runGit(cwd, ["add", "."]);
-  runGit(cwd, ["commit", "-m", "Initial"]);
-  return cwd;
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-handler-"));
+  const repository = NodePath.join(root, "repository");
+  const cwd = NodePath.join(root, "worktree");
+  NodeFS.mkdirSync(repository);
+  runGit(repository, ["init", "--initial-branch=main"]);
+  runGit(repository, ["config", "user.email", "test@example.com"]);
+  runGit(repository, ["config", "user.name", "Test User"]);
+  NodeFS.writeFileSync(NodePath.join(repository, "README.md"), "v1\n", "utf8");
+  runGit(repository, ["add", "."]);
+  runGit(repository, ["commit", "-m", "Initial"]);
+  runGit(repository, ["worktree", "add", "-b", "checkpoint-tests", cwd]);
+  return { cwd, root };
 }
 
 function gitRefExists(cwd: string, ref: string): boolean {
@@ -298,8 +302,8 @@ describe("CheckpointReactor", () => {
     readonly gitStatusRefreshCalls?: Array<string>;
     readonly pullRequestRefreshCalls?: Array<string>;
   }) {
-    const cwd = createGitRepository();
-    tempDirs.push(cwd);
+    const { cwd, root } = createGitRepository();
+    tempDirs.push(root);
     const provider = createProviderServiceHarness(
       cwd,
       options?.hasSession ?? true,

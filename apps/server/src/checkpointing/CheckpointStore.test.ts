@@ -3,7 +3,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { ThreadId, type VcsError } from "@t3tools/contracts";
+import { ThreadId, VcsPrimaryCheckoutCheckpointError, type VcsError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -86,6 +86,24 @@ function initRepoWithCommit(
   });
 }
 
+function initLinkedWorktree(
+  root: string,
+): Effect.Effect<
+  string,
+  VcsError | PlatformError.PlatformError,
+  VcsProcess.VcsProcess | FileSystem.FileSystem
+> {
+  return Effect.gen(function* () {
+    const repository = NodePath.join(root, "repository");
+    const worktree = NodePath.join(root, "worktree");
+    const fileSystem = yield* FileSystem.FileSystem;
+    yield* fileSystem.makeDirectory(repository, { recursive: true });
+    yield* initRepoWithCommit(repository);
+    yield* git(repository, ["worktree", "add", "-b", "checkpoint-test", worktree]);
+    return worktree;
+  });
+}
+
 function buildLargeText(lineCount = 5_000): string {
   return Array.from({ length: lineCount }, (_, index) => `line ${String(index).padStart(5, "0")}`)
     .join("\n")
@@ -114,28 +132,54 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
     );
   });
 
+  describe("captureCheckpoint", () => {
+    it.effect("refuses clean and dirty primary checkouts without writing checkpoint refs", () =>
+      Effect.gen(function* () {
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        for (const state of ["clean", "dirty"] as const) {
+          const cwd = yield* makeTmpDir(`checkpoint-store-primary-${state}-`);
+          yield* initRepoWithCommit(cwd);
+          if (state === "dirty") {
+            yield* writeTextFile(NodePath.join(cwd, "README.md"), "dirty primary checkout\n");
+          }
+          const checkpointRef = checkpointRefForThreadTurn(
+            ThreadId.make(`thread-primary-checkout-${state}`),
+            0,
+          );
+
+          const error = yield* checkpointStore
+            .captureCheckpoint({ cwd, checkpointRef })
+            .pipe(Effect.flip);
+
+          expect(error).toBeInstanceOf(VcsPrimaryCheckoutCheckpointError);
+          expect(yield* checkpointStore.hasCheckpointRef({ cwd, checkpointRef })).toBe(false);
+        }
+      }),
+    );
+  });
+
   describe("diffCheckpoints", () => {
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();
-        yield* initRepoWithCommit(tmp);
+        const cwd = yield* initLinkedWorktree(tmp);
         const checkpointStore = yield* CheckpointStore.CheckpointStore;
         const threadId = ThreadId.make("thread-checkpoint-store");
         const fromCheckpointRef = checkpointRefForThreadTurn(threadId, 0);
         const toCheckpointRef = checkpointRefForThreadTurn(threadId, 1);
 
         yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
+          cwd,
           checkpointRef: fromCheckpointRef,
         });
-        yield* writeTextFile(NodePath.join(tmp, "README.md"), buildLargeText());
+        yield* writeTextFile(NodePath.join(cwd, "README.md"), buildLargeText());
         yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
+          cwd,
           checkpointRef: toCheckpointRef,
         });
 
         const diff = yield* checkpointStore.diffCheckpoints({
-          cwd: tmp,
+          cwd,
           fromCheckpointRef,
           toCheckpointRef,
           ignoreWhitespace: true,
@@ -150,25 +194,25 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
     it.effect("keeps a/ and b/ patch prefixes when the repository disables them", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();
-        yield* initRepoWithCommit(tmp);
-        yield* git(tmp, ["config", "diff.noprefix", "true"]);
+        const cwd = yield* initLinkedWorktree(tmp);
+        yield* git(cwd, ["config", "diff.noprefix", "true"]);
         const checkpointStore = yield* CheckpointStore.CheckpointStore;
         const threadId = ThreadId.make("thread-checkpoint-store-noprefix");
         const fromCheckpointRef = checkpointRefForThreadTurn(threadId, 0);
         const toCheckpointRef = checkpointRefForThreadTurn(threadId, 1);
 
         yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
+          cwd,
           checkpointRef: fromCheckpointRef,
         });
-        yield* writeTextFile(NodePath.join(tmp, "README.md"), "# changed\n");
+        yield* writeTextFile(NodePath.join(cwd, "README.md"), "# changed\n");
         yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
+          cwd,
           checkpointRef: toCheckpointRef,
         });
 
         const diff = yield* checkpointStore.diffCheckpoints({
-          cwd: tmp,
+          cwd,
           fromCheckpointRef,
           toCheckpointRef,
           ignoreWhitespace: false,
@@ -181,13 +225,13 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
     it.effect("can hide indentation churn when changes wrap existing lines", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();
-        yield* initRepoWithCommit(tmp);
+        const cwd = yield* initLinkedWorktree(tmp);
         const checkpointStore = yield* CheckpointStore.CheckpointStore;
         const threadId = ThreadId.make("thread-checkpoint-store-whitespace");
         const fromCheckpointRef = checkpointRefForThreadTurn(threadId, 0);
         const toCheckpointRef = checkpointRefForThreadTurn(threadId, 1);
 
-        const componentPath = NodePath.join(tmp, "Component.tsx");
+        const componentPath = NodePath.join(cwd, "Component.tsx");
         yield* writeTextFile(
           componentPath,
           [
@@ -203,7 +247,7 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
           ].join("\n"),
         );
         yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
+          cwd,
           checkpointRef: fromCheckpointRef,
         });
         yield* writeTextFile(
@@ -225,18 +269,18 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
           ].join("\n"),
         );
         yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
+          cwd,
           checkpointRef: toCheckpointRef,
         });
 
         const normalDiff = yield* checkpointStore.diffCheckpoints({
-          cwd: tmp,
+          cwd,
           fromCheckpointRef,
           toCheckpointRef,
           ignoreWhitespace: false,
         });
         const whitespaceIgnoredDiff = yield* checkpointStore.diffCheckpoints({
-          cwd: tmp,
+          cwd,
           fromCheckpointRef,
           toCheckpointRef,
           ignoreWhitespace: true,

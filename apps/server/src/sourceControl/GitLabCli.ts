@@ -154,6 +154,8 @@ export class GitLabCliCommandError extends Schema.TaggedErrorClass<GitLabCliComm
       VcsProcessMissingExitCodeError: (cause) => new GitLabCliCommandError({ ...context, cause }),
       VcsRepositoryDetectionError: (cause) => new GitLabCliCommandError({ ...context, cause }),
       VcsUnsupportedOperationError: (cause) => new GitLabCliCommandError({ ...context, cause }),
+      VcsPrimaryCheckoutCheckpointError: (cause) =>
+        new GitLabCliCommandError({ ...context, cause }),
     });
   }
 }
