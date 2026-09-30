@@ -12,13 +12,12 @@
  *      the source of truth for every deployment that hasn't been migrated
  *      yet to an explicit `providerInstances` entry.
  *
- * This module bridges (2) into (1) and wires the resulting map into a
- * mutable registry. For every built-in driver whose id is not already
- * present in `providerInstances` (keyed on
- * `defaultInstanceIdForDriver(driverKind)` — literally the driver kind as a
- * routing slug), we synthesize an envelope from the legacy field. The
- * registry decodes both flavours through the same `configSchema` and ends
- * up with one uniform `ProviderInstance` per entry.
+ * The pure `providerInstanceConfigMap` helper bridges (2) into (1), and this
+ * module wires the resulting map into a mutable registry. For every built-in
+ * driver whose default instance id is not already present in
+ * `providerInstances`, the helper synthesizes an envelope from the legacy
+ * field. The registry decodes both flavours through the same `configSchema`
+ * and ends up with one uniform `ProviderInstance` per entry.
  *
  * Explicit `providerInstances` entries always win — users can already
  * override the legacy `providers.<kind>` blob by authoring a
@@ -41,67 +40,19 @@
  *
  * @module provider/Layers/ProviderInstanceRegistryHydration
  */
-import {
-  defaultInstanceIdForDriver,
-  type ProviderInstanceConfig,
-  type ProviderInstanceConfigMap,
-  ServerSettings,
-} from "@t3tools/contracts";
+import { type ProviderInstanceConfigMap, ServerSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { deriveProviderInstanceConfigMap } from "../providerInstanceConfigMap.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
 
-/**
- * Synthesize a `ProviderInstanceConfigMap` from a `ServerSettings` snapshot.
- *
- * Strategy:
- *   1. Copy all explicit `settings.providerInstances` entries verbatim.
- *   2. For each built-in driver whose `defaultInstanceIdForDriver(id)` key
- *      is *not* already in the explicit map, synthesize an entry from the
- *      matching legacy `settings.providers.<kind>` blob.
- *
- * The returned map is the input the registry consumes; pure & exported
- * separately so the hydration logic can be exercised by unit tests
- * without layering.
- */
-export const deriveProviderInstanceConfigMap = (
-  settings: ServerSettings,
-): ProviderInstanceConfigMap => {
-  const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
-
-  for (const driver of BUILT_IN_DRIVERS) {
-    const instanceId = defaultInstanceIdForDriver(driver.driverKind);
-    if (instanceId in merged) {
-      // Explicit `providerInstances` entry for this slot — user-authored
-      // config always wins over the legacy mirror.
-      continue;
-    }
-
-    // Only built-in drivers have a legacy mirror; the registry's
-    // `providers` struct is keyed on the same literal slug as
-    // `driverKind`. Access is dynamic (the driver kind is a branded string),
-    // but it's constrained to `keyof settings.providers` by the union of
-    // built-in driver kinds.
-    const legacyKey = driver.driverKind as keyof ServerSettings["providers"];
-    const legacyConfig = settings.providers[legacyKey];
-    if (legacyConfig === undefined) {
-      continue;
-    }
-
-    merged[instanceId] = {
-      driver: driver.driverKind,
-      config: legacyConfig,
-    };
-  }
-
-  return merged as ProviderInstanceConfigMap;
-};
+export { deriveProviderInstanceConfigMap } from "../providerInstanceConfigMap.ts";
 
 /**
  * Layer that consumes `ProviderInstanceRegistryMutator` and forks a

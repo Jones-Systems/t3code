@@ -7,7 +7,14 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
-import { UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  UsageDay,
+  type ProviderInstanceConfig,
+  type UsageSummaryInput,
+} from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -34,6 +41,88 @@ function claudeLine(id: number, outputTokens: number): string {
     },
   })}\n`;
 }
+
+function codexTranscript(sessionId: string, outputTokens: number): string {
+  const timestamp = "2026-08-01T10:00:00.000Z";
+  return [
+    {
+      type: "session_meta",
+      timestamp,
+      payload: { type: "session_meta", id: sessionId },
+    },
+    {
+      type: "turn_context",
+      timestamp,
+      payload: { type: "turn_context", model: "gpt-5.6-sol" },
+    },
+    {
+      type: "event_msg",
+      timestamp,
+      payload: {
+        type: "token_count",
+        info: {
+          last_token_usage: {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: outputTokens,
+            reasoning_output_tokens: 0,
+          },
+        },
+      },
+    },
+  ]
+    .map((line) => JSON.stringify(line))
+    .join("\n")
+    .concat("\n");
+}
+
+function grokTranscript(sessionId: string, outputTokens: number): string {
+  return `${JSON.stringify({
+    timestamp: 1_785_578_400,
+    method: "_x.ai/session/update",
+    params: {
+      sessionId,
+      update: {
+        sessionUpdate: "turn_completed",
+        prompt_id: "prompt-1",
+        usage: {
+          inputTokens: 10,
+          outputTokens,
+          totalTokens: 10 + outputTokens,
+          cachedReadTokens: 0,
+          cacheCreationTokens: 0,
+          reasoningTokens: 0,
+          costUsdTicks: 0,
+          modelUsage: {
+            "grok-4.5-build": {
+              inputTokens: 10,
+              outputTokens,
+              totalTokens: 10 + outputTokens,
+              cachedReadTokens: 0,
+              cacheCreationTokens: 0,
+              reasoningTokens: 0,
+              costUsdTicks: 0,
+            },
+          },
+        },
+      },
+      _meta: { eventId: "event-1", agentTimestampMs: 1_785_578_400_000 },
+    },
+  })}\n`;
+}
+
+const providerInstance = (
+  driver: string,
+  config: unknown,
+  options: Omit<ProviderInstanceConfig, "driver" | "config"> = {},
+): ProviderInstanceConfig => ({
+  driver: ProviderDriverKind.make(driver),
+  ...options,
+  config,
+});
+
+const providerEnvironment = (name: string, value: string) => [{ name, value, sensitive: false }];
 
 const WINDOW: UsageSummaryInput = {
   timeZone: "UTC",
@@ -67,6 +156,7 @@ const serviceLayers = (input: {
   readonly home: string;
   readonly settings: Parameters<typeof ServerSettings.layerTest>[0];
   readonly onRatesFetch?: () => void;
+  readonly environment?: NodeJS.ProcessEnv;
   /** Defaults to an unparsable document so every scan retries the fetch. */
   readonly ratesDocument?: unknown;
 }) =>
@@ -87,7 +177,10 @@ const serviceLayers = (input: {
       ),
     ),
     Layer.provideMerge(
-      Layer.succeed(HostProcessEnvironment, { GROK_HOME: NodePath.join(input.home, "grok") }),
+      Layer.succeed(HostProcessEnvironment, {
+        GROK_HOME: NodePath.join(input.home, "grok"),
+        ...input.environment,
+      }),
     ),
   );
 
@@ -144,6 +237,377 @@ describe("UsageService", () => {
       yield* service.readSummary(WINDOW);
       assert.strictEqual(ratesFetches, 2);
     }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "scans separate configured Codex roots once and keeps legacy and modern windows distinct",
+    () =>
+      Effect.gen(function* () {
+        const { settings, home } = yield* setup;
+        const sharedHome = NodePath.join(home, "codex-shared");
+        const workHome = NodePath.join(home, "codex-work");
+        const sharedSessions = NodePath.join(sharedHome, "sessions");
+        const workSessions = NodePath.join(workHome, "sessions");
+        yield* Effect.promise(() => NodeFSP.mkdir(sharedSessions, { recursive: true }));
+        yield* Effect.promise(() => NodeFSP.mkdir(workSessions, { recursive: true }));
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(sharedSessions, "personal.jsonl"),
+            codexTranscript("personal-session", 5),
+          ),
+        );
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(workSessions, "work.jsonl"),
+            codexTranscript("work-session", 7),
+          ),
+        );
+
+        const settingsWithInstances = {
+          ...settings,
+          providers: {
+            ...settings.providers,
+            codex: { homePath: sharedHome },
+          },
+          providerInstances: {
+            codex_personal: providerInstance(
+              "codex",
+              {
+                homePath: sharedHome,
+                shadowHomePath: NodePath.join(home, "shadow-personal"),
+              },
+              { displayName: "Codex Personal" },
+            ),
+            codex_personal_alias: providerInstance("codex", {
+              homePath: sharedHome,
+              shadowHomePath: NodePath.join(home, "shadow-personal-alias"),
+            }),
+            codex_work: providerInstance(
+              "codex",
+              { homePath: workHome },
+              { displayName: "Codex Work" },
+            ),
+          },
+        };
+
+        const service = yield* UsageService.make.pipe(
+          Effect.provide(
+            serviceLayers({
+              prefix: "usage-service-configured-roots-test",
+              home,
+              settings: settingsWithInstances,
+            }),
+          ),
+        );
+        const hourlyWindow: UsageSummaryInput = {
+          ...WINDOW,
+          resolution: "hour",
+          sinceTime: "2026-08-01T09:00:00.000Z",
+          untilTime: "2026-08-01T11:00:00.000Z",
+        };
+        const [legacy, modern] = yield* Effect.all(
+          [
+            service.readSummary(hourlyWindow),
+            service.readSummary({ ...hourlyWindow, includeProviderInstances: true }),
+          ],
+          { concurrency: 2 },
+        );
+
+        assert.isUndefined(legacy.providerInstances);
+        assert.strictEqual(legacy.sources.length, 3);
+        assert.isTrue(legacy.sources.every((source) => source.sourceId === undefined));
+        assert.isTrue(legacy.buckets.every((bucket) => bucket.sourceId === undefined));
+
+        assert.isDefined(modern.providerInstances);
+        const codexSources = modern.sources.filter(
+          (source) => source.fingerprint.provider === "codex",
+        );
+        assert.strictEqual(codexSources.length, 2);
+        const [canonicalSharedSessions, canonicalWorkSessions] = yield* Effect.promise(() =>
+          Promise.all([NodeFSP.realpath(sharedSessions), NodeFSP.realpath(workSessions)]),
+        );
+        const personalSource = codexSources.find(
+          (source) => source.fingerprint.resolvedHomePath === canonicalSharedSessions,
+        );
+        const workSource = codexSources.find(
+          (source) => source.fingerprint.resolvedHomePath === canonicalWorkSessions,
+        );
+        assert.isDefined(personalSource);
+        assert.isDefined(workSource);
+        assert.deepStrictEqual(personalSource.instanceIds, [
+          ProviderInstanceId.make("codex"),
+          ProviderInstanceId.make("codex_personal"),
+          ProviderInstanceId.make("codex_personal_alias"),
+        ]);
+        assert.deepStrictEqual(workSource.instanceIds, [ProviderInstanceId.make("codex_work")]);
+
+        const codexBuckets = modern.buckets.filter((bucket) => bucket.provider === "codex");
+        assert.strictEqual(totalOutputTokens({ buckets: codexBuckets }), 12);
+        assert.isTrue(codexBuckets.every((bucket) => bucket.sourceId !== undefined));
+        assert.isTrue(codexBuckets.every((bucket) => bucket.hourStart !== undefined));
+        for (const bucket of codexBuckets) {
+          assert.isTrue(codexSources.some((source) => source.sourceId === bucket.sourceId));
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "resolves configured homes by provider precedence and reports unsupported, unavailable, disabled, and missing instances",
+    () =>
+      Effect.gen(function* () {
+        const { home } = yield* setup;
+        const roots = {
+          claudeExplicit: NodePath.join(home, "claude-explicit"),
+          claudeInstanceEnv: NodePath.join(home, "claude-instance-env"),
+          claudeHostEnv: NodePath.join(home, "claude-host-env"),
+          codexInherited: NodePath.join(home, "codex-inherited"),
+          codexInstanceEnv: NodePath.join(home, "codex-instance-env"),
+          codexExplicit: NodePath.join(home, "codex-explicit"),
+          codexDisabled: NodePath.join(home, "codex-disabled"),
+          grokHostEnv: NodePath.join(home, "grok-host-env"),
+          grokInstanceEnv: NodePath.join(home, "grok-instance-env"),
+        };
+        const writeClaude = (root: string, name: string, tokens: number) =>
+          Effect.promise(() => {
+            const dir = NodePath.join(root, "projects", "proj");
+            return NodeFSP.mkdir(dir, { recursive: true }).then(() =>
+              NodeFSP.writeFile(NodePath.join(dir, name), claudeLine(tokens, tokens)),
+            );
+          });
+        const writeCodex = (root: string, name: string, tokens: number) =>
+          Effect.promise(() => {
+            const dir = NodePath.join(root, "sessions");
+            return NodeFSP.mkdir(dir, { recursive: true }).then(() =>
+              NodeFSP.writeFile(NodePath.join(dir, name), codexTranscript(name, tokens)),
+            );
+          });
+        const writeGrok = (root: string, tokens: number) =>
+          Effect.promise(() => {
+            const dir = NodePath.join(root, "sessions");
+            return NodeFSP.mkdir(dir, { recursive: true }).then(() =>
+              NodeFSP.writeFile(
+                NodePath.join(dir, "updates.jsonl"),
+                grokTranscript("grok-session", tokens),
+              ),
+            );
+          });
+
+        yield* writeClaude(roots.claudeExplicit, "explicit.jsonl", 3);
+        yield* writeClaude(roots.claudeExplicit, "explicit-copy.jsonl", 3);
+        yield* writeClaude(roots.claudeInstanceEnv, "instance.jsonl", 3);
+        yield* writeClaude(roots.claudeHostEnv, "host.jsonl", 5);
+        yield* writeCodex(roots.codexInherited, "inherited.jsonl", 6);
+        yield* writeCodex(roots.codexInstanceEnv, "instance.jsonl", 7);
+        yield* writeCodex(roots.codexExplicit, "explicit.jsonl", 8);
+        yield* writeCodex(roots.codexDisabled, "disabled.jsonl", 9);
+        yield* writeGrok(roots.grokHostEnv, 10);
+        yield* writeGrok(roots.grokInstanceEnv, 11);
+
+        const settings = {
+          ...DEFAULT_SERVER_SETTINGS,
+          providerInstances: {
+            claude_explicit: providerInstance(
+              "claudeAgent",
+              { homePath: roots.claudeExplicit },
+              { environment: providerEnvironment("CLAUDE_CONFIG_DIR", "relative-claude-instance") },
+            ),
+            claude_instance_env: providerInstance(
+              "claudeAgent",
+              {},
+              {
+                environment: providerEnvironment("CLAUDE_CONFIG_DIR", roots.claudeInstanceEnv),
+              },
+            ),
+            claude_relative: providerInstance(
+              "claudeAgent",
+              {},
+              {
+                environment: providerEnvironment("CLAUDE_CONFIG_DIR", "relative-claude-home"),
+              },
+            ),
+            claude_invalid: providerInstance("claudeAgent", { homePath: 42 }),
+            claude_host_fallback: providerInstance("claudeAgent", {}),
+            codex_inherited: providerInstance("codex", {}),
+            codex_instance_env: providerInstance(
+              "codex",
+              {},
+              {
+                environment: providerEnvironment("CODEX_HOME", roots.codexInstanceEnv),
+              },
+            ),
+            codex_explicit: providerInstance(
+              "codex",
+              { homePath: roots.codexExplicit },
+              {
+                environment: providerEnvironment(
+                  "CODEX_HOME",
+                  NodePath.join(home, "codex-shadowed-by-config"),
+                ),
+              },
+            ),
+            codex_relative: providerInstance(
+              "codex",
+              {},
+              {
+                environment: providerEnvironment("CODEX_HOME", "relative-codex-home"),
+              },
+            ),
+            codex_disabled: providerInstance(
+              "codex",
+              { homePath: roots.codexDisabled },
+              { enabled: false },
+            ),
+            codex_missing: providerInstance("codex", {
+              homePath: NodePath.join(home, "codex-missing"),
+            }),
+            grok_instance_env: providerInstance(
+              "grok",
+              {},
+              {
+                environment: providerEnvironment("GROK_HOME", roots.grokInstanceEnv),
+              },
+            ),
+            grok_relative: providerInstance(
+              "grok",
+              {},
+              {
+                environment: providerEnvironment("GROK_HOME", "relative-grok-home"),
+              },
+            ),
+            unknown_disabled: providerInstance("futureDriver", {}, { enabled: false }),
+            cursor_disabled: providerInstance(
+              "cursor",
+              {},
+              { enabled: false, displayName: "Cursor Archive" },
+            ),
+          },
+        };
+        const service = yield* UsageService.make.pipe(
+          Effect.provide(
+            serviceLayers({
+              prefix: "usage-service-configured-precedence-test",
+              home,
+              settings,
+              environment: {
+                CLAUDE_CONFIG_DIR: roots.claudeHostEnv,
+                CODEX_HOME: roots.codexInherited,
+                GROK_HOME: roots.grokHostEnv,
+              },
+            }),
+          ),
+        );
+        const summary = yield* service.readSummary({ ...WINDOW, includeProviderInstances: true });
+        const roster = new Map(
+          summary.providerInstances?.map((instance) => [instance.instanceId, instance]),
+        );
+        const sources = new Map(summary.sources.map((source) => [source.sourceId, source]));
+        const sourceFor = (instanceId: string) =>
+          summary.sources.find((source) =>
+            source.instanceIds?.includes(ProviderInstanceId.make(instanceId)),
+          );
+        const resolvedRoot = (instanceId: string) =>
+          sourceFor(instanceId)?.fingerprint.resolvedHomePath;
+        const rootPaths = [
+          ["claude_explicit", NodePath.join(roots.claudeExplicit, "projects")],
+          ["claude_instance_env", NodePath.join(roots.claudeInstanceEnv, "projects")],
+          ["claude_host_fallback", NodePath.join(roots.claudeHostEnv, "projects")],
+          ["codex_instance_env", NodePath.join(roots.codexInstanceEnv, "sessions")],
+          ["codex_inherited", NodePath.join(roots.codexInherited, "sessions")],
+          ["codex_explicit", NodePath.join(roots.codexExplicit, "sessions")],
+          ["grok_instance_env", NodePath.join(roots.grokInstanceEnv, "sessions")],
+          ["grok", NodePath.join(roots.grokHostEnv, "sessions")],
+        ] as const;
+        const expectedRoots = new Map(
+          yield* Effect.promise(() =>
+            Promise.all(
+              rootPaths.map(
+                async ([instanceId, root]) => [instanceId, await NodeFSP.realpath(root)] as const,
+              ),
+            ),
+          ),
+        );
+
+        assert.strictEqual(resolvedRoot("claude_explicit"), expectedRoots.get("claude_explicit"));
+        assert.strictEqual(
+          resolvedRoot("claude_instance_env"),
+          expectedRoots.get("claude_instance_env"),
+        );
+        assert.strictEqual(
+          resolvedRoot("claude_host_fallback"),
+          expectedRoots.get("claude_host_fallback"),
+        );
+        assert.strictEqual(sourceFor("claude_explicit")?.scannedFiles, 2);
+        assert.isUndefined(sourceFor("claude_relative"));
+        assert.isUndefined(sourceFor("claude_invalid"));
+
+        assert.strictEqual(
+          resolvedRoot("codex_instance_env"),
+          expectedRoots.get("codex_instance_env"),
+        );
+        assert.strictEqual(resolvedRoot("codex_inherited"), expectedRoots.get("codex_inherited"));
+        assert.strictEqual(resolvedRoot("codex_explicit"), expectedRoots.get("codex_explicit"));
+        assert.isUndefined(sourceFor("codex_relative"));
+        assert.strictEqual(sourceFor("codex_missing")?.status, "missing");
+        assert.strictEqual(sourceFor("codex_disabled")?.status, "ok");
+        assert.strictEqual(
+          resolvedRoot("grok_instance_env"),
+          expectedRoots.get("grok_instance_env"),
+        );
+        assert.strictEqual(resolvedRoot("grok"), expectedRoots.get("grok"));
+        assert.isUndefined(sourceFor("grok_relative"));
+
+        assert.strictEqual(
+          roster.get(ProviderInstanceId.make("cursor_disabled"))?.coverage,
+          "unsupported",
+        );
+        assert.strictEqual(roster.get(ProviderInstanceId.make("cursor_disabled"))?.enabled, false);
+        assert.strictEqual(
+          roster.get(ProviderInstanceId.make("unknown_disabled"))?.coverage,
+          "unsupported",
+        );
+        assert.strictEqual(roster.get(ProviderInstanceId.make("unknown_disabled"))?.enabled, false);
+        for (const instanceId of [
+          "cursor",
+          "opencode",
+          "antigravity",
+          "cursor_disabled",
+          "unknown_disabled",
+        ]) {
+          assert.strictEqual(
+            roster.get(ProviderInstanceId.make(instanceId))?.coverage,
+            "unsupported",
+          );
+          assert.isUndefined(sourceFor(instanceId));
+        }
+        assert.strictEqual(
+          roster.get(ProviderInstanceId.make("claude_relative"))?.coverage,
+          "unavailable",
+        );
+        assert.strictEqual(
+          roster.get(ProviderInstanceId.make("claude_invalid"))?.coverage,
+          "unavailable",
+        );
+        assert.strictEqual(
+          roster.get(ProviderInstanceId.make("codex_missing"))?.coverage,
+          "supported",
+        );
+        assert.strictEqual(roster.get(ProviderInstanceId.make("codex_disabled"))?.enabled, false);
+        assert.strictEqual(
+          roster.get(ProviderInstanceId.make("codex_disabled"))?.coverage,
+          "supported",
+        );
+        assert.isTrue(
+          summary.buckets.every(
+            (bucket) => bucket.sourceId !== undefined && sources.has(bucket.sourceId),
+          ),
+        );
+        assert.isTrue(
+          summary.sources.every(
+            (source) => source.sourceId !== undefined && source.instanceIds !== undefined,
+          ),
+        );
+        assert.strictEqual(totalOutputTokens(summary), 62);
+      }).pipe(Effect.scoped),
   );
 
   it.live("refetches a rate table inside its TTL only when the client asks", () =>

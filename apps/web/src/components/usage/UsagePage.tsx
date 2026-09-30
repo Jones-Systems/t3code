@@ -1,8 +1,14 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
-import { CheckIcon, RefreshCwIcon, XIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, RefreshCwIcon, XIcon } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
 
-import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
+import type {
+  DailyTotals,
+  HourlyTotals,
+  ModelTotals,
+  UsageInstanceOption,
+  UsageInstanceSelection,
+} from "@t3tools/shared/usageMerge";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
@@ -63,19 +69,26 @@ export function UsagePage() {
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageMetric>("cost");
+  const [instanceSelection, setInstanceSelection] = useState<
+    readonly UsageInstanceSelection[] | undefined
+  >(undefined);
   const showingLimits = metric === "limits";
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
+  const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(new Set());
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+  const { merged, environments, isPending, isPartial, refresh } = useUsage(
+    window,
+    undefined,
+    instanceSelection,
+  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
 
-  // Hold the content until every environment is terminal. Rendering merged
-  // totals while devices are still answering makes every number on the page
-  // jump as each one lands.
+  // Hold totals and charts until every environment is terminal. Rendering
+  // merged numbers while devices are still answering makes each value jump.
   const settling = isPending || isPartial;
 
   const days = useMemo(
@@ -106,6 +119,42 @@ export function UsagePage() {
   );
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
   const timeValueColumnWidth = `${60 / (activeProviders.length + 2)}%`;
+  const totalInputTokens =
+    merged.uncachedInputTokens + merged.cachedInputTokens + merged.cacheCreationTokens;
+  const unpricedRecords = merged.providers.reduce(
+    (total, provider) => total + provider.unpricedRecords,
+    0,
+  );
+  const instanceSelectionKeys = useMemo(
+    () => instanceSelection?.map(instanceSelectionKey) ?? ["all"],
+    [instanceSelection],
+  );
+  const hasLegacyInstanceMetadata = environments.some(
+    (environment) =>
+      environment.summary !== null && environment.summary.providerInstances === undefined,
+  );
+  const instanceNotices = useMemo(() => {
+    const notices = [...merged.instanceNotices];
+    const hasLegacyNotice = notices.some((notice) => /legacy usage/i.test(notice));
+    if (merged.instanceOptions.length === 0 && hasLegacyInstanceMetadata && !hasLegacyNotice) {
+      notices.push(
+        instanceSelection === undefined
+          ? "A connected server does not provide provider-instance details. Instance filtering is unavailable; all usage available from that server is shown."
+          : "A connected server does not provide provider-instance details. The current instance selection cannot be applied.",
+      );
+    }
+    return [...new Set(notices)];
+  }, [
+    hasLegacyInstanceMetadata,
+    instanceSelection,
+    merged.instanceNotices,
+    merged.instanceOptions.length,
+  ]);
+  const selectInstances = (next: readonly string[]) => {
+    setInstanceSelection((current) =>
+      normalizeInstanceSelection(current, next, merged.instanceOptions),
+    );
+  };
 
   const selectWindow = (days: number) => {
     setWindowSelection({
@@ -154,7 +203,15 @@ export function UsagePage() {
           </>
         )}
       </WorkspaceBreadcrumb>
-      <div className="ms-auto hidden min-w-0 items-center justify-end gap-2 lg:flex">
+      <div className="ms-auto hidden min-w-0 items-center justify-end gap-2 xl:flex">
+        {!showingLimits && merged.instanceOptions.length > 0 ? (
+          <UsageInstanceSelect
+            options={merged.instanceOptions}
+            selection={instanceSelectionKeys}
+            compact={false}
+            onSelectionChange={selectInstances}
+          />
+        ) : null}
         <ToggleGroup
           aria-label="Usage metric"
           variant="segmented"
@@ -197,7 +254,15 @@ export function UsagePage() {
           <RefreshCwIcon className="size-3.5" />
         </Button>
       </div>
-      <div className="ms-auto flex min-w-0 items-center justify-end gap-1 lg:hidden">
+      <div className="ms-auto flex min-w-0 items-center justify-end gap-0.5 xl:hidden">
+        {!showingLimits && merged.instanceOptions.length > 0 ? (
+          <UsageInstanceSelect
+            options={merged.instanceOptions}
+            selection={instanceSelectionKeys}
+            compact
+            onSelectionChange={selectInstances}
+          />
+        ) : null}
         <Select
           value={metric}
           onValueChange={(value) => {
@@ -278,6 +343,7 @@ export function UsagePage() {
                   duplicateSources={merged.duplicateSources}
                   staleEnvironments={merged.staleEnvironments}
                 />
+                <UsageInstanceNotices notices={instanceNotices} />
 
                 <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
                   <div className="flex min-w-0 flex-col gap-5">
@@ -360,7 +426,7 @@ export function UsagePage() {
 
                 <section className="flex flex-col gap-2">
                   <h2 className="text-sm font-medium text-foreground">Totals</h2>
-                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-6">
                     <Metric label="Processed tokens" value={formatTokens(merged.totalTokens)} />
                     <Metric label="Cached input" value={formatTokens(merged.cachedInputTokens)} />
                     <Metric
@@ -372,7 +438,34 @@ export function UsagePage() {
                       label="Cache savings"
                       value={formatUsd(merged.costQuality.cacheSavingsUsd)}
                     />
+                    <Metric
+                      label="Cache percentage"
+                      value={formatInputShare(merged.cachedInputTokens, totalInputTokens)}
+                    />
                   </div>
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
+                    <Metric label="Total input" value={formatTokens(totalInputTokens)} />
+                    <Metric
+                      label="Cache reads"
+                      value={formatTokens(merged.cachedInputTokens)}
+                      detail={`${formatInputShare(merged.cachedInputTokens, totalInputTokens)} of input`}
+                    />
+                    <Metric
+                      label="Cache writes"
+                      value={formatTokens(merged.cacheCreationTokens)}
+                      detail={`${formatInputShare(merged.cacheCreationTokens, totalInputTokens)} of input`}
+                    />
+                    <Metric
+                      label="Reasoning output"
+                      value={formatTokens(merged.reasoningTokens)}
+                      detail="Subset of output"
+                    />
+                    <Metric label="Unpriced records" value={formatCount(unpricedRecords)} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Based on reported token counts; providers may omit cache-write or reasoning
+                    details.
+                  </p>
                 </section>
 
                 <section className="flex flex-col gap-3">
@@ -424,28 +517,47 @@ export function UsagePage() {
                             </td>
                           </tr>
                         ) : (
-                          breakdownModels.map((model) => (
-                            <tr
-                              key={`${model.provider}:${model.model}`}
-                              className="border-b border-border/50 transition-colors hover:bg-muted/50"
-                            >
-                              <td className="py-2 text-foreground">
-                                <span className="flex items-center gap-2">
-                                  <ProviderMark provider={model.provider} className="size-3.5" />
-                                  {model.model}
-                                </span>
-                              </td>
-                              <td className="py-2 text-right text-foreground tabular-nums">
-                                {formatUsd(model.costUsd)}
-                              </td>
-                              <td className="py-2 text-right text-muted-foreground tabular-nums">
-                                {formatPercent(model.costShare)}
-                              </td>
-                              <td className="py-2 text-right text-muted-foreground tabular-nums">
-                                {formatTokens(model.totalTokens)}
-                              </td>
-                            </tr>
-                          ))
+                          breakdownModels.map((model) => {
+                            const key = `${model.provider}:${model.model}`;
+                            const expanded = expandedModels.has(key);
+                            return (
+                              <Fragment key={key}>
+                                <tr className="border-b border-border/50 transition-colors hover:bg-muted/50">
+                                  <td className="py-2 text-foreground">
+                                    <ModelBreakdownButton
+                                      expanded={expanded}
+                                      model={model.model}
+                                      provider={model.provider}
+                                      onClick={() => {
+                                        setExpandedModels((current) => {
+                                          const next = new Set(current);
+                                          if (next.has(key)) next.delete(key);
+                                          else next.add(key);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                  </td>
+                                  <td className="py-2 text-right text-foreground tabular-nums">
+                                    {formatUsd(model.costUsd)}
+                                  </td>
+                                  <td className="py-2 text-right text-muted-foreground tabular-nums">
+                                    {formatPercent(model.costShare)}
+                                  </td>
+                                  <td className="py-2 text-right text-muted-foreground tabular-nums">
+                                    {formatTokens(model.totalTokens)}
+                                  </td>
+                                </tr>
+                                {expanded ? (
+                                  <tr className="border-b border-border/50 bg-muted/20">
+                                    <td colSpan={4} className="px-3 py-3">
+                                      <ModelUsageDetails model={model} />
+                                    </td>
+                                  </tr>
+                                ) : null}
+                              </Fragment>
+                            );
+                          })
                         )}
                       </tbody>
                     </table>
@@ -534,11 +646,232 @@ function ProviderMark({
   return <Mark className={cn("shrink-0", className)} aria-hidden />;
 }
 
-function Metric({ label, value }: { readonly label: string; readonly value: string }) {
+function UsageInstanceSelect({
+  compact,
+  options,
+  selection,
+  onSelectionChange,
+}: {
+  readonly compact: boolean;
+  readonly options: readonly UsageInstanceOption[];
+  readonly selection: readonly string[];
+  readonly onSelectionChange: (next: readonly string[]) => void;
+}) {
+  return (
+    <Select
+      multiple
+      value={[...selection]}
+      onValueChange={(next) =>
+        onSelectionChange(Array.isArray(next) ? next : next === null ? [] : [next])
+      }
+    >
+      <SelectTrigger
+        aria-label="Usage provider instance filter"
+        size={compact ? "compact" : "sm"}
+        variant={compact ? "ghost" : "default"}
+        className={compact ? "w-32 min-w-0" : "w-40"}
+      >
+        <SelectValue>{formatInstanceSelection(selection, options)}</SelectValue>
+      </SelectTrigger>
+      <SelectPopup align="end" alignItemWithTrigger={false} className="min-w-56">
+        <SelectItem showCheck value="all">
+          All providers
+        </SelectItem>
+        {options.map((option) => (
+          <SelectItem key={option.key} showCheck value={option.key}>
+            <div className="flex min-w-0 flex-col gap-0.5 py-0.5">
+              <span className="truncate">{instanceOptionLabel(option, options)}</span>
+              {instanceOptionDetails(option) ? (
+                <span className="whitespace-normal text-xs text-muted-foreground">
+                  {instanceOptionDetails(option)}
+                </span>
+              ) : null}
+            </div>
+          </SelectItem>
+        ))}
+      </SelectPopup>
+    </Select>
+  );
+}
+
+function formatInstanceSelection(
+  selection: readonly string[],
+  options: readonly UsageInstanceOption[],
+): string {
+  if (selection.includes("all")) return "All providers";
+  const selected = options.filter((option) => selection.includes(option.key));
+  const onlySelected = selected[0];
+  if (selected.length === 1 && onlySelected) return instanceOptionLabel(onlySelected, options);
+  const count = selection.filter((key) => key !== "all").length;
+  return count > 0 ? `${count} instances` : "All providers";
+}
+
+function instanceOptionLabel(
+  option: UsageInstanceOption,
+  options: readonly UsageInstanceOption[],
+): string {
+  const displayName = option.displayName || option.instanceId;
+  const sameNameCount = options.filter(
+    (candidate) => (candidate.displayName || candidate.instanceId) === displayName,
+  ).length;
+  const hasMultipleEnvironments =
+    new Set(options.map((candidate) => candidate.environmentId)).size > 1;
+  const sameEnvironmentLabelCount = new Set(
+    options
+      .filter((candidate) => candidate.environmentLabel === option.environmentLabel)
+      .map((candidate) => candidate.environmentId),
+  ).size;
+  const environmentLabel =
+    sameEnvironmentLabelCount > 1
+      ? `${option.environmentLabel} (${option.environmentId})`
+      : option.environmentLabel;
+  return [
+    displayName,
+    sameNameCount > 1 ? `ID ${option.instanceId}` : null,
+    hasMultipleEnvironments ? environmentLabel : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+}
+
+function instanceOptionDetails(option: UsageInstanceOption): string | null {
+  const details = [
+    option.enabled ? null : "Disabled",
+    option.coverage === "unsupported"
+      ? "Usage not collected"
+      : option.coverage === "unavailable"
+        ? "Usage unavailable"
+        : null,
+    option.sharedWith.length > 0 ? `History shared with ${option.sharedWith.join(", ")}` : null,
+    option.message,
+  ].filter((detail): detail is string => detail !== null && detail.length > 0);
+  return details.length > 0 ? details.join(" · ") : null;
+}
+
+function instanceSelectionKey(selection: UsageInstanceSelection): string {
+  return JSON.stringify([selection.environmentId, selection.instanceId]);
+}
+
+function normalizeInstanceSelection(
+  current: readonly UsageInstanceSelection[] | undefined,
+  next: readonly string[],
+  options: readonly UsageInstanceOption[],
+): readonly UsageInstanceSelection[] | undefined {
+  const selectedOptions = options.filter((option) => next.includes(option.key));
+  const selected = selectedOptions.map(({ environmentId, instanceId }) => ({
+    environmentId,
+    instanceId,
+  }));
+  if (current === undefined) {
+    return selected.length > 0 ? selected : undefined;
+  }
+  return next.includes("all") || selected.length === 0 ? undefined : selected;
+}
+
+function UsageInstanceNotices({ notices }: { readonly notices: readonly string[] }) {
+  if (notices.length === 0) return null;
+  return (
+    <div
+      className="flex flex-col gap-1 rounded-md border border-border p-3 text-xs text-muted-foreground"
+      role="status"
+    >
+      {notices.map((notice) => (
+        <p key={notice}>{notice}</p>
+      ))}
+    </div>
+  );
+}
+
+function ModelBreakdownButton({
+  expanded,
+  model,
+  provider,
+  onClick,
+}: {
+  readonly expanded: boolean;
+  readonly model: string;
+  readonly provider: UsageProviderKind;
+  readonly onClick: () => void;
+}) {
+  const ChevronIcon = expanded ? ChevronDownIcon : ChevronRightIcon;
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      aria-label={`${expanded ? "Hide" : "Show"} details for ${PROVIDER_PRESENTATION[provider].label} ${model}`}
+      onClick={onClick}
+      className="flex min-w-0 items-center gap-2 rounded-sm text-left outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/70"
+    >
+      <ChevronIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+      <ProviderMark provider={provider} className="size-3.5" />
+      <span className="truncate">{model}</span>
+    </button>
+  );
+}
+
+function ModelUsageDetails({ model }: { readonly model: ModelTotals }) {
+  const totalInputTokens =
+    model.totals.uncachedInputTokens +
+    model.totals.cachedInputTokens +
+    model.totals.cacheCreationTokens;
+  const recordLabel = model.records === 1 ? "record" : "records";
+  const unpricedRecordLabel = model.unpricedRecords === 1 ? "record" : "records";
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
+        <Metric label="Ordinary input" value={formatTokens(model.totals.uncachedInputTokens)} />
+        <Metric
+          label="Cache reads"
+          value={formatTokens(model.totals.cachedInputTokens)}
+          detail={`${formatInputShare(model.totals.cachedInputTokens, totalInputTokens)} of input`}
+        />
+        <Metric
+          label="Cache writes"
+          value={formatTokens(model.totals.cacheCreationTokens)}
+          detail={`${formatInputShare(model.totals.cacheCreationTokens, totalInputTokens)} of input`}
+        />
+        <Metric label="Total input" value={formatTokens(totalInputTokens)} />
+        <Metric label="Output" value={formatTokens(model.totals.outputTokens)} />
+        <Metric
+          label="Reasoning output"
+          value={formatTokens(model.totals.reasoningTokens)}
+          detail="Subset of output"
+        />
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-border/50 pt-2 text-xs text-muted-foreground">
+        <span>
+          {formatCount(model.records)} {recordLabel}
+        </span>
+        <span>{formatUsd(model.cacheSavingsUsd)} cache savings</span>
+        {model.unpricedRecords > 0 ? (
+          <span>
+            {formatCount(model.unpricedRecords)} unpriced {unpricedRecordLabel}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function formatInputShare(tokens: number, totalInputTokens: number): string {
+  return totalInputTokens === 0 ? "—" : formatPercent(tokens / totalInputTokens);
+}
+
+function Metric({
+  label,
+  value,
+  detail,
+}: {
+  readonly label: string;
+  readonly value: string;
+  readonly detail?: string;
+}) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="text-base font-medium text-foreground tabular-nums">{value}</span>
+      {detail ? <span className="text-xs text-muted-foreground">{detail}</span> : null}
     </div>
   );
 }
@@ -682,15 +1015,34 @@ function UsageSkeleton() {
 
       <section className="flex flex-col gap-2">
         <h2 className="text-sm font-medium text-foreground">Totals</h2>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
-          {["Processed tokens", "Cached input", "Uncached input", "Output", "Cache savings"].map(
-            (label) => (
-              <div key={label} className="flex flex-col gap-0.5">
-                <span className="text-xs text-muted-foreground">{label}</span>
-                <Skeleton className="h-6 w-16" />
-              </div>
-            ),
-          )}
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-6">
+          {[
+            "Processed tokens",
+            "Cached input",
+            "Uncached input",
+            "Output",
+            "Cache savings",
+            "Cache percentage",
+          ].map((label) => (
+            <div key={label} className="flex flex-col gap-0.5">
+              <span className="text-xs text-muted-foreground">{label}</span>
+              <Skeleton className="h-6 w-16" />
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-3 lg:grid-cols-5">
+          {[
+            "Total input",
+            "Cache reads",
+            "Cache writes",
+            "Reasoning output",
+            "Unpriced records",
+          ].map((label) => (
+            <div key={label} className="flex flex-col gap-0.5">
+              <span className="text-xs text-muted-foreground">{label}</span>
+              <Skeleton className="h-6 w-16" />
+            </div>
+          ))}
         </div>
       </section>
 

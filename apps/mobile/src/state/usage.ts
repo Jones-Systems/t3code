@@ -17,7 +17,13 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
-import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
+import {
+  mergeUsage,
+  type EnvironmentUsage,
+  type UsageInstanceFilter,
+  type MergedUsage,
+  type UsageProviderFilter,
+} from "@t3tools/shared/usageMerge";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback, useMemo } from "react";
@@ -75,7 +81,11 @@ export interface UsageView {
   readonly refresh: () => void;
 }
 
-export function useUsage(input: UsageSummaryInput): UsageView {
+export function useUsage(
+  input: UsageSummaryInput,
+  providerFilter?: UsageProviderFilter,
+  instanceFilter?: UsageInstanceFilter,
+): UsageView {
   const windowKey = useMemo(
     () =>
       JSON.stringify({
@@ -85,6 +95,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
         resolution: input.resolution,
         sinceTime: input.sinceTime,
         untilTime: input.untilTime,
+        includeProviderInstances: true,
       }),
     [
       input.sinceDay,
@@ -106,7 +117,9 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   // its last daily fetch gets priced by the rescan. The rescan runs whether or
   // not the refetch succeeds: an offline environment still recounts tokens.
   const refresh = useCallback(() => {
-    const input = JSON.parse(windowKey) as UsageSummaryInput;
+    const input = JSON.parse(windowKey) as UsageSummaryInput & {
+      readonly includeProviderInstances: true;
+    };
     for (const environment of environments) {
       const { environmentId } = environment;
       const query = serverEnvironment.usageSummary({ environmentId, input });
@@ -131,8 +144,8 @@ export function useUsage(input: UsageSummaryInput): UsageView {
             },
           ],
     );
-    return mergeUsage(answered, USAGE_CONTRACT_VERSION);
-  }, [environments]);
+    return mergeUsage(answered, USAGE_CONTRACT_VERSION, providerFilter, instanceFilter);
+  }, [environments, providerFilter, instanceFilter]);
 
   const answeredCount = environments.filter((environment) => environment.summary !== null).length;
   const stillReporting = environments.filter(

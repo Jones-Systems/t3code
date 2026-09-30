@@ -15,10 +15,18 @@
 import * as NodeOS from "node:os";
 
 import {
+  ClaudeSettings,
+  CodexSettings,
+  GrokSettings,
+  ProviderInstanceId,
   USAGE_CONTRACT_VERSION,
+  resolveProviderInstanceEnabled,
+  type ProviderInstanceConfig,
+  type ServerSettings as ContractServerSettings,
   type UsageProviderKind,
   type UsageSource,
   type UsagePricing,
+  type UsageProviderInstance,
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
@@ -43,6 +51,7 @@ import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { deriveProviderInstanceConfigMap } from "../provider/providerInstanceConfigMap.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
@@ -95,6 +104,39 @@ const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
 
+const encodeSourceIdentity = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String, Schema.String, Schema.String])),
+);
+
+const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
+const decodeGrokSettings = Schema.decodeUnknownEffect(GrokSettings);
+
+interface ConfiguredTranscriptRoot {
+  readonly provider: UsageProviderKind;
+  readonly dir: string;
+  readonly fileName?: string;
+}
+
+interface ResolvedProviderInstance {
+  readonly descriptor: UsageProviderInstance;
+  readonly root?: ConfiguredTranscriptRoot;
+}
+
+const usageProviderForDriver = (driver: string): UsageProviderKind | undefined => {
+  if (driver === "claudeAgent") return "claude";
+  if (driver === "codex") return "codex";
+  if (driver === "grok") return "grok";
+  return undefined;
+};
+
+const providerDisplayName = (driver: string): string => {
+  if (driver === "claudeAgent") return "Claude";
+  if (driver === "opencode") return "OpenCode";
+  if (driver === "antigravity") return "Antigravity";
+  return driver.charAt(0).toUpperCase() + driver.slice(1);
+};
+
 export class UsageService extends Context.Service<
   UsageService,
   {
@@ -124,6 +166,7 @@ export const layerTest = Layer.succeed(
         untilDay: input.untilDay,
         buckets: [],
         sources: [],
+        ...(input.includeProviderInstances === true ? { providerInstances: [] } : {}),
         pricing: EMPTY_PRICING,
         scanDurationMs: 0,
       }),
@@ -232,11 +275,10 @@ export const make = Effect.gen(function* () {
       return nestedExists ? nested : path.join(homePath, "projects");
     });
 
-  /** Resolves the transcript directory for each provider. */
-  const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* () {
+  const readSettings = Effect.fn("UsageService.readSettings")(function* () {
     // A settings failure must surface as an error: swallowing it here would
     // present "zero usage from every provider" as a valid answer.
-    const settings = yield* settingsService.getSettings.pipe(
+    return yield* settingsService.getSettings.pipe(
       Effect.catchCause(
         (cause) =>
           new UsageReadError({
@@ -249,7 +291,11 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+  });
 
+  /** Resolves the three legacy transcript roots for clients that omit the instance roster. */
+  const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* () {
+    const settings = yield* readSettings();
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
     const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
@@ -270,6 +316,167 @@ export const make = Effect.gen(function* () {
         fileName: "updates.jsonl",
       },
     ];
+  });
+
+  const resolveConfiguredTranscriptRoots = Effect.fn(
+    "UsageService.resolveConfiguredTranscriptRoots",
+  )(function* (settings: ContractServerSettings) {
+    const configMap = deriveProviderInstanceConfigMap(settings);
+    const resolved: ResolvedProviderInstance[] = [];
+
+    const environmentValue = (entry: ProviderInstanceConfig, name: string): string => {
+      let value: string | undefined;
+      for (const variable of entry.environment ?? []) {
+        if (variable.name === name) value = variable.value;
+      }
+      return (value ?? hostEnvironment[name] ?? "").trim();
+    };
+
+    for (const [rawInstanceId, entry] of Object.entries(configMap)) {
+      const instanceId = ProviderInstanceId.make(rawInstanceId);
+      const displayName = entry.displayName ?? providerDisplayName(entry.driver);
+      const enabled = resolveProviderInstanceEnabled(entry);
+      const descriptor = (
+        coverage: UsageProviderInstance["coverage"],
+        message: string | null,
+      ): UsageProviderInstance => ({
+        instanceId,
+        driver: entry.driver,
+        displayName,
+        enabled,
+        coverage,
+        message,
+      });
+
+      const provider = usageProviderForDriver(entry.driver);
+      if (provider === undefined) {
+        resolved.push({
+          descriptor: descriptor(
+            "unsupported",
+            "Usage transcripts are not collected for this driver.",
+          ),
+        });
+        continue;
+      }
+
+      if (provider === "claude") {
+        const decoded = yield* decodeClaudeSettings(
+          entry.config === undefined ? {} : entry.config,
+        ).pipe(Effect.result);
+        if (decoded._tag === "Failure") {
+          resolved.push({
+            descriptor: descriptor(
+              "unavailable",
+              "Provider settings are invalid for usage scanning.",
+            ),
+          });
+          continue;
+        }
+
+        const configHomePath = decoded.success.homePath.trim();
+        let configDir: string;
+        if (configHomePath.length > 0) {
+          configDir = yield* resolveClaudeHomePath(decoded.success);
+        } else {
+          const environmentHome = environmentValue(entry, "CLAUDE_CONFIG_DIR");
+          if (environmentHome.length > 0) {
+            if (!path.isAbsolute(environmentHome)) {
+              resolved.push({
+                descriptor: descriptor(
+                  "unavailable",
+                  "The relative Claude config directory cannot be resolved without a workspace.",
+                ),
+              });
+              continue;
+            }
+            configDir = path.resolve(environmentHome);
+          } else {
+            configDir = NodeOS.homedir();
+          }
+        }
+
+        resolved.push({
+          descriptor: descriptor("supported", null),
+          root: { provider, dir: yield* resolveClaudeTranscriptDir(configDir) },
+        });
+        continue;
+      }
+
+      if (provider === "codex") {
+        const decoded = yield* decodeCodexSettings(
+          entry.config === undefined ? {} : entry.config,
+        ).pipe(Effect.result);
+        if (decoded._tag === "Failure") {
+          resolved.push({
+            descriptor: descriptor(
+              "unavailable",
+              "Provider settings are invalid for usage scanning.",
+            ),
+          });
+          continue;
+        }
+
+        const config = decoded.success;
+        const layout = yield* resolveCodexHomeLayout(config);
+        const configuredHome = config.homePath.trim().length > 0;
+        const shadowHome = config.shadowHomePath.trim().length > 0;
+        const environmentHome = environmentValue(entry, "CODEX_HOME");
+        let sharedHomePath: string;
+        if (configuredHome || shadowHome || environmentHome.length === 0) {
+          sharedHomePath = layout.sharedHomePath;
+        } else if (!path.isAbsolute(environmentHome)) {
+          resolved.push({
+            descriptor: descriptor(
+              "unavailable",
+              "The relative Codex home cannot be resolved without a workspace.",
+            ),
+          });
+          continue;
+        } else {
+          sharedHomePath = path.resolve(environmentHome);
+        }
+
+        resolved.push({
+          descriptor: descriptor("supported", null),
+          root: { provider, dir: path.join(sharedHomePath, "sessions") },
+        });
+        continue;
+      }
+
+      const decoded = yield* decodeGrokSettings(
+        entry.config === undefined ? {} : entry.config,
+      ).pipe(Effect.result);
+      if (decoded._tag === "Failure") {
+        resolved.push({
+          descriptor: descriptor(
+            "unavailable",
+            "Provider settings are invalid for usage scanning.",
+          ),
+        });
+        continue;
+      }
+
+      const environmentHome = environmentValue(entry, "GROK_HOME");
+      const expandedHome = environmentHome.length > 0 ? expandHomePath(environmentHome) : "";
+      if (expandedHome.length > 0 && !path.isAbsolute(expandedHome)) {
+        resolved.push({
+          descriptor: descriptor(
+            "unavailable",
+            "The relative Grok home cannot be resolved without a workspace.",
+          ),
+        });
+        continue;
+      }
+      const grokHome =
+        expandedHome.length > 0 ? path.resolve(expandedHome) : path.join(NodeOS.homedir(), ".grok");
+      resolved.push({
+        descriptor: descriptor("supported", null),
+        root: { provider, dir: path.join(grokHome, "sessions"), fileName: "updates.jsonl" },
+      });
+    }
+
+    resolved.sort((a, b) => a.descriptor.instanceId.localeCompare(b.descriptor.instanceId));
+    return resolved;
   });
 
   /**
@@ -368,18 +575,27 @@ export const make = Effect.gen(function* () {
       return tailRecords.length === 0 ? records : [...records, ...tailRecords];
     });
 
-  /** One provider directory's walk and parse, before rates are involved. */
+  /** One transcript root's walk and parse, before rates are involved. */
   interface ScannedDir {
     readonly provider: UsageProviderKind;
     readonly dir: string;
     readonly volumeId: string;
+    readonly sourceId?: string;
+    readonly instanceIds?: readonly ProviderInstanceId[];
     /** Parsed records per file, or `null` when the directory does not exist. */
     readonly files:
       | readonly { readonly path: string; readonly records: readonly UsageRecord[] }[]
       | null;
   }
 
-  const collectDirs = Effect.fn("UsageService.collectDirs")(function* (windowStartMs: number) {
+  interface DirectoryCollection {
+    readonly dirs: readonly ScannedDir[];
+    readonly providerInstances?: readonly UsageProviderInstance[];
+  }
+
+  const collectLegacyDirs = Effect.fn("UsageService.collectLegacyDirs")(function* (
+    windowStartMs: number,
+  ) {
     // The home resolvers ask for `Path` themselves; satisfy them from the
     // instance we already hold so the scan stays context-free.
     const dirs = yield* resolveTranscriptDirs().pipe(Effect.provideService(Path.Path, path));
@@ -403,7 +619,118 @@ export const make = Effect.gen(function* () {
       }
       scanned.push({ provider, dir, volumeId, files: parsedFiles });
     }
-    return scanned;
+    const collection: DirectoryCollection = { dirs: scanned };
+    return collection;
+  });
+
+  const collectConfiguredDirs = Effect.fn("UsageService.collectConfiguredDirs")(function* (
+    windowStartMs: number,
+  ) {
+    const resolved = yield* resolveConfiguredTranscriptRoots(yield* readSettings()).pipe(
+      Effect.provideService(Path.Path, path),
+    );
+    const descriptors = new Map(
+      resolved.map(({ descriptor }) => [descriptor.instanceId, descriptor] as const),
+    );
+    const hostId = NodeOS.hostname();
+    const groups = new Map<
+      string,
+      {
+        readonly provider: UsageProviderKind;
+        readonly dir: string;
+        readonly volumeId: string;
+        readonly exists: boolean;
+        readonly fileName?: string;
+        readonly instanceIds: ProviderInstanceId[];
+      }
+    >();
+
+    for (const instance of resolved) {
+      const root = instance.root;
+      if (root === undefined) continue;
+
+      const exists = yield* fileSystem
+        .exists(root.dir)
+        .pipe(Effect.catchCause(() => Effect.succeed(false)));
+      let dir = root.dir;
+      let volumeId = "";
+      if (exists) {
+        const canonical = yield* fileSystem.realPath(root.dir).pipe(Effect.result);
+        if (canonical._tag === "Failure") {
+          descriptors.set(instance.descriptor.instanceId, {
+            ...instance.descriptor,
+            coverage: "unavailable",
+            message: "The transcript root could not be resolved on this environment.",
+          });
+          continue;
+        }
+        dir = canonical.success;
+        volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+      }
+
+      const key = encodeSourceIdentity([hostId, root.provider, dir, volumeId]);
+      const existing = groups.get(key);
+      if (existing !== undefined) {
+        existing.instanceIds.push(instance.descriptor.instanceId);
+      } else {
+        groups.set(key, {
+          provider: root.provider,
+          dir,
+          volumeId,
+          exists,
+          ...(root.fileName === undefined ? {} : { fileName: root.fileName }),
+          instanceIds: [instance.descriptor.instanceId],
+        });
+      }
+    }
+
+    const orderedGroups = [...groups.entries()].sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+    const scanned: ScannedDir[] = [];
+    for (const [index, [, group]] of orderedGroups.entries()) {
+      const sourceId = `usage-source-${index + 1}`;
+      const instanceIds = group.instanceIds.sort((left, right) => left.localeCompare(right));
+      if (!group.exists) {
+        scanned.push({
+          provider: group.provider,
+          dir: group.dir,
+          volumeId: group.volumeId,
+          sourceId,
+          instanceIds,
+          files: null,
+        });
+        continue;
+      }
+
+      const files = yield* Effect.promise(() =>
+        listTranscriptFiles(
+          group.dir,
+          windowStartMs,
+          group.fileName === undefined ? undefined : { fileName: group.fileName },
+        ),
+      );
+      const parsedFiles: { path: string; records: readonly UsageRecord[] }[] = [];
+      for (const file of files) {
+        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, group.provider);
+        parsedFiles.push({ path: file.path, records });
+      }
+      scanned.push({
+        provider: group.provider,
+        dir: group.dir,
+        volumeId: group.volumeId,
+        sourceId,
+        instanceIds,
+        files: parsedFiles,
+      });
+    }
+
+    return {
+      dirs: scanned,
+      providerInstances: [...descriptors.values()].sort((a, b) =>
+        a.instanceId.localeCompare(b.instanceId),
+      ),
+    };
   });
 
   const scanSummary = Effect.fn("UsageService.scanSummary")(function* (input: UsageSummaryInput) {
@@ -455,26 +782,48 @@ export const make = Effect.gen(function* () {
     // Pricing only matters once records are aggregated, so the rate table
     // loads while transcripts stream instead of gating them: a cold rates
     // fetch on a slow network no longer delays the scan by its own timeout.
-    const [, scannedDirs] = yield* Effect.all([ensureRates(false), collectDirs(windowStartMs)], {
-      concurrency: 2,
-    });
-
-    const aggregator = new UsageAggregator({
+    const includeProviderInstances = input.includeProviderInstances === true;
+    const [, collection] = yield* Effect.all(
+      [
+        ensureRates(false),
+        includeProviderInstances
+          ? collectConfiguredDirs(windowStartMs)
+          : collectLegacyDirs(windowStartMs),
+      ],
+      { concurrency: 2 },
+    );
+    const scannedDirs = collection.dirs;
+    const aggregateOptions = {
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
       resolution: input.resolution ?? "day",
       ...hourlyWindow,
       rates,
-    });
+    };
+    const legacyAggregator = includeProviderInstances
+      ? undefined
+      : new UsageAggregator(aggregateOptions);
+    const sourceAggregators = new Map<string, UsageAggregator>();
+    if (includeProviderInstances) {
+      for (const { sourceId } of scannedDirs) {
+        if (sourceId !== undefined) {
+          sourceAggregators.set(sourceId, new UsageAggregator(aggregateOptions));
+        }
+      }
+    }
 
     const sources: UsageSource[] = [];
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
 
-    for (const { provider, dir, volumeId, files } of scannedDirs) {
+    for (const { provider, dir, volumeId, files, sourceId, instanceIds } of scannedDirs) {
+      const aggregator =
+        sourceId === undefined ? legacyAggregator! : sourceAggregators.get(sourceId)!;
       if (files === null) {
         sources.push({
+          ...(sourceId === undefined ? {} : { sourceId }),
+          ...(instanceIds === undefined ? {} : { instanceIds }),
           fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
           status: "missing",
           scannedFiles: 0,
@@ -510,6 +859,8 @@ export const make = Effect.gen(function* () {
       }
 
       sources.push({
+        ...(sourceId === undefined ? {} : { sourceId }),
+        ...(instanceIds === undefined ? {} : { instanceIds }),
         fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
         status: "ok",
         scannedFiles,
@@ -529,7 +880,17 @@ export const make = Effect.gen(function* () {
     if (pruned > 0) cacheDirty = true;
     yield* persistScanCache();
 
-    const aggregated = aggregator.finish();
+    const buckets = includeProviderInstances
+      ? scannedDirs.flatMap((dir) => {
+          if (dir.sourceId === undefined) return [];
+          const aggregator = sourceAggregators.get(dir.sourceId);
+          if (aggregator === undefined) return [];
+          return aggregator.finish().buckets.map((bucket) => ({
+            ...bucket,
+            sourceId: dir.sourceId,
+          }));
+        })
+      : (legacyAggregator?.finish().buckets ?? []);
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
 
@@ -539,8 +900,11 @@ export const make = Effect.gen(function* () {
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
-      buckets: aggregated.buckets,
+      buckets,
       sources,
+      ...(includeProviderInstances
+        ? { providerInstances: collection.providerInstances ?? [] }
+        : {}),
       pricing: pricing(),
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
     } satisfies UsageSummary;
@@ -561,6 +925,7 @@ export const make = Effect.gen(function* () {
       input.resolution ?? "day",
       input.sinceTime ?? null,
       input.untilTime ?? null,
+      input.includeProviderInstances === true,
     ]);
 
   const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {

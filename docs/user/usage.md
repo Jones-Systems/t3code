@@ -5,6 +5,26 @@ environments. It reads the providers' local session history and shows API-equiva
 processed tokens, cache savings, provider shares, and model breakdowns. Subscription billing is
 separate from the raw token cost shown here.
 
+Use the provider filter to select one or more configured entries from **Settings → Providers**.
+Names include instance IDs or environment labels when needed to distinguish entries. Choose
+**All providers** to return to the combined view; charts and provider shares still group activity by
+provider family. Disabled entries remain selectable so you can inspect their saved history. Entries
+without a usage collector remain visible and are marked **Usage not collected**. If an entry's usage
+history is unavailable, the page says so instead of showing its missing data as a measured zero.
+
+Some entries can share transcript history. The page explains when that applies; selecting either
+entry or both counts the shared source once. Older connected servers that do not provide instance
+details show a coverage notice. Their history remains in **All providers**, but cannot be isolated
+by entry.
+
+Expand a model row to see ordinary input, cache reads and writes, total input, output, reasoning
+output, cache shares, record counts, cache savings, and unpriced records. Cache read and write
+percentages use total input (ordinary input + cache reads + cache writes); reasoning output is
+included in output. These details use reported token counts. Usage collection currently covers
+Codex, Claude Code, and Grok Build; other configured providers may be shown without collected
+usage details. Providers may omit cache-write or reasoning details. The provider filter applies to
+historical usage only; Limits remains a separate live quota view.
+
 Grok Build totals come from persisted session updates. Interactive turns that never wrote a
 completed-turn record will not appear.
 
